@@ -232,7 +232,7 @@ def valid_report() -> dict[str, object]:
         "generated_at_utc": "2026-08-02T00:00:00+00:00",
         "server": {
             "pg_local_cache_port": 0,
-            "extension_version": "1.0.0",
+            "extension_version": "1.1.0",
             "server_version_num": 160014,
         },
         "stock_server": {
@@ -790,9 +790,9 @@ class ParserAndWorkloadTests(unittest.TestCase):
 
 
 class DatabaseContractTests(unittest.TestCase):
-    def test_discovery_requires_pg16_extension_and_port_zero(self) -> None:
+    def test_discovery_requires_expected_major_extension_and_port_zero(self) -> None:
         cfg = config()
-        discovery = "160014|1.0.0|0|app|16384|postgres|f"
+        discovery = "160014|1.1.0|0|app|16384|postgres|f"
         with mock.patch.object(
             sql_only, "psql", return_value=discovery
         ), mock.patch.object(sql_only, "read_stats", return_value=counters()):
@@ -801,8 +801,8 @@ class DatabaseContractTests(unittest.TestCase):
         self.assertEqual(result["cache_capacity"], 16_384)
 
         for bad, message in (
-            ("160014|1.0.0|6380|app|16384|postgres|f", "port=0"),
-            ("150014|1.0.0|0|app|16384|postgres|f", "PostgreSQL 16"),
+            ("160014|1.1.0|6380|app|16384|postgres|f", "port=0"),
+            ("150014|1.1.0|0|app|16384|postgres|f", "PostgreSQL 16"),
             ("160014||0|app|16384|postgres|f", "CREATE EXTENSION"),
         ):
             with self.subTest(bad=bad), mock.patch.object(

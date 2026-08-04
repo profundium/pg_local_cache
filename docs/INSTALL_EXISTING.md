@@ -1,15 +1,16 @@
 ---
 layout: doc
 title: Install on an existing PostgreSQL server
-description: Preflight, stage, restart, verify and roll back pg_local_cache on a PostgreSQL 16 cluster.
+description: Install pg_local_cache on PostgreSQL 14–18 Linux servers with direct latest downloads, preflight, rollback and one controlled restart.
 section: Existing database
 permalink: /docs/INSTALL_EXISTING.html
 ---
 
-# Installing pg_local_cache on an existing PostgreSQL server
+# Install pg_local_cache on an existing PostgreSQL server
 
 This guide installs `pg_local_cache` without replacing the database cluster or
-moving its data. It targets PostgreSQL 16 on Linux and one writable primary.
+moving its data. It targets PostgreSQL 14–18 on Linux amd64 and one writable
+primary.
 
 The installation has two phases:
 
@@ -22,8 +23,8 @@ The installation has two phases:
 The first installation cannot be completely restartless.
 `shared_preload_libraries` takes effect only at postmaster start, and
 `pg_local_cache` uses it to reserve shared memory and install hooks. This is a
-PostgreSQL constraint, not an installer choice. See the official PostgreSQL 16
-[shared library preloading documentation](https://www.postgresql.org/docs/16/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-PRELOAD).
+PostgreSQL constraint, not an installer choice. See the official PostgreSQL
+[shared library preloading documentation](https://www.postgresql.org/docs/current/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-PRELOAD).
 
 All preparation is online. The installer treats 30 seconds as a warning target,
 not an availability guarantee. Actual downtime depends on open sessions,
@@ -36,7 +37,8 @@ timeouts in its [server startup documentation](https://www.postgresql.org/docs/1
 
 Use the standalone installer only when all of these are true:
 
-- PostgreSQL server major version is exactly 16;
+- PostgreSQL server major version is 14, 15, 16, 17, or 18, and matches the
+  selected archive;
 - the database runs on Linux and you can write to the local PostgreSQL
   `pkglibdir` and extension directory;
 - you can connect locally as a PostgreSQL superuser;
@@ -48,29 +50,31 @@ Do not run the standalone configuration step against Patroni, a Kubernetes
 operator or a managed service. Those systems own PostgreSQL configuration and
 restart orchestration; use the dedicated sections below.
 
-The binary archive name includes `pg16-bookworm-amd64`. Use it only for
-PostgreSQL 16 on Debian 12/bookworm, amd64, and the matching glibc packaging.
-There is no universal Linux `.so`; use the source archive and a local PGXS
-build for a different distribution or architecture.
+Binary archive names include the PostgreSQL major and libc, for example
+`pg_local_cache-pg18-linux-glibc-amd64.tar.gz`. Use `glibc` on Debian, Ubuntu,
+RHEL-family and similar systems, and `musl` on Alpine. There is no universal
+Linux `.so`; use the source archive and local PGXS when the published binary
+does not match the target's major, libc, or architecture.
 
 ### Package requirements
 
 Both installation paths require local superuser access, `sha256sum`, `tar`,
-and the target server's `pg_config`. The download commands below use `gh`; the
-archive can instead be downloaded and verified on an administration host, then
-copied to the server.
+and the target server's `pg_config`. You can download and verify the archive on
+an administration host, then copy it to the server.
 
 | Archive | Additional requirements |
 |---|---|
-| `pg16-bookworm-amd64` binary | PostgreSQL 16 on Debian 12/bookworm amd64 with matching server paths; no compiler is needed. |
-| Source | GNU Make, a C compiler, PostgreSQL 16 PGXS, and matching server development headers. |
+| `pgN-linux-glibc-amd64` binary | PostgreSQL N on Linux amd64 with glibc; no compiler is needed. |
+| `pgN-linux-musl-amd64` binary | PostgreSQL N on Linux amd64 with musl; no compiler is needed. |
+| Source | GNU Make, a C compiler, matching PostgreSQL 14–18 PGXS, and server development headers. |
 
 For Debian or Ubuntu with the PostgreSQL packages already configured, the
 source toolchain is typically installed with:
 
 ```bash
 sudo apt-get update
-sudo apt-get install --yes build-essential postgresql-server-dev-16
+PG_MAJOR=18
+sudo apt-get install --yes build-essential "postgresql-server-dev-${PG_MAJOR}"
 ```
 
 Package names differ for PGDG, RPM-based distributions, and vendor builds. Use
@@ -78,35 +82,41 @@ the development package that supplies PGXS for the exact target server, then
 confirm its path:
 
 ```bash
-/usr/lib/postgresql/16/bin/pg_config --pgxs
+/usr/lib/postgresql/18/bin/pg_config --pgxs
 ```
 
 ## 1. Download and verify
 
-The commands below select the newest non-draft release, including a prerelease.
-Set `PGLC_RELEASE_TAG` to install a reviewed tag explicitly.
+Download the exact compatible asset through GitHub's `latest` redirect. This
+needs only `curl`; it does not need GitHub CLI, an API token, or the current tag:
 
 ```bash
-repository=profundium/pg_local_cache
-release_tag="${PGLC_RELEASE_TAG:-$(
-  gh api "repos/${repository}/releases" \
-    --jq '[.[] | select(.draft == false)][0].tag_name // empty'
-)}"
-test -n "$release_tag"
+PG_MAJOR=18
+LIBC=glibc # glibc or musl
+BASE=https://github.com/profundium/pg_local_cache/releases/latest/download
 
-gh release download "$release_tag" --repo "$repository"
-sha256sum --check SHA256SUMS
-
-tar -xzf pg_local_cache-*-source.tar.gz
-cd pg_local_cache-*-source
+curl -fLO "$BASE/pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
+curl -fLO "$BASE/SHA256SUMS"
 ```
 
-Set `PGLC_RELEASE_TAG` to a reviewed tag when automatic latest-release selection
-is not appropriate. To use the platform-labelled binary instead of source:
+For a local PGXS build, download
+`$BASE/pg_local_cache-source.tar.gz` instead.
+
+Verify the files you downloaded before extracting them. `--ignore-missing`
+skips the other assets listed in the release checksum file:
 
 ```bash
-tar -xzf pg_local_cache-*-pg16-bookworm-amd64.tar.gz
-cd pg_local_cache-*-pg16-bookworm-amd64
+sha256sum --check --ignore-missing --strict SHA256SUMS
+
+tar -xzf "pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
+cd "pg_local_cache-"*-"pg${PG_MAJOR}-linux-${LIBC}-amd64"
+```
+
+For a source build, extract the source archive instead:
+
+```bash
+tar -xzf pg_local_cache-source.tar.gz
+cd pg_local_cache-*-source
 ```
 
 The source archive exposes `scripts/install-existing.sh`; the binary archive
@@ -124,7 +134,7 @@ The default first deployment is SQL-only:
 sudo ./install.sh preflight \
   --database app \
   --mode sql-only \
-  --pg-config /usr/lib/postgresql/16/bin/pg_config
+  --pg-config /usr/lib/postgresql/18/bin/pg_config
 ```
 
 From a source archive, replace `./install.sh` with
@@ -173,7 +183,7 @@ WHERE error IS NOT NULL;
 sudo ./install.sh install \
   --database app \
   --mode sql-only \
-  --pg-config /usr/lib/postgresql/16/bin/pg_config
+  --pg-config /usr/lib/postgresql/18/bin/pg_config
 ```
 
 With `--restart-method none` (the default), this command does not interrupt the
@@ -216,7 +226,7 @@ Use your existing service manager for the restart, drain, and connection-pool
 handling:
 
 ```bash
-sudo systemctl restart postgresql@16-main
+sudo systemctl restart postgresql@18-main
 ```
 
 Then activate and verify:
@@ -239,7 +249,7 @@ sudo ./install.sh install \
   --database app \
   --mode sql-only \
   --restart-method systemd \
-  --systemd-unit postgresql@16-main \
+  --systemd-unit postgresql@18-main \
   --readiness-timeout 180 \
   --restart-goal-seconds 30
 ```
@@ -348,7 +358,7 @@ sudo ./install.sh install \
   --workers 4 \
   --token-file /etc/pg_local_cache/auth_token \
   --restart-method systemd \
-  --systemd-unit postgresql@16-main
+  --systemd-unit postgresql@18-main
 ```
 
 The token must be a non-symlink regular file owned by and readable by the
@@ -363,7 +373,7 @@ application-user ACL and RLS do not apply to RESP commands.
 
 ## Existing Docker volume
 
-Build the `extension` target from exactly the PostgreSQL 16 base image used by
+Build the `extension` target from exactly the matching PostgreSQL base image used by
 the current container:
 
 ```bash

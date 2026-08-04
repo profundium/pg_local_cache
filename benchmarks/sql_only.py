@@ -54,6 +54,7 @@ BENCHMARK_MODES = ("stock", "direct", "cached")
 CACHE_ENABLED_BY_MODE = {"stock": None, "direct": False, "cached": True}
 CUSTOM_SCAN_NAME = "Custom Scan (pg_local_cache_sql)"
 DEFAULT_MINIMUM_OPS = 10_000.0
+SUPPORTED_POSTGRES_MAJORS = frozenset(range(14, 19))
 SCALING_PRIMARY_CONCURRENCY = 16
 SCALING_PRIMARY_PIPELINE = 32
 SCALING_SECONDARY_CONCURRENCY = 4
@@ -119,6 +120,17 @@ def env_optional_float(
     if not os.environ.get(name, "").strip():
         return None
     return env_float(name, minimum, minimum, maximum)
+
+
+def postgres_major_from_environment() -> int:
+    raw = os.environ.get("POSTGRES_MAJOR", "16").strip()
+    try:
+        major = int(raw)
+    except ValueError as error:
+        raise ValueError("POSTGRES_MAJOR must be an integer") from error
+    if major not in SUPPORTED_POSTGRES_MAJORS:
+        raise ValueError("POSTGRES_MAJOR must be one of 14, 15, 16, 17, or 18")
+    return major
 
 
 def safe_connection_value(name: str, default: str) -> str:
@@ -806,9 +818,11 @@ def discover_server(config: Config) -> dict[str, Any]:
     if len(fields) != 7:
         raise RuntimeError(f"unexpected PostgreSQL discovery output: {output!r}")
     version_num, extension_version, cache_port, cache_database, capacity = fields[:5]
-    if int(version_num) // 10_000 != 16:
+    expected_major = postgres_major_from_environment()
+    if int(version_num) // 10_000 != expected_major:
         raise RuntimeError(
-            f"this pg_local_cache build requires PostgreSQL 16, got {version_num}"
+            "this pg_local_cache build requires PostgreSQL "
+            f"{expected_major}, got {version_num}"
         )
     if not extension_version:
         raise RuntimeError("CREATE EXTENSION pg_local_cache must be run first")

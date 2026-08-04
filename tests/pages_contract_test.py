@@ -14,6 +14,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASES_LATEST = "https://github.com/profundium/pg_local_cache/releases/latest"
 PUBLISHED_DOCUMENTS = (
     ROOT / "docs" / "INSTALL_EXISTING.md",
     ROOT / "docs" / "BENCHMARKS.md",
@@ -93,8 +94,8 @@ class PagesSourceContracts(unittest.TestCase):
             'LEFT JOIN "pglc_sql_bench_e407c3350a"."rows" AS '
             "pglc_source USING (id);"
         )
-        self.assertIn(stock_batch_command, source)
-        self.assertIn(
+        self.assertNotIn(stock_batch_command, source)
+        self.assertNotIn(
             "SELECT local_cache.mget("
             "'pglc_sql_bench_e407c3350a.rows'::regclass, "
             f"{key_array});",
@@ -115,9 +116,11 @@ class PagesSourceContracts(unittest.TestCase):
 
     def test_benchmark_pages_publish_only_current_api_results(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        homepage = (ROOT / "index.html").read_text(encoding="utf-8")
         benchmarks = (ROOT / "docs" / "BENCHMARKS.md").read_text(
             encoding="utf-8"
         )
+        compact_benchmarks = re.sub(r"\s+", "", benchmarks)
         readme_benchmarks = readme.split("## Benchmarks", 1)[1].split(
             "## Monitoring", 1
         )[0]
@@ -156,16 +159,26 @@ class PagesSourceContracts(unittest.TestCase):
             '"pglc_sql_bench_e407c3350a"."rows" AS pglc_source '
             "WHERE id = :key;"
         )
+        for command in commands:
+            self.assertIn(re.sub(r"\s+", "", command), compact_benchmarks)
+        for command in (
+            mget_command,
+            stock_batch_command,
+            scalar_get_command,
+            scalar_stock_command,
+        ):
+            self.assertIn(re.sub(r"\s+", "", command), compact_benchmarks)
+        throughput_commands = benchmarks.split("### SQL GET/MGET", 1)[1].split(
+            "Latency was measured", 1
+        )[0]
+        self.assertNotIn("| Lane | Exact throughput command |", throughput_commands)
+        self.assertEqual(throughput_commands.count("```sql"), 2)
+        for source in (readme, homepage):
+            self.assertNotIn(mget_command, source)
+            self.assertNotIn(stock_batch_command, source)
+        self.assertIn("./install.sh install", readme)
+
         for source in (readme_benchmarks, benchmarks):
-            for command in commands:
-                self.assertIn(command, source)
-            for command in (
-                mget_command,
-                stock_batch_command,
-                scalar_get_command,
-                scalar_stock_command,
-            ):
-                self.assertIn(command, source)
             self.assertIn("stock PostgreSQL", source)
             self.assertIn("30803546805", source)
             self.assertIn("fe2d23c", source)
@@ -183,6 +196,54 @@ class PagesSourceContracts(unittest.TestCase):
             '{"id":1,"tenant_id":7}',
             benchmarks,
         )
+
+    def test_public_pages_use_browser_release_downloads(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        homepage = (ROOT / "index.html").read_text(encoding="utf-8")
+        install = (ROOT / "docs" / "INSTALL_EXISTING.md").read_text(
+            encoding="utf-8"
+        )
+        public_sources = (readme, homepage) + tuple(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "docs").glob("*.md")
+        )
+        for source in public_sources:
+            self.assertNotRegex(source, r"(?m)^\s*(?:[$#]\s*)?gh(?:\s|$)")
+        for source in (readme, homepage, install):
+            self.assertIn(RELEASES_LATEST, source)
+        for marker in (
+            "SHA256SUMS",
+            "pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz",
+            "pg_local_cache-source.tar.gz",
+        ):
+            self.assertIn(marker, install)
+        for source in (readme, homepage, install):
+            self.assertIn("/releases/latest/download", source)
+
+    def test_pages_publish_supported_postgresql_and_linux_matrix(self) -> None:
+        sources = [
+            (ROOT / "index.html").read_text(encoding="utf-8"),
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+            (ROOT / "docs" / "INSTALL_EXISTING.md").read_text(
+                encoding="utf-8"
+            ),
+            (ROOT / "_layouts" / "default.html").read_text(
+                encoding="utf-8"
+            ),
+        ]
+        combined = "\n".join(sources)
+        self.assertIn("PostgreSQL 14–18", combined)
+        for major in range(14, 19):
+            self.assertIn(f'"PostgreSQL {major}"', sources[-1])
+        self.assertIn('"operatingSystem": "Linux amd64 (glibc or musl)"', combined)
+        self.assertIn("PostgreSQL 14–18", (ROOT / "_config.yml").read_text())
+
+    def test_published_assets_keep_only_current_benchmark_and_social_files(self) -> None:
+        self.assertTrue((ROOT / "assets" / "benchmark-evidence" / "fe2d23c").is_dir())
+        self.assertFalse((ROOT / "assets" / "benchmark-evidence" / "ee221410").exists())
+        self.assertTrue((ROOT / "assets" / "social-card.png").is_file())
+        self.assertFalse((ROOT / "assets" / "social-card.svg").exists())
+        self.assertTrue((ROOT / "assets" / "favicon.svg").is_file())
 
     def test_current_benchmark_evidence_is_complete_and_pinned(self) -> None:
         evidence = ROOT / "assets" / "benchmark-evidence" / "fe2d23c"

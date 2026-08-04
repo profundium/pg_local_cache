@@ -24,6 +24,7 @@ PGDATABASE = os.environ.get("PGDATABASE", "postgres")
 RESP_HOST = os.environ.get("PG_LOCAL_CACHE_RESP_HOST", "127.0.0.1")
 RESP_PORT = int(os.environ.get("PG_LOCAL_CACHE_RESP_PORT", "6380"))
 AUTH_TOKEN = os.environ.get("PG_LOCAL_CACHE_AUTH_TOKEN", "")
+POSTGRES_MAJOR = os.environ.get("POSTGRES_MAJOR", "16")
 
 # Prefer purpose-specific names, but accept the existing Docker smoke-test
 # writer variables so the test can be added to old runners without weakening
@@ -55,6 +56,8 @@ if not APP_PASSWORD:
     raise ValueError("PG_LOCAL_CACHE_TEST_APP_PASSWORD is required")
 if RESP_PORT != 0 and not AUTH_TOKEN:
     raise ValueError("PG_LOCAL_CACHE_AUTH_TOKEN is required")
+if POSTGRES_MAJOR not in {"14", "15", "16", "17", "18"}:
+    raise ValueError("POSTGRES_MAJOR must be one of 14, 15, 16, 17, or 18")
 
 
 class RespError(RuntimeError):
@@ -242,7 +245,7 @@ def main() -> None:
     client: RespClient | None = None
 
     server_version_num = int(admin_sql("SHOW server_version_num"))
-    assert server_version_num // 10000 == 16, server_version_num
+    assert server_version_num // 10000 == int(POSTGRES_MAJOR), server_version_num
 
     identity = app_sql(
         "SELECT current_user, session_user, rolcanlogin, rolsuper "

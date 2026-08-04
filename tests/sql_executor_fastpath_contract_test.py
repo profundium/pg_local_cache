@@ -10,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "src" / "pg_local_cache_sql.c").read_text(encoding="utf-8")
 CORE = (ROOT / "src" / "pg_local_cache.c").read_text(encoding="utf-8")
-INSTALL_SQL = (ROOT / "sql" / "pg_local_cache--1.0.0.sql").read_text(
+INSTALL_SQL = (ROOT / "sql" / "pg_local_cache--1.1.0.sql").read_text(
     encoding="utf-8"
 )
 
@@ -305,6 +305,22 @@ class SqlExecutorFastPathContracts(unittest.TestCase):
             "state->mapping.config_generation == pglc_config_generation()",
             can_use,
         )
+
+    def test_executor_uses_helpers_available_in_postgresql_14(self) -> None:
+        self.assertNotIn("list_copy_head", SOURCE)
+        self.assertNotIn("DatumGetItemPointer", SOURCE)
+        source_guard = c_function("pglc_sql_source_relation_allowed")
+        self.assertIn(
+            "getExtensionOfObject(NamespaceRelationId, namespace_oid)",
+            source_guard,
+        )
+        store = c_function("pglc_sql_maybe_store")
+        self.assertIn("ItemPointerCopy", store)
+
+    def test_postgresql_18_uses_split_explain_and_primary_key_apis(self) -> None:
+        self.assertIn('#include "commands/explain_format.h"', SOURCE)
+        self.assertIn("#if PG_VERSION_NUM >= 180000", SOURCE)
+        self.assertIn("RelationGetPrimaryKeyIndex(relation, false)", SOURCE)
 
 
 if __name__ == "__main__":

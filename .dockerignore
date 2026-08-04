@@ -6,6 +6,9 @@
 *.bc
 *.o
 *.so
+**/*.bc
+**/*.o
+**/*.so
 compile_commands.json
 core
 log

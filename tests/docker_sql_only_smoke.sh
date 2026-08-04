@@ -18,6 +18,17 @@ postgres_host_port="${POSTGRES_HOST_PORT:-$(
 database="pg_local_cache_sql_only"
 app_role="sql_only_app"
 app_password="SqlOnlyAppPassword_0123456789"
+postgres_major="${POSTGRES_MAJOR:-16}"
+postgres_variant="${POSTGRES_VARIANT:-bookworm}"
+
+case "$postgres_major" in
+    14|15|16|17|18) ;;
+    *) printf 'unsupported POSTGRES_MAJOR: %s\n' "$postgres_major" >&2; exit 1 ;;
+esac
+case "$postgres_variant" in
+    bookworm|alpine3.23) ;;
+    *) printf 'unsupported POSTGRES_VARIANT: %s\n' "$postgres_variant" >&2; exit 1 ;;
+esac
 
 compose() {
     docker compose \
@@ -116,6 +127,7 @@ PG_LOCAL_CACHE_RESP_PORT="0" \
 PG_LOCAL_CACHE_TEST_APP_ROLE="$app_role" \
 PG_LOCAL_CACHE_TEST_APP_PASSWORD="$app_password" \
 PG_LOCAL_CACHE_TEST_APP_HOST="127.0.0.1" \
+POSTGRES_MAJOR="$postgres_major" \
     python3 -B "${repository_directory}/tests/sql_fastpath_integration.py"
 
 sql_only_metrics="$(
@@ -168,6 +180,7 @@ docker run --rm \
     --env PGLC_SQL_ONLY_BENCH_STOCK_DATABASE="$database" \
     --env PGLC_SQL_ONLY_BENCH_STOCK_USER=postgres \
     --env PGLC_SQL_ONLY_BENCH_STOCK_PASSWORD=SqlOnlyPostgresPassword_0123456789 \
+    --env POSTGRES_MAJOR="$postgres_major" \
     --env PGLC_SQL_ONLY_BENCH_DURATION="${PGLC_SQL_ONLY_BENCH_DURATION:-1}" \
     --env PGLC_SQL_ONLY_BENCH_WARMUP_SECONDS="${PGLC_SQL_ONLY_BENCH_WARMUP_SECONDS:-0}" \
     --env PGLC_SQL_ONLY_BENCH_LATENCY_DURATION="${PGLC_SQL_ONLY_BENCH_LATENCY_DURATION:-}" \

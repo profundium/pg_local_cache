@@ -1,5 +1,5 @@
 comment = 'RESP2 row cache with transaction-aware invalidation'
-default_version = '1.0.0'
+default_version = '1.1.0'
 module_pathname = '$libdir/pg_local_cache'
 relocatable = false
 schema = local_cache

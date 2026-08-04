@@ -105,7 +105,8 @@ if (( port != 0 )); then
         || fail "auth token file must have mode 0600 (actual: ${token_mode})"
 
     auth_token="$(<"$token_file")"
-    [[ "$auth_token" =~ ^[A-Za-z0-9_-]{32,256}$ ]] \
+    (( ${#auth_token} >= 32 && ${#auth_token} <= 256 )) \
+        && [[ "$auth_token" != *[!A-Za-z0-9_-]* ]] \
         || fail "auth token must be 32-256 base64url characters"
 
     if [[ "$bind_address" != "127.0.0.1" && ${#auth_token} -lt 32 ]]; then

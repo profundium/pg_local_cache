@@ -8,7 +8,7 @@ import os
 import time
 
 from pipeline_integration import RespConnection as RespClient
-from pipeline_integration import sql, sql_identifier
+from pipeline_integration import sql, sql_commands, sql_identifier
 
 
 APP_ROLE = os.environ.get("PG_LOCAL_CACHE_TEST_APP_ROLE", "")
@@ -79,15 +79,15 @@ def assert_monitor_acl() -> None:
     wait_for_mapping_ready()
     quoted = sql_identifier(MONITOR_ROLE)
     try:
-        result = sql(
-            f"SET ROLE {quoted};"
+        result = sql_commands(
+            f"SET ROLE {quoted}",
             "SELECT (local_cache.health() ->> 'ready')::boolean, "
             "       (SELECT count(*) FROM local_cache.metrics()) = 1, "
             "       pg_catalog.jsonb_typeof(local_cache.stats()) = 'object', "
             "       pg_catalog.has_table_privilege("
-            "           current_user, 'local_cache.mapping', 'SELECT');"
-            "RESET ROLE"
-        ).splitlines()[0]
+            "           current_user, 'local_cache.mapping', 'SELECT')",
+            "RESET ROLE",
+        )
         assert result == "t|t|t|f", result
         app_acl = sql(
             "SELECT pg_catalog.has_schema_privilege("

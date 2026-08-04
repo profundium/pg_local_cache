@@ -1,21 +1,35 @@
 # syntax=docker/dockerfile:1.7
 
-ARG POSTGRES_IMAGE=postgres:16.14-bookworm
+ARG POSTGRES_MAJOR=16
+ARG POSTGRES_VARIANT=bookworm
 
-FROM ${POSTGRES_IMAGE} AS builder
+FROM postgres:${POSTGRES_MAJOR}-${POSTGRES_VARIANT} AS builder
 
-RUN postgres_version="$(postgres --version)" \
-    && case "$postgres_version" in \
-        *" 16."*) ;; \
-        *) printf 'pg_local_cache image requires PostgreSQL 16, got: %s\n' \
-            "$postgres_version" >&2; exit 1 ;; \
+ARG POSTGRES_MAJOR
+ARG POSTGRES_VARIANT
+
+RUN case "$POSTGRES_MAJOR" in \
+        14|15|16|17|18) ;; \
+        *) printf 'unsupported PostgreSQL major: %s\n' "$POSTGRES_MAJOR" >&2; exit 1 ;; \
+    esac \
+    && case "$POSTGRES_VARIANT" in \
+        bookworm|alpine3.23) ;; \
+        *) printf 'unsupported PostgreSQL variant: %s\n' "$POSTGRES_VARIANT" >&2; exit 1 ;; \
     esac
 
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends \
-        build-essential \
-        postgresql-server-dev-16 \
-    && rm -rf /var/lib/apt/lists/*
+RUN case "$POSTGRES_VARIANT" in \
+        bookworm) \
+            apt-get update \
+            && apt-get install --yes --no-install-recommends \
+                build-essential \
+                "postgresql-server-dev-${POSTGRES_MAJOR}" \
+            && rm -rf /var/lib/apt/lists/* \
+            && printf '%s\n' "/usr/lib/postgresql/${POSTGRES_MAJOR}/bin/pg_config" \
+                >/tmp/pg_config ;; \
+        alpine3.23) \
+            apk add --no-cache build-base \
+            && printf '%s\n' /usr/local/bin/pg_config >/tmp/pg_config ;; \
+    esac
 
 WORKDIR /build
 
@@ -23,21 +37,53 @@ COPY Makefile pg_local_cache.control ./
 COPY sql/ ./sql/
 COPY src/ ./src/
 
-RUN make -j"$(nproc)" PG_CONFIG="/usr/lib/postgresql/16/bin/pg_config" \
-    && make PG_CONFIG="/usr/lib/postgresql/16/bin/pg_config" \
-        DESTDIR=/stage install
+RUN pg_config="$(cat /tmp/pg_config)" \
+    && installed_version="$("$pg_config" --version)" \
+    && case "$installed_version" in \
+        "PostgreSQL ${POSTGRES_MAJOR}."*) ;; \
+        *) printf 'PostgreSQL major mismatch: expected %s, got: %s\n' \
+            "$POSTGRES_MAJOR" "$installed_version" >&2; exit 1 ;; \
+    esac \
+    && make PG_CONFIG="$pg_config" with_llvm=no clean \
+    && make -j"$(nproc)" PG_CONFIG="$pg_config" with_llvm=no \
+    && make PG_CONFIG="$pg_config" with_llvm=no DESTDIR=/stage install \
+    && install -d /stage/extension/lib /stage/extension/share/extension \
+    && install -m 0755 \
+        "/stage$($pg_config --pkglibdir)/pg_local_cache.so" \
+        /stage/extension/lib/pg_local_cache.so \
+    && install -m 0644 \
+        "/stage$($pg_config --sharedir)/extension/pg_local_cache.control" \
+        /stage/extension/share/extension/pg_local_cache.control \
+    && for sql_file in "/stage$($pg_config --sharedir)/extension/pg_local_cache--"*.sql; do \
+        install -m 0644 "$sql_file" /stage/extension/share/extension/; \
+    done
 
-FROM ${POSTGRES_IMAGE} AS extension
+FROM postgres:${POSTGRES_MAJOR}-${POSTGRES_VARIANT} AS extension
 
-COPY --from=builder \
-    /stage/usr/lib/postgresql/16/lib/pg_local_cache.so \
-    /usr/lib/postgresql/16/lib/pg_local_cache.so
-COPY --from=builder \
-    /stage/usr/share/postgresql/16/extension/pg_local_cache.control \
-    /usr/share/postgresql/16/extension/pg_local_cache.control
-COPY --from=builder \
-    /stage/usr/share/postgresql/16/extension/pg_local_cache--1.0.0.sql \
-    /usr/share/postgresql/16/extension/
+ARG POSTGRES_MAJOR
+ARG POSTGRES_VARIANT
+
+COPY --from=builder /stage/extension/ /tmp/pg_local_cache_extension/
+
+RUN case "$POSTGRES_VARIANT" in \
+        bookworm) \
+            pkglibdir="/usr/lib/postgresql/${POSTGRES_MAJOR}/lib"; \
+            sharedir="/usr/share/postgresql/${POSTGRES_MAJOR}" ;; \
+        alpine3.23) \
+            apk add --no-cache bash; \
+            pkglibdir=/usr/local/lib/postgresql; \
+            sharedir=/usr/local/share/postgresql ;; \
+    esac \
+    && install -d "$pkglibdir" "$sharedir/extension" \
+    && install -m 0755 /tmp/pg_local_cache_extension/lib/pg_local_cache.so \
+        "$pkglibdir/pg_local_cache.so" \
+    && install -m 0644 \
+        /tmp/pg_local_cache_extension/share/extension/pg_local_cache.control \
+        "$sharedir/extension/pg_local_cache.control" \
+    && for sql_file in /tmp/pg_local_cache_extension/share/extension/pg_local_cache--*.sql; do \
+        install -m 0644 "$sql_file" "$sharedir/extension/"; \
+    done \
+    && rm -rf /tmp/pg_local_cache_extension
 
 # The `extension` stage preserves the upstream PostgreSQL entrypoint and adds
 # only the extension files. The `runtime` stage adds this repository's

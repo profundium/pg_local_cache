@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SQL = (ROOT / "sql" / "pg_local_cache--1.0.0.sql").read_text()
+SQL = (ROOT / "sql" / "pg_local_cache--1.1.0.sql").read_text()
 
 
 def sql_function(name: str) -> str:

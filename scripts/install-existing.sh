@@ -8,7 +8,8 @@ readonly script_directory="$(
 )"
 
 if [[ -f "${script_directory}/pg_local_cache.control" ||
-      -f "${script_directory}/usr/share/postgresql/16/extension/pg_local_cache.control" ]]; then
+      -f "${script_directory}/share/extension/pg_local_cache.control" ||
+      -f "${script_directory}/RELEASE-METADATA" ]]; then
     readonly release_root="$script_directory"
 else
     readonly release_root="$(cd -- "${script_directory}/.." && pwd -P)"
@@ -52,10 +53,11 @@ extension_was_configured=false
 active_preload=""
 current_resp_workers=0
 configured_resp_workers=0
+binary_release_version=""
 
 usage() {
     cat <<'EOF'
-Install pg_local_cache into an existing local PostgreSQL 16 cluster.
+Install pg_local_cache into an existing local PostgreSQL 14-18 cluster.
 
 Usage:
   install-existing.sh preflight [options]
@@ -71,7 +73,7 @@ Connection and target:
   --database NAME               database served by pg_local_cache
   --worker-role NAME            dedicated PostgreSQL role
   --postgres-os-user NAME       operating-system postmaster owner
-  --pg-config PATH              pg_config for the target PostgreSQL 16
+  --pg-config PATH              pg_config for target PostgreSQL 14-18
   --psql PATH                   psql client
 
 Mode and sizing:
@@ -102,7 +104,7 @@ Examples:
   sudo ./install-existing.sh preflight --database app --mode sql-only
   sudo ./install-existing.sh install --database app --mode sql-only
   sudo ./install-existing.sh install --database app --mode sql-only \
-    --restart-method systemd --systemd-unit postgresql@16-main
+    --restart-method systemd --systemd-unit postgresql@18-main
 
 The first installation cannot be activated with pg_reload_conf(): PostgreSQL
 must start pg_local_cache through shared_preload_libraries. For Patroni,
@@ -150,6 +152,84 @@ require_identifier() {
     local value="$2"
     [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_\$]{0,62}$ ]] \
         || fail "$name must be an unquoted PostgreSQL identifier"
+}
+
+detect_linux_architecture() {
+    local machine
+    machine="$(uname -m)"
+    case "$machine" in
+        x86_64 | amd64) printf 'amd64\n' ;;
+        *) printf '%s\n' "$machine" ;;
+    esac
+}
+
+detect_linux_libc() {
+    local reported
+    if command -v getconf >/dev/null 2>&1 &&
+       reported="$(getconf GNU_LIBC_VERSION 2>/dev/null)" &&
+       [[ "$reported" == glibc\ * ]]; then
+        printf 'glibc\n'
+        return
+    fi
+    reported="$(ldd --version 2>&1 || true)"
+    if [[ "${reported,,}" == *musl* ]]; then
+        printf 'musl\n'
+        return
+    fi
+    fail "could not identify target libc as glibc or musl"
+}
+
+validate_binary_release() {
+    local target_major="$1"
+    local metadata="${release_root}/RELEASE-METADATA"
+    local packaged_lib="${release_root}/lib/pg_local_cache.so"
+    local key value seen='|'
+    local format='' version='' postgres_major='' os='' libc=''
+    local architecture='' commit='' build_image=''
+
+    if [[ ! -f "$metadata" ]]; then
+        [[ ! -f "$packaged_lib" ]] \
+            || fail "binary release is missing RELEASE-METADATA"
+        return
+    fi
+    [[ -f "$packaged_lib" ]] \
+        || fail "RELEASE-METADATA exists but lib/pg_local_cache.so is missing"
+
+    while IFS='=' read -r key value || [[ -n "$key$value" ]]; do
+        [[ -n "$key" && "$key" != \#* && "$key" != *[[:space:]]* ]] \
+            || fail "RELEASE-METADATA contains a malformed key"
+        [[ "$seen" != *"|${key}|"* ]] \
+            || fail "RELEASE-METADATA repeats key: $key"
+        seen+="${key}|"
+        case "$key" in
+            format) format="$value" ;;
+            version) version="$value" ;;
+            postgres_major) postgres_major="$value" ;;
+            os) os="$value" ;;
+            libc) libc="$value" ;;
+            architecture) architecture="$value" ;;
+            commit) commit="$value" ;;
+            build_image) build_image="$value" ;;
+            *) fail "RELEASE-METADATA contains unknown key: $key" ;;
+        esac
+    done < "$metadata"
+
+    [[ "$format" == "1" ]] || fail "binary release metadata format must be 1"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || fail "binary release metadata has an invalid version"
+    [[ "$postgres_major" == "$target_major" ]] \
+        || fail "binary targets PostgreSQL $postgres_major, but pg_config targets $target_major"
+    [[ "$os" == "linux" && "$(uname -s)" == "Linux" ]] \
+        || fail "binary targets $os, but this installer supports it only on Linux"
+    [[ "$architecture" == "$(detect_linux_architecture)" ]] \
+        || fail "binary architecture $architecture does not match $(detect_linux_architecture)"
+    [[ "$libc" == "$(detect_linux_libc)" ]] \
+        || fail "binary libc $libc does not match $(detect_linux_libc)"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] \
+        || fail "binary release metadata has an invalid commit"
+    [[ -n "$build_image" ]] \
+        || fail "binary release metadata is missing build_image"
+    binary_release_version="$version"
 }
 
 run_as_postgres() {
@@ -291,18 +371,24 @@ preflight() {
     id "$postgres_os_user" >/dev/null 2>&1 \
         || fail "operating-system user does not exist: $postgres_os_user"
 
-    local local_version server_version is_superuser is_primary
+    local local_version local_major server_version server_major
+    local is_superuser is_primary
     local local_pkglib local_share server_pkglib server_share config_errors
     local configured_preload configured_max_workers active_port active_workers
     local configured_port configured_workers reserved_resp_workers
 
     local_version="$($pg_config_bin --version)"
-    [[ "$local_version" == "PostgreSQL 16."* ]] \
-        || fail "pg_config must target PostgreSQL 16 (actual: $local_version)"
+    [[ "$local_version" =~ ^PostgreSQL[[:space:]]+(14|15|16|17|18)\. ]] \
+        || fail "pg_config must target PostgreSQL 14-18 (actual: $local_version)"
+    local_major="${BASH_REMATCH[1]}"
 
     server_version="$(psql_scalar "SHOW server_version_num")"
-    [[ "$server_version" =~ ^16[0-9]{4}$ ]] \
-        || fail "server must be PostgreSQL 16 (server_version_num=$server_version)"
+    [[ "$server_version" =~ ^(14|15|16|17|18)[0-9]{4}$ ]] \
+        || fail "server must be PostgreSQL 14-18 (server_version_num=$server_version)"
+    server_major="${BASH_REMATCH[1]}"
+    [[ "$server_major" == "$local_major" ]] \
+        || fail "pg_config PostgreSQL $local_major does not match server PostgreSQL $server_major"
+    validate_binary_release "$local_major"
     is_superuser="$(psql_scalar "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = CURRENT_USER")"
     [[ "$is_superuser" == "t" ]] \
         || fail "installer connection must use a PostgreSQL superuser"
@@ -433,15 +519,15 @@ create_state_backup() {
 
 locate_release_files() {
     local packaged_lib packaged_share stage
-    packaged_lib="${release_root}/usr/lib/postgresql/16/lib/pg_local_cache.so"
-    packaged_share="${release_root}/usr/share/postgresql/16/extension"
+    packaged_lib="${release_root}/lib/pg_local_cache.so"
+    packaged_share="${release_root}/share/extension"
     if [[ -f "$packaged_lib" && -f "$packaged_share/pg_local_cache.control" ]]; then
         printf '%s\n%s\n' "$packaged_lib" "$packaged_share"
         return
     fi
 
     [[ -f "$release_root/Makefile" && -d "$release_root/src" ]] \
-        || fail "release contains neither packaged PG16 files nor buildable source"
+        || fail "release contains neither compatible binary files nor buildable source"
     require_command make
     temporary_directory="$(mktemp -d -t pg_local_cache_install.XXXXXX)"
     stage="${temporary_directory}/stage"
@@ -485,6 +571,7 @@ install_extension_files() {
         return
     fi
     local paths source_lib source_share target_lib target_share version
+    local source_sql sql_name sql_label sql_count=0
     mapfile -t paths < <(locate_release_files)
     source_lib="${paths[0]}"
     source_share="${paths[1]}"
@@ -493,6 +580,10 @@ install_extension_files() {
     version="$(sed -n "s/^default_version = '\([^']*\)'$/\1/p" "$source_share/pg_local_cache.control")"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || fail "control file has an invalid default_version"
+    if [[ -n "$binary_release_version" ]]; then
+        [[ "$version" == "$binary_release_version" ]] \
+            || fail "binary metadata version $binary_release_version does not match control version $version"
+    fi
     [[ -f "$source_share/pg_local_cache--${version}.sql" ]] \
         || fail "release SQL file is missing for version $version"
 
@@ -505,8 +596,17 @@ install_extension_files() {
     backup_and_install_file "$source_lib" "$target_lib" 0755 extension_so
     backup_and_install_file "$source_share/pg_local_cache.control" \
         "$target_share/pg_local_cache.control" 0644 extension_control
-    backup_and_install_file "$source_share/pg_local_cache--${version}.sql" \
-        "$target_share/pg_local_cache--${version}.sql" 0644 extension_sql
+    for source_sql in "$source_share"/pg_local_cache--*.sql; do
+        [[ -f "$source_sql" ]] || continue
+        sql_name="${source_sql##*/}"
+        [[ "$sql_name" =~ ^pg_local_cache--[0-9]+\.[0-9]+\.[0-9]+(--[0-9]+\.[0-9]+\.[0-9]+)?\.sql$ ]] \
+            || fail "release contains an invalid extension SQL filename: $sql_name"
+        sql_label="extension_sql_${sql_name//[^A-Za-z0-9]/_}"
+        backup_and_install_file "$source_sql" \
+            "$target_share/$sql_name" 0644 "$sql_label"
+        sql_count=$((sql_count + 1))
+    done
+    ((sql_count > 0)) || fail "release contains no extension SQL files"
 }
 
 ensure_worker_role() {

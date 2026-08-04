@@ -22,12 +22,13 @@ HEADER = (ROOT / "src" / "pg_local_cache.h").read_text(encoding="utf-8")
 SQL_FASTPATH = (ROOT / "src" / "pg_local_cache_sql.c").read_text(
     encoding="utf-8"
 )
-INSTALL_SQL = (ROOT / "sql" / "pg_local_cache--1.0.0.sql").read_text(
+INSTALL_SQL = (ROOT / "sql" / "pg_local_cache--1.1.0.sql").read_text(
     encoding="utf-8"
 )
 ENTRYPOINT = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
 HEALTHCHECK = (ROOT / "docker" / "healthcheck.sh").read_text(encoding="utf-8")
 SQL_ONLY_COMPOSE = (ROOT / "compose.sql-only.yaml").read_text(encoding="utf-8")
+COMPOSE = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 
 
 def c_function(source: str, name: str) -> str:
@@ -437,7 +438,11 @@ class CacheOwnershipSourceTests(unittest.TestCase):
         self.assertIn('strncmp(namespace_name, "pg_", 3)', source)
         self.assertIn('strcmp(namespace_name, "information_schema")', source)
         self.assertIn('strcmp(namespace_name, "local_cache")', source)
-        self.assertIn("get_extension_schema(extension_oid)", source)
+        self.assertIn('get_extension_oid("pg_local_cache", true)', source)
+        self.assertIn(
+            "getExtensionOfObject(NamespaceRelationId, namespace_oid) == extension_oid",
+            source,
+        )
         self.assertIn(
             "getExtensionOfObject(RelationRelationId,", source
         )
@@ -594,6 +599,14 @@ class CacheOwnershipSourceTests(unittest.TestCase):
         )
         self.assertIn("worker_retry_generation = 0;", reload_mappings)
 
+    def test_mapping_reload_takes_the_final_plan_lock_without_an_upgrade(self) -> None:
+        reload_mappings = c_function(WORKER, "reload_mappings")
+        lock_at = reload_mappings.index(
+            "mapping->writable ? RowExclusiveLock : AccessShareLock"
+        )
+        plan_at = reload_mappings.index("prepare_kept_plan(", lock_at)
+        self.assertLess(lock_at, plan_at)
+
     def test_mapping_health_tracks_every_worker_generation(self) -> None:
         self.assertIn("#define PGLC_MAX_WORKERS 32", HEADER)
         self.assertIn(
@@ -740,6 +753,10 @@ class SqlOnlyContainerSourceTests(unittest.TestCase):
         self.assertNotIn("pg_local_cache_auth_token", SQL_ONLY_COMPOSE)
         self.assertNotIn(":6380", SQL_ONLY_COMPOSE)
         self.assertIn("postgres_password", SQL_ONLY_COMPOSE)
+
+    def test_compose_pins_pgdata_across_postgresql_14_through_18(self) -> None:
+        for compose in (COMPOSE, SQL_ONLY_COMPOSE):
+            self.assertIn("PGDATA: /var/lib/postgresql/data", compose)
 
 
 if __name__ == "__main__":

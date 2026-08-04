@@ -22,7 +22,7 @@ WORKER = (ROOT / "src" / "pg_local_cache_worker.c").read_text(
     encoding="utf-8"
 )
 HEADER = (ROOT / "src" / "pg_local_cache.h").read_text(encoding="utf-8")
-INSTALL_SQL = (ROOT / "sql" / "pg_local_cache--1.0.0.sql").read_text(
+INSTALL_SQL = (ROOT / "sql" / "pg_local_cache--1.1.0.sql").read_text(
     encoding="utf-8"
 )
 ENTRYPOINT = (ROOT / "docker" / "entrypoint.sh").read_text(
@@ -354,6 +354,7 @@ class MonitoringInterfaceSourceTests(unittest.TestCase):
             ROOT / "tests" / "oom_monitoring_integration.py"
         ).read_text()
         self.assertIn("from pipeline_integration import", integration)
+        self.assertIn("sql_commands", integration)
         self.assertNotIn("from integration import", integration)
         self.assertIn("wait_for_mapping_ready()", integration)
         self.assertIn("transactional ACL reload", integration)

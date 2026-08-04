@@ -1,5 +1,5 @@
 title: pg_local_cache
-description: A bounded whole-row primary-key cache inside PostgreSQL with ordinary SQL and transaction-aware invalidation.
+description: PostgreSQL 14–18 extension for bounded primary-key caching with ordinary SQL and transaction-aware invalidation.
 url: https://profundium.github.io
 baseurl: /pg_local_cache
 repository: profundium/pg_local_cache

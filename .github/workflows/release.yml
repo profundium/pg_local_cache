@@ -1,4 +1,4 @@
-name: Release PostgreSQL 16 artifacts
+name: Release PostgreSQL 14-18 Linux artifacts
 
 on:
   workflow_run:
@@ -13,9 +13,6 @@ permissions:
 concurrency:
   group: pg_local_cache-release
   cancel-in-progress: false
-
-env:
-  POSTGRES_IMAGE: postgres:16.14-bookworm
 
 jobs:
   metadata:
@@ -66,10 +63,7 @@ jobs:
 
           sha="$(git rev-parse HEAD)"
           [[ "$sha" == "$TARGET_SHA" ]]
-
-          master_sha="$(
-            gh api "repos/${GITHUB_REPOSITORY}/commits/master" --jq .sha
-          )"
+          master_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/master" --jq .sha)"
           [[ "$sha" == "$master_sha" ]] || {
             echo "::error::Release candidate is no longer the tip of master"
             exit 1
@@ -89,11 +83,9 @@ jobs:
           stable_tag="v${version}"
           short_sha="${sha:0:12}"
           commit_tag="master-${short_sha}"
-
           test -f "sql/pg_local_cache--${version}.sql"
-          grep -Fq "pg_local_cache--${version}.sql" Dockerfile
-          grep -Fq "pg_local_cache_version:${version}" \
-            src/pg_local_cache_worker.c
+          grep -Fq 'pg_local_cache--' Dockerfile
+          grep -Fq "pg_local_cache_version:${version}" src/pg_local_cache_worker.c
 
           stable_sha=""
           if resolved_stable_sha="$(
@@ -105,7 +97,7 @@ jobs:
           stable_publishable=true
           if [[ -n "$stable_sha" && "$stable_sha" != "$sha" ]]; then
             stable_publishable=false
-            echo "::notice::${stable_tag} already belongs to ${stable_sha}; this commit will publish only ${commit_tag}"
+            echo "::notice::${stable_tag} already belongs to ${stable_sha}; publishing only ${commit_tag}"
           fi
 
           workflow_run_id="$TRIGGER_RUN_ID"
@@ -131,10 +123,108 @@ jobs:
             echo "workflow_run_id=${workflow_run_id}"
           } >> "$GITHUB_OUTPUT"
 
-  package:
+  binary:
     needs: metadata
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres_major: [14, 15, 16, 17, 18]
+        target:
+          - variant: bookworm
+            libc: glibc
+          - variant: alpine3.23
+            libc: musl
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+      RELEASE_SHA: ${{ needs.metadata.outputs.sha }}
+      POSTGRES_MAJOR: ${{ matrix.postgres_major }}
+      POSTGRES_VARIANT: ${{ matrix.target.variant }}
+      LIBC: ${{ matrix.target.libc }}
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build and verify binary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          image="pg_local_cache-release:pg${POSTGRES_MAJOR}-${LIBC}-${RELEASE_SHA}"
+          docker build \
+            --platform linux/amd64 \
+            --target extension \
+            --build-arg "POSTGRES_MAJOR=${POSTGRES_MAJOR}" \
+            --build-arg "POSTGRES_VARIANT=${POSTGRES_VARIANT}" \
+            --tag "$image" \
+            .
+
+          reported="$(docker run --rm --entrypoint postgres "$image" --version)"
+          [[ "$reported" == *" ${POSTGRES_MAJOR}."* ]]
+          pkglibdir="$(docker run --rm --entrypoint /bin/sh "$image" -ec 'pg_config --pkglibdir')"
+          docker run --rm --entrypoint /bin/sh "$image" -ec \
+            "ldd '${pkglibdir}/pg_local_cache.so'"
+
+      - name: Assemble deterministic binary archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          image="pg_local_cache-release:pg${POSTGRES_MAJOR}-${LIBC}-${RELEASE_SHA}"
+          asset="pg_local_cache-pg${POSTGRES_MAJOR}-linux-${LIBC}-amd64"
+          root="release-stage/pg_local_cache-${VERSION}-pg${POSTGRES_MAJOR}-linux-${LIBC}-amd64"
+          install -d "$root/lib" "$root/share/extension" "$root/docs" dist extracted
+
+          pkglibdir="$(docker run --rm --entrypoint /bin/sh "$image" -ec 'pg_config --pkglibdir')"
+          sharedir="$(docker run --rm --entrypoint /bin/sh "$image" -ec 'pg_config --sharedir')"
+          container="$(docker create "$image")"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker cp "${container}:${pkglibdir}/pg_local_cache.so" "$root/lib/"
+          docker cp "${container}:${sharedir}/extension/." extracted/
+          install -m 0644 extracted/pg_local_cache.control "$root/share/extension/"
+          find extracted -maxdepth 1 -type f -name 'pg_local_cache--*.sql' \
+            -exec install -m 0644 {} "$root/share/extension/" \;
+
+          install -m 0755 scripts/install-existing.sh "$root/install.sh"
+          install -m 0644 README.md LICENSE "$root/"
+          install -m 0644 \
+            docs/INSTALL_EXISTING.md docs/BENCHMARKS.md \
+            docs/MONITORING.md docs/TECHNICAL.md "$root/docs/"
+          {
+            printf 'format=1\n'
+            printf 'version=%s\n' "$VERSION"
+            printf 'postgres_major=%s\n' "$POSTGRES_MAJOR"
+            printf 'os=linux\n'
+            printf 'libc=%s\n' "$LIBC"
+            printf 'architecture=amd64\n'
+            printf 'commit=%s\n' "$RELEASE_SHA"
+            printf 'build_image=postgres:%s-%s\n' "$POSTGRES_MAJOR" "$POSTGRES_VARIANT"
+          } > "$root/RELEASE-METADATA"
+
+          epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
+          find release-stage -exec touch -h -d "@${epoch}" {} +
+          tar \
+            --sort=name --format=posix \
+            --pax-option=delete=atime,delete=ctime \
+            --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
+            -C release-stage -cf - "$(basename "$root")" |
+            gzip -n -9 > "dist/${asset}.tar.gz"
+
+      - name: Upload binary lane
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binary-pg${{ matrix.postgres_major }}-${{ matrix.target.libc }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    needs: [metadata, binary]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
@@ -152,141 +242,48 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate packaging inputs
+      - name: Download all binary lanes
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: Validate source and create source archive
+        shell: bash
         run: |
           set -Eeuo pipefail
+          test "$(find dist -maxdepth 1 -name 'pg_local_cache-pg*-linux-*-amd64.tar.gz' | wc -l)" -eq 10
           test -x scripts/install-existing.sh
-          test -f docs/INSTALL_EXISTING.md
-          test -f docs/BENCHMARKS.md
-          test -f docs/TECHNICAL.md
           bash -n scripts/install-existing.sh
           make source-test source-sanitize benchmark-test
 
-      - name: Build PostgreSQL 16 Debian 12 amd64 binary
+          source_root="pg_local_cache-${VERSION}-source"
+          git archive --format=tar --prefix="${source_root}/" "$RELEASE_SHA" |
+            gzip -n -9 > dist/pg_local_cache-source.tar.gz
+
+      - name: Preserve benchmark evidence from successful CI
         shell: bash
         run: |
           set -Eeuo pipefail
-          image="pg_local_cache-release:${RELEASE_SHA}"
-          docker build \
-            --platform linux/amd64 \
-            --target extension \
-            --build-arg "POSTGRES_IMAGE=${POSTGRES_IMAGE}" \
-            --tag "$image" \
-            .
-
-          reported_version="$(
-            docker run --rm --entrypoint postgres "$image" --version
-          )"
-          [[ "$reported_version" == *" 16."* ]]
-          docker run --rm --entrypoint /bin/sh "$image" -ec \
-            'ldd /usr/lib/postgresql/16/lib/pg_local_cache.so'
-
-      - name: Assemble deterministic source and binary archives
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p dist release-stage
-
-          source_name="pg_local_cache-${VERSION}-source"
-          git archive \
-            --format=tar \
-            --prefix="${source_name}/" \
-            "$RELEASE_SHA" |
-            gzip -n -9 > "dist/${source_name}.tar.gz"
-
-          binary_name="pg_local_cache-${VERSION}-pg16-bookworm-amd64"
-          root="release-stage/${binary_name}"
-          install -d \
-            "$root/usr/lib/postgresql/16/lib" \
-            "$root/usr/share/postgresql/16/extension" \
-            "$root/docs" \
-            "$root/benchmarks" \
-            "$root/monitoring"
-
-          image="pg_local_cache-release:${RELEASE_SHA}"
-          container="$(docker create "$image")"
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-
-          docker cp \
-            "${container}:/usr/lib/postgresql/16/lib/pg_local_cache.so" \
-            "$root/usr/lib/postgresql/16/lib/"
-          docker cp \
-            "${container}:/usr/share/postgresql/16/extension/pg_local_cache.control" \
-            "$root/usr/share/postgresql/16/extension/"
-          docker cp \
-            "${container}:/usr/share/postgresql/16/extension/pg_local_cache--${VERSION}.sql" \
-            "$root/usr/share/postgresql/16/extension/"
-
-          install -m 0755 scripts/install-existing.sh "$root/install.sh"
-          install -m 0644 README.md LICENSE "$root/"
-          install -m 0644 \
-            docs/INSTALL_EXISTING.md \
-            docs/BENCHMARKS.md \
-            docs/MONITORING.md \
-            docs/TECHNICAL.md \
-            "$root/docs/"
-          install -m 0644 benchmarks/SCENARIOS.md "$root/benchmarks/"
-          install -m 0644 monitoring/README.md "$root/monitoring/"
-
-          {
-            printf 'version=%s\n' "$VERSION"
-            printf 'commit=%s\n' "$RELEASE_SHA"
-            printf 'postgres_major=16\n'
-            printf 'platform=linux/amd64\n'
-            printf 'distribution=debian12-bookworm\n'
-            printf 'build_image=%s\n' "$POSTGRES_IMAGE"
-          } > "$root/RELEASE-METADATA"
-
-          epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
-          find release-stage -exec touch -h -d "@${epoch}" {} +
-          tar \
-            --sort=name \
-            --format=posix \
-            --pax-option=delete=atime,delete=ctime \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            --mtime="@${epoch}" \
-            -C release-stage \
-            -cf - \
-            "$binary_name" |
-            gzip -n -9 > "dist/${binary_name}.tar.gz"
-
-      - name: Preserve benchmark evidence from the successful CI run
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p ci-evidence/comparison ci-evidence/sql-only
-
-          gh run download "$TRIGGER_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name comparison-smoke \
-            --dir ci-evidence/comparison
-          gh run download "$TRIGGER_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name sql-only-benchmark-smoke \
-            --dir ci-evidence/sql-only
-
+          install -d ci-evidence/comparison ci-evidence/sql-only
+          gh run download "$TRIGGER_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name comparison-smoke --dir ci-evidence/comparison
+          gh run download "$TRIGGER_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name sql-only-benchmark-smoke --dir ci-evidence/sql-only
           python3 scripts/validate_benchmark_evidence.py \
             --revision "$RELEASE_SHA" \
             --whole ci-evidence/comparison/whole-row.json \
             --sql-only ci-evidence/sql-only/sql-only.json
 
-          evidence_name="pg_local_cache-${VERSION}-${SHORT_SHA}-ci-benchmarks"
           epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
           find ci-evidence -exec touch -h -d "@${epoch}" {} +
           tar \
-            --sort=name \
-            --format=posix \
+            --sort=name --format=posix \
             --pax-option=delete=atime,delete=ctime \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            --mtime="@${epoch}" \
-            -C ci-evidence \
-            -cf - \
-            . |
-            gzip -n -9 > "dist/${evidence_name}.tar.gz"
+            --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
+            -C ci-evidence -cf - . |
+            gzip -n -9 > dist/pg_local_cache-ci-benchmarks.tar.gz
 
       - name: Create and verify checksums
         shell: bash
@@ -294,10 +291,8 @@ jobs:
           set -Eeuo pipefail
           (
             cd dist
-            find . -maxdepth 1 -type f ! -name SHA256SUMS \
-              -printf '%f\0' |
-              LC_ALL=C sort -z |
-              xargs -0 sha256sum > SHA256SUMS
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' |
+              LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS
             sha256sum --check SHA256SUMS
           )
 
@@ -341,44 +336,29 @@ jobs:
           set -Eeuo pipefail
 
           create_ref() {
-            local tag="$1"
-            local existing resolved_existing
+            local tag="$1" existing
             existing=""
-            if resolved_existing="$(
-              gh api "repos/${GH_REPO}/commits/${tag}" \
-                --jq .sha 2>/dev/null
-            )"; then
-              existing="$resolved_existing"
-            fi
-            if [[ -n "$existing" ]]; then
+            if existing="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha 2>/dev/null)"; then
               [[ "$existing" == "$RELEASE_SHA" ]] || {
                 echo "::error::Refusing to move immutable tag ${tag}"
                 return 1
               }
               return
             fi
-            gh api \
-              --method POST \
-              "repos/${GH_REPO}/git/refs" \
-              -f "ref=refs/tags/${tag}" \
-              -f "sha=${RELEASE_SHA}" >/dev/null
+            gh api --method POST "repos/${GH_REPO}/git/refs" \
+              -f "ref=refs/tags/${tag}" -f "sha=${RELEASE_SHA}" >/dev/null
           }
 
           upload_missing_assets() {
-            local tag="$1"
-            local existing_assets temporary
-            existing_assets="$(
-              gh release view "$tag" --json assets --jq '.assets[].name'
-            )"
+            local tag="$1" existing_assets temporary
+            existing_assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
             temporary="$(mktemp -d)"
             for file in dist/*; do
               local name
               name="$(basename "$file")"
               if grep -Fxq "$name" <<<"$existing_assets"; then
                 mkdir -p "$temporary/$name"
-                gh release download "$tag" \
-                  --pattern "$name" \
-                  --dir "$temporary/$name"
+                gh release download "$tag" --pattern "$name" --dir "$temporary/$name"
                 cmp --silent "$file" "$temporary/$name/$name" || {
                   echo "::error::Existing ${tag}/${name} differs; refusing overwrite"
                   return 1
@@ -392,11 +372,9 @@ jobs:
           create_ref "$COMMIT_TAG"
           if ! gh release view "$COMMIT_TAG" >/dev/null 2>&1; then
             gh release create "$COMMIT_TAG" \
-              --target "$RELEASE_SHA" \
-              --draft \
-              --prerelease \
+              --target "$RELEASE_SHA" --draft --prerelease \
               --title "pg_local_cache ${VERSION} — master ${RELEASE_SHA:0:12}" \
-              --notes "Successful master build ${RELEASE_SHA}. Includes PostgreSQL 16 source/binary packages, checksums, installer and CI benchmark evidence."
+              --notes "Successful master build ${RELEASE_SHA}. Includes PostgreSQL 14–18 Linux glibc/musl binaries, checksums, installer and CI benchmark evidence."
           fi
           upload_missing_assets "$COMMIT_TAG"
           gh release edit "$COMMIT_TAG" --draft=false --prerelease
@@ -405,10 +383,9 @@ jobs:
             create_ref "$STABLE_TAG"
             if ! gh release view "$STABLE_TAG" >/dev/null 2>&1; then
               gh release create "$STABLE_TAG" \
-                --target "$RELEASE_SHA" \
-                --draft \
-                --title "pg_local_cache ${VERSION} — PostgreSQL 16" \
-                --notes "Immutable pg_local_cache ${VERSION} release for PostgreSQL 16. Read docs/INSTALL_EXISTING.md before installing on an existing cluster."
+                --target "$RELEASE_SHA" --draft \
+                --title "pg_local_cache ${VERSION} — PostgreSQL 14–18" \
+                --notes "Immutable pg_local_cache ${VERSION} release for PostgreSQL 14–18 on Linux amd64 (glibc and musl). Read docs/INSTALL_EXISTING.md before installing on an existing cluster."
             fi
             upload_missing_assets "$STABLE_TAG"
             gh release edit "$STABLE_TAG" --draft=false --prerelease=false

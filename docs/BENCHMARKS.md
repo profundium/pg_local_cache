@@ -37,10 +37,32 @@ The strict throughput profile used 16 connections and a 32-key array. These
 are the complete SQL commands after pgbench created the 32 key variables; both
 protocol lanes used the same SQL text:
 
-| Lane | Exact throughput command |
-|---|---|
-| Stock PostgreSQL and mapped cache-off | `SELECT pg_catalog.array_agg(pg_catalog.row_to_json(pglc_source)::text ORDER BY pglc_input.ordinality) FROM pg_catalog.unnest(ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7, :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15, :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23, :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[]) WITH ORDINALITY AS pglc_input(id, ordinality) LEFT JOIN "pglc_sql_bench_e407c3350a"."rows" AS pglc_source USING (id);` |
-| Mapped cache-on | `SELECT local_cache.mget('pglc_sql_bench_e407c3350a.rows'::regclass, ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7, :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15, :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23, :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[]);` |
+#### Stock PostgreSQL and mapped cache-off
+
+```sql
+SELECT pg_catalog.array_agg(
+    pg_catalog.row_to_json(pglc_source)::text
+    ORDER BY pglc_input.ordinality
+)
+FROM pg_catalog.unnest(ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7,
+    :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15,
+    :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23,
+    :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[])
+    WITH ORDINALITY AS pglc_input(id, ordinality)
+LEFT JOIN "pglc_sql_bench_e407c3350a"."rows" AS pglc_source USING (id);
+```
+
+#### Mapped cache-on
+
+```sql
+SELECT local_cache.mget(
+    'pglc_sql_bench_e407c3350a.rows'::regclass,
+    ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7,
+        :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15,
+        :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23,
+        :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[]
+);
+```
 
 Latency was measured in a different scalar-key pass. These are its complete
 commands; the p99 values below must not be attributed to the 32-key MGET call:

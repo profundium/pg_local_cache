@@ -6,14 +6,16 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        POSTGRES_IMAGE: postgres:16.14-bookworm
-    image: pg_local_cache:1.0.0
+        POSTGRES_MAJOR: ${POSTGRES_MAJOR:-16}
+        POSTGRES_VARIANT: ${POSTGRES_VARIANT:-bookworm}
+    image: pg_local_cache:1.1.0
     restart: unless-stopped
     stop_grace_period: 60s
     shm_size: 512mb
     mem_limit: ${PG_LOCAL_CACHE_CONTAINER_MEMORY_LIMIT:-1g}
     mem_reservation: ${PG_LOCAL_CACHE_CONTAINER_MEMORY_RESERVATION:-512m}
     environment:
+      PGDATA: /var/lib/postgresql/data
       POSTGRES_DB: app
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
@@ -51,7 +53,7 @@ services:
         max-file: "5"
 
   postgres_stock:
-    image: postgres:16.14-bookworm
+    image: postgres:${POSTGRES_MAJOR:-16}-${POSTGRES_VARIANT:-bookworm}
     restart: unless-stopped
     stop_grace_period: 60s
     shm_size: 512mb

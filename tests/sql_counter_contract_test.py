@@ -111,6 +111,9 @@ class SqlCounterSourceTests(unittest.TestCase):
 
     def test_hot_path_selects_its_unique_proc_number_without_aliasing(self) -> None:
         resolver = c_function(CORE, "pglc_current_sql_counter_slot")
+        self.assertIn("#if PG_VERSION_NUM >= 170000", resolver)
+        self.assertIn("MyProc->vxid.procNumber", resolver)
+        self.assertIn("#else\n\tproc_number = MyProc->pgprocno;\n#endif", resolver)
         self.assertIn("MyProc->pgprocno", resolver)
         self.assertIn("proc_number >= pglc_sql_counter_slot_count", resolver)
         self.assertIn("&pglc_sql_counter_slots[proc_number]", resolver)
@@ -150,6 +153,11 @@ class SqlCounterSourceTests(unittest.TestCase):
         self.assertIn("pg_atomic_read_u64(counter) + 1", increment)
         self.assertIn("pg_atomic_write_u64", increment)
         self.assertNotIn("pg_atomic_fetch_add_u64", increment)
+
+    def test_postgresql_14_uses_pre_hook_shared_memory_and_guc_apis(self) -> None:
+        self.assertIn("#if PG_VERSION_NUM >= 150000", CORE)
+        self.assertIn("pglc_shmem_request();", CORE)
+        self.assertIn('EmitWarningsOnPlaceholders("pg_local_cache")', CORE)
 
     def test_stats_and_metrics_sum_every_slot_and_legacy_fallbacks(self) -> None:
         snapshot = c_function(CORE, "pglc_read_sql_counter_snapshot")

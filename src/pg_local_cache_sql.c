@@ -14,9 +14,13 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_inherits.h"
+#include "catalog/pg_namespace_d.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type_d.h"
 #include "commands/explain.h"
+#if PG_VERSION_NUM >= 180000
+#include "commands/explain_format.h"
+#endif
 #include "commands/extension.h"
 #include "commands/trigger.h"
 #include "common/hashfn.h"
@@ -936,7 +940,7 @@ pglc_sql_source_relation_allowed(Relation relation)
 
 	extension_oid = get_extension_oid("pg_local_cache", true);
 	if (OidIsValid(extension_oid) &&
-		get_extension_schema(extension_oid) == namespace_oid)
+		getExtensionOfObject(NamespaceRelationId, namespace_oid) == extension_oid)
 		return false;
 
 	return !OidIsValid(getExtensionOfObject(RelationRelationId,
@@ -1023,7 +1027,11 @@ pglc_sql_relation_base_meta(Relation relation, PgLocalCacheSqlMeta *meta,
 		!pglc_sql_triggers_valid(relation, meta, check_catalog_provenance))
 		return false;
 
+#if PG_VERSION_NUM >= 180000
+	meta->primary_index_oid = RelationGetPrimaryKeyIndex(relation, false);
+#else
 	meta->primary_index_oid = RelationGetPrimaryKeyIndex(relation);
+#endif
 	if (!OidIsValid(meta->primary_index_oid))
 		return false;
 	index_tuple = SearchSysCache1(INDEXRELID,
@@ -1623,13 +1631,18 @@ pglc_sql_plan_custom_path(PlannerInfo *root, RelOptInfo *rel,
 	int			child_payload_resno;
 	int			child_ctid_resno;
 	int			child_xmin_resno;
+	int			private_index;
 
 	Assert(list_length(custom_plans) == 1);
 	Assert(list_length(best_path->custom_private) ==
 		   PGLC_PRIVATE_PLAN_ITEMS + 1);
 	child = (Plan *) linitial(custom_plans);
-	private = list_copy_head(best_path->custom_private,
-							 PGLC_PRIVATE_PLAN_ITEMS);
+	private = NIL;
+	for (private_index = 0;
+		 private_index < PGLC_PRIVATE_PLAN_ITEMS;
+		 private_index++)
+		private = lappend(private,
+						  list_nth(best_path->custom_private, private_index));
 	key_exprs = (List *) list_nth(best_path->custom_private,
 								 PGLC_PRIVATE_KEY_EXPRS);
 	row_type_oid = pglc_sql_private_oid(private, PGLC_PRIVATE_ROW_TYPE);
@@ -2664,7 +2677,7 @@ pglc_sql_maybe_store(PgLocalCacheSqlScanState *state,
 	ctid_datum = slot_getattr(child_slot, state->child_ctid_resno, &isnull);
 	if (isnull)
 		return false;
-	ctid = *DatumGetItemPointer(ctid_datum);
+	ItemPointerCopy((ItemPointer) DatumGetPointer(ctid_datum), &ctid);
 	xmin_datum = slot_getattr(child_slot, state->child_xmin_resno, &isnull);
 	if (isnull)
 		return false;

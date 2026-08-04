@@ -64,7 +64,8 @@ fi
 [[ -f "$token_file" && ! -L "$token_file" ]]
 [[ "$(stat -c '%a' "$token_file")" == "600" ]]
 auth_token="$(<"$token_file")"
-[[ "$auth_token" =~ ^[A-Za-z0-9_-]{32,256}$ ]]
+(( ${#auth_token} >= 32 && ${#auth_token} <= 256 ))
+[[ "$auth_token" != *[!A-Za-z0-9_-]* ]]
 
 exec 3<>"/dev/tcp/127.0.0.1/${port}"
 printf '*2\r\n$4\r\nAUTH\r\n$%d\r\n%s\r\n' \

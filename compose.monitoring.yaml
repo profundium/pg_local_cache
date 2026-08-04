@@ -2,7 +2,7 @@ name: pg_local_cache
 
 services:
   monitoring-init:
-    image: postgres:16.14-bookworm
+    image: postgres:${POSTGRES_MAJOR:-16}-${POSTGRES_VARIANT:-bookworm}
     restart: "no"
     init: true
     read_only: true

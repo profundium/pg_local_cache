@@ -156,6 +156,7 @@ jobs:
           bash -n docker/initdb/010_pg_local_cache.sh
           bash -n tests/docker_smoke.sh
           bash -n tests/docker_sql_only_smoke.sh
+          bash -n tests/compatibility_matrix.sh
           bash -n benchmarks/run.sh
           python3 -m py_compile \
             benchmarks/compare.py \
@@ -185,6 +186,24 @@ jobs:
           PG_LOCAL_CACHE_SMOKE_PIPELINE: ${{ matrix.pipeline }}
           PG_LOCAL_CACHE_SMOKE_KEYS: ${{ matrix.keys }}
         run: bash tests/docker_smoke.sh
+
+  docker-compatibility:
+    name: docker-compatibility (PostgreSQL 14-18 ${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [bookworm, alpine3.23]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run checked-in PostgreSQL compatibility smoke matrix
+        env:
+          PGLC_MATRIX_MAJORS: 14,15,16,17,18
+          PGLC_MATRIX_VARIANTS: ${{ matrix.variant }}
+        run: bash tests/compatibility_matrix.sh
 
   docker-sql-only:
     name: docker-sql-only (SQL GET/MGET, no RESP secret)

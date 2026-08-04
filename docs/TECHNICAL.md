@@ -25,7 +25,7 @@ and roles; these SQL names therefore omit it.
 
 ## Supported deployment
 
-The current implementation supports PostgreSQL 16 on Linux, one configured
+The current implementation supports PostgreSQL 14–18 on Linux amd64, one configured
 database, and one writable primary. It is designed for attached, permanent
 application tables with an immediate, valid, non-partial B-tree primary key.
 It does not serve cache entries on standbys and does not coordinate multiple

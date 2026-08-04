@@ -169,6 +169,15 @@ def sql(query: str) -> str:
     ).strip()
 
 
+def sql_commands(*queries: str) -> str:
+    args = psql_base_args()
+    for query in queries:
+        args.extend(("-c", query))
+    return subprocess.check_output(
+        args, text=True, stderr=subprocess.STDOUT, timeout=30
+    ).strip()
+
+
 def wait_for_mapping(client: RespConnection, key: str) -> bytes:
     deadline = time.monotonic() + 10
     while True:

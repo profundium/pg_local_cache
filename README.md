@@ -1,6 +1,6 @@
 # pg_local_cache
 
-`pg_local_cache` is a PostgreSQL 16 extension that turns attached tables into a
+`pg_local_cache` is a PostgreSQL 14–18 extension that turns attached tables into a
 transaction-aware SQL key-value store. Applications keep using parameterized
 `SELECT` through libpq, JDBC, Npgsql, psycopg, or an ORM. No cache server, token,
 cache-specific driver, or proprietary SQL syntax is required.
@@ -10,9 +10,9 @@ entries before commit visibility, and rollback never exposes uncommitted row
 data. PostgreSQL remains authoritative: a missing, unsafe, malformed, or
 oversized entry runs the normal source plan.
 
-The current implementation supports PostgreSQL 16 on Linux, one configured
-database, and one writable primary. It is a narrow primary-key fast path, not a
-general query cache.
+The current implementation supports PostgreSQL 14–18 on Linux amd64 (glibc and
+musl), one configured database, and one writable primary. It is a narrow
+primary-key fast path, not a general query cache.
 
 ## Capabilities
 
@@ -155,10 +155,31 @@ for the exact planner, snapshot, and type rules.
 
 ## Install on an existing server
 
-Use the source archive on a compatible build host, or the binary archive only
-for its labelled PostgreSQL, distribution, and architecture combination. The
-[existing-database guide](docs/INSTALL_EXISTING.md) covers prerequisites,
-preflight, online staging, restart, HA, verification, and rollback.
+Choose your PostgreSQL major and Linux libc, then download the exact latest
+asset with `curl`—no GitHub CLI or tag lookup:
+
+```bash
+PG_MAJOR=18
+LIBC=glibc # glibc or musl
+BASE=https://github.com/profundium/pg_local_cache/releases/latest/download
+
+curl -fLO "$BASE/pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
+curl -fLO "$BASE/SHA256SUMS"
+sha256sum --check --ignore-missing --strict SHA256SUMS
+tar -xzf "pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
+cd "pg_local_cache-"*-"pg${PG_MAJOR}-linux-${LIBC}-amd64"
+sudo ./install.sh preflight --database app --mode sql-only
+sudo ./install.sh install --database app --mode sql-only
+```
+
+Use `glibc` for Debian, Ubuntu, RHEL-family and similar systems; use `musl` for
+Alpine. The installer rejects a PostgreSQL major, OS, architecture, or libc
+mismatch before copying files. Use `pg_local_cache-source.tar.gz` and the target
+server's PGXS when a packaged binary does not match.
+
+The [existing-database install guide](docs/INSTALL_EXISTING.md) covers checksum
+verification, read-only preflight, online staging, restart, HA, verification,
+and rollback.
 
 The first installation requires one restart because
 `shared_preload_libraries` is evaluated at postmaster startup. File staging and
@@ -187,81 +208,17 @@ miss. Writable mappings expose PostgreSQL-backed `SET` and `DEL`. See the
 
 ## Benchmarks
 
-### Current ordinary SQL result (`fe2d23c`)
-
 [CI run 30803546805](https://github.com/profundium/pg_local_cache/actions/runs/30803546805)
 for [source `fe2d23c`](https://github.com/profundium/pg_local_cache/commit/fe2d23c87ddc7e523ada2951376ebcb7d8570fb1)
-passed every benchmark gate and produced the preserved
-[`comparison-smoke` evidence bundle](assets/benchmark-evidence/fe2d23c/comparison-smoke.zip)
-(Actions artifact ID `8851825673`; ZIP digest
-`sha256:fc624e7ebed11b10c8470d11e7d2a91855813e04f9fb809e62e4f0852f7c8a76`).
-The table shows the complete prepared SQL template used on both the mapped and
-stock PostgreSQL 16.14 servers. pgbench replaces `:key` with the measured key:
+passed every current regression gate. Exact primary-key `SELECT` measured
+1.84–1.94x stock PostgreSQL in the ordinary-SQL smoke. `local_cache.mget()`
+measured 64,954 prepared and 66,156 unnamed-extended key ops/s: 10.30x and
+10.39x the stock batch query in that profile.
 
-| Command template | Mapped cache ops/s | Stock PostgreSQL ops/s | Mapped/stock |
-|---|---:|---:|---:|
-| `SELECT * FROM public.pg_local_cache_whole_row_comparison WHERE tenant_id = 7 AND id = :key;` | 126,710 | 65,257 | 1.94x |
-| `SELECT metadata, payload, enabled, amount, note, id, tenant_id FROM public.pg_local_cache_whole_row_comparison WHERE tenant_id = 7 AND id = :key;` | 123,051 | 65,236 | 1.89x |
-| `SELECT payload, metadata, id, tenant_id FROM public.pg_local_cache_whole_row_comparison WHERE id = :key AND tenant_id = 7;` | 131,017 | 71,398 | 1.84x |
-
-The AMD EPYC 7763 shared runner exposed four logical CPUs. The client and each
-server target had a two-CPU quota. The smoke used four clients, pipeline depth
-8, 128 keys, 128-byte text values, a prefilled working set, and one one-second
-repetition. Every timed mapped lookup was an exact cache hit with zero misses,
-fills, or bypasses. The absolute 10,000 ops/s floor, result integrity, and
-counter accounting gate CI; the displayed ratios do not. This is a regression
-smoke, not a capacity claim.
-
-### Current SQL GET/MGET result (`fe2d23c`)
-
-The same successful CI run produced the preserved
-[`sql-only-benchmark-smoke` bundle](assets/benchmark-evidence/fe2d23c/sql-only-benchmark-smoke.zip)
-(Actions artifact ID `8851940541`; ZIP digest
-`sha256:22be445d210138be086da186bdbe4c7fb1e3543b4a26b3f98b90c8099e929d02`).
-The measured array contained 32 keys. These are the complete throughput
-commands used after pgbench created the key variables:
-
-| Lane | Exact throughput command |
-|---|---|
-| Stock PostgreSQL and mapped cache-off | `SELECT pg_catalog.array_agg(pg_catalog.row_to_json(pglc_source)::text ORDER BY pglc_input.ordinality) FROM pg_catalog.unnest(ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7, :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15, :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23, :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[]) WITH ORDINALITY AS pglc_input(id, ordinality) LEFT JOIN "pglc_sql_bench_e407c3350a"."rows" AS pglc_source USING (id);` |
-| Mapped cache-on | `SELECT local_cache.mget('pglc_sql_bench_e407c3350a.rows'::regclass, ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7, :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15, :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23, :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[]);` |
-
-| Protocol | Mode | c16/k32 key ops/s | vs stock |
-|---|---|---:|---:|
-| Prepared | Stock PostgreSQL | 6,306 | 1.00x |
-| Prepared | Mapped, cache off | 6,280 | 1.00x |
-| Prepared | `local_cache.mget`, cache on | 64,954 | 10.30x |
-| Unnamed extended | Stock PostgreSQL | 6,365 | 1.00x |
-| Unnamed extended | Mapped, cache off | 6,257 | 0.98x |
-| Unnamed extended | `local_cache.mget`, cache on | 66,156 | 10.39x |
-
-Latency was measured separately with one scalar key per transaction:
-
-| Lane | Exact scalar latency command |
-|---|---|
-| Stock PostgreSQL and mapped cache-off | `SELECT pg_catalog.row_to_json(pglc_source)::text FROM "pglc_sql_bench_e407c3350a"."rows" AS pglc_source WHERE id = :key;` |
-| Mapped cache-on | `SELECT local_cache.get('pglc_sql_bench_e407c3350a.rows'::regclass, (:key)::bigint);` |
-
-| Protocol | Mode | c16/k1 p50 | p95 | p99 |
-|---|---|---:|---:|---:|
-| Prepared | Stock PostgreSQL | 0.583 ms | 1.969 ms | 3.338 ms |
-| Prepared | Mapped, cache off | 0.591 ms | 1.973 ms | 3.299 ms |
-| Prepared | `local_cache.get`, cache on | 0.815 ms | 1.940 ms | 3.505 ms |
-| Unnamed extended | Stock PostgreSQL | 1.032 ms | 2.506 ms | 4.093 ms |
-| Unnamed extended | Mapped, cache off | 1.043 ms | 2.411 ms | 3.620 ms |
-| Unnamed extended | `local_cache.get`, cache on | 1.110 ms | 2.452 ms | 3.847 ms |
-
-This profile used 16 connections, 32 keys per MGET, 4,096 incompressible
-3,000-byte rows, two seconds of warmup, and three rotated five-second
-repetitions. Rates count resolved key positions (`batch TPS × 32`), not SQL
-statements. The scalar latency pass had no configured p99 limit and is not
-claimed as an improvement.
-
-The [evidence manifest](assets/benchmark-evidence/fe2d23c/README.md) records both
-artifact identities and digests.
-
-See [benchmark methodology](docs/BENCHMARKS.md) and
-[scenario definitions](benchmarks/SCENARIOS.md).
+These shared-runner smokes detect regressions; they are not capacity claims.
+See the [benchmark methodology and exact commands](docs/BENCHMARKS.md), the
+[scenario definitions](benchmarks/SCENARIOS.md), and the preserved
+[evidence manifest](assets/benchmark-evidence/fe2d23c/README.md).
 
 ## Monitoring
 
@@ -272,14 +229,15 @@ Grafana dashboard. Start with the [monitoring and OOM guide](docs/MONITORING.md)
 
 ## Releases
 
-Download source, platform-labelled binaries, checksums, and CI evidence from
-[GitHub Releases](https://github.com/profundium/pg_local_cache/releases). Never
-use a binary archive on a different PostgreSQL major, distribution, or
-architecture; build the source archive against the target PGXS instead.
+Download source, the platform-labelled binary, checksums, and CI evidence from
+the [latest stable release](https://github.com/profundium/pg_local_cache/releases/latest).
+Older reviewed versions remain available on the
+[releases page](https://github.com/profundium/pg_local_cache/releases).
 
 ## Current limits
 
-- PostgreSQL 16 on Linux only.
+- PostgreSQL 14–18 on Linux amd64 (glibc or musl). PostgreSQL 14 support follows
+  upstream through November 12, 2026.
 - One configured database and one writable primary per extension instance.
 - Permanent, non-partitioned tables with a supported primary key; no views,
   inheritance, or RLS.

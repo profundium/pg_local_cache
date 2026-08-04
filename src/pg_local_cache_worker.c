@@ -1114,7 +1114,7 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 		return raw_response(
 			"*14\r\n"
 			"$6\r\nserver\r\n$14\r\npg_local_cache\r\n"
-			"$7\r\nversion\r\n$5\r\n1.0.0\r\n"
+			"$7\r\nversion\r\n$5\r\n1.1.0\r\n"
 			"$5\r\nproto\r\n:2\r\n"
 			"$2\r\nid\r\n:0\r\n"
 			"$4\r\nmode\r\n$10\r\nstandalone\r\n"
@@ -1127,7 +1127,7 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 		const char *info =
 			"# Server\r\n"
 			"server:pg_local_cache\r\n"
-			"pg_local_cache_version:1.0.0\r\n"
+			"pg_local_cache_version:1.1.0\r\n"
 			"redis_mode:standalone\r\n";
 
 		if (argc != 1 && argc != 2)
@@ -2249,6 +2249,7 @@ reload_mappings(uint64 target_generation)
 			int			key_index;
 			int			attribute_index;
 			Relation	relation;
+			LOCKMODE	relation_lockmode;
 			TupleDesc	source_desc;
 			MemoryContext mapping_old_context;
 
@@ -2308,7 +2309,8 @@ reload_mappings(uint64 target_generation)
 			mapping->config_generation = target_generation;
 
 			mapping_old_context = MemoryContextSwitchTo(mapping_context);
-			relation = table_open(mapping->relation_oid, AccessShareLock);
+			relation_lockmode = mapping->writable ? RowExclusiveLock : AccessShareLock;
+			relation = table_open(mapping->relation_oid, relation_lockmode);
 			/* Constraints are not needed for decoding and are not size-bounded. */
 			source_desc = RelationGetDescr(relation);
 			mapping->row_desc = CreateTupleDescCopy(source_desc);

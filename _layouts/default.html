@@ -38,7 +38,9 @@
       "description": {{ site.description | jsonify }},
       "codeRepository": "https://github.com/{{ site.repository }}",
       "programmingLanguage": ["C", "SQL", "Python"],
-      "runtimePlatform": "PostgreSQL 16",
+      "runtimePlatform": ["PostgreSQL 14", "PostgreSQL 15", "PostgreSQL 16", "PostgreSQL 17", "PostgreSQL 18"],
+      "operatingSystem": "Linux amd64 (glibc or musl)",
+      "downloadUrl": "https://github.com/{{ site.repository }}/releases/latest",
       "license": "https://opensource.org/license/mit"
     }
     </script>
@@ -56,7 +58,7 @@
           <a href="{{ '/docs/BENCHMARKS.html' | relative_url }}"{% if page.url == '/docs/BENCHMARKS.html' %} aria-current="page"{% endif %}>Benchmarks</a>
           <a href="{{ '/docs/MONITORING.html' | relative_url }}"{% if page.url == '/docs/MONITORING.html' %} aria-current="page"{% endif %}>Monitoring</a>
           <a href="{{ '/docs/TECHNICAL.html' | relative_url }}"{% if page.url == '/docs/TECHNICAL.html' %} aria-current="page"{% endif %}>Technical</a>
-          <a class="nav-source" href="https://github.com/{{ site.repository }}">Source</a>
+          <a class="nav-download" href="https://github.com/{{ site.repository }}/releases/latest">Download</a>
         </nav>
       </div>
     </header>
@@ -64,7 +66,7 @@
     <footer class="site-footer">
       <div class="footer-inner">
         <a class="wordmark" href="{{ '/' | relative_url }}">pg_local_cache</a>
-        <p>PostgreSQL 16 extension · MIT</p>
+        <p>PostgreSQL 14–18 · Linux amd64 · MIT</p>
         <a href="https://github.com/{{ site.repository }}">GitHub</a>
       </div>
     </footer>

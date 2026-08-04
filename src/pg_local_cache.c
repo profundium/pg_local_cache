@@ -60,7 +60,9 @@ static PgLocalCacheSqlCounterSlot *pglc_sql_counter_slots = NULL;
 static PgLocalCacheSqlCounterSlot *pglc_my_sql_counter_slot = NULL;
 static int	pglc_sql_counter_slot_count = 0;
 
+#if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type previous_shmem_request_hook = NULL;
+#endif
 static shmem_startup_hook_type previous_shmem_startup_hook = NULL;
 static bool pglc_was_preloaded = false;
 
@@ -376,7 +378,11 @@ pglc_define_gucs(void)
 							 NULL,
 							 NULL);
 
+#if PG_VERSION_NUM >= 150000
 	MarkGUCPrefixReserved("pg_local_cache");
+#else
+	EmitWarningsOnPlaceholders("pg_local_cache");
+#endif
 }
 
 void
@@ -396,8 +402,12 @@ _PG_init(void)
 	pglc_was_preloaded = true;
 	pglc_validate_startup_limits();
 
+#if PG_VERSION_NUM >= 150000
 	previous_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = pglc_shmem_request;
+#else
+	pglc_shmem_request();
+#endif
 	previous_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pglc_shmem_startup;
 
@@ -488,8 +498,10 @@ pglc_validate_startup_limits(void)
 static void
 pglc_shmem_request(void)
 {
+#if PG_VERSION_NUM >= 150000
 	if (previous_shmem_request_hook)
 		previous_shmem_request_hook();
+#endif
 
 	RequestAddinShmemSpace(pglc_shared_memory_bytes());
 	RequestNamedLWLockTranche("pg_local_cache", 1);
@@ -619,8 +631,9 @@ pglc_shmem_startup(void)
 }
 
 /*
- * PostgreSQL 16 calls this identifier pgprocno; it has ProcNumber semantics:
- * it is stable for the lifetime of a backend and unique among live backends.
+ * PostgreSQL 14-16 call this identifier pgprocno; PostgreSQL 17+ exposes
+ * ProcNumber as vxid.procNumber. It is stable for the lifetime of a backend
+ * and unique among live backends.
  * Slots are never reset on process reuse, so aggregation cannot lose counts.
  */
 static PgLocalCacheSqlCounterSlot *
@@ -633,7 +646,11 @@ pglc_current_sql_counter_slot(void)
 	if (pglc_sql_counter_slots == NULL || MyProc == NULL)
 		return NULL;
 
+#if PG_VERSION_NUM >= 170000
+	proc_number = MyProc->vxid.procNumber;
+#else
 	proc_number = MyProc->pgprocno;
+#endif
 	if (proc_number < 0 || proc_number >= pglc_sql_counter_slot_count)
 		return NULL;
 

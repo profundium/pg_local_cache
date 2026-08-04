@@ -1,18 +1,18 @@
 ---
 layout: default
-title: Transactional SQL key-value cache for PostgreSQL
-description: pg_local_cache accelerates ordinary exact-primary-key SELECT and provides SQL GET/MGET over bounded shared-memory rows with transaction-aware invalidation.
+title: Transactional SQL cache for PostgreSQL 14–18
+description: Install a PostgreSQL 14–18 Linux extension that accelerates exact-primary-key SELECT and SQL GET/MGET with transaction-aware invalidation.
 home: true
 permalink: /
 ---
 <main id="main-content">
   <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
     <div class="hero-copy">
-      <h1 id="hero-title">A transactional SQL cache inside PostgreSQL</h1>
+      <h1 id="hero-title">A transactional cache for PostgreSQL 14–18</h1>
       <p>Keep using ordinary primary-key SELECT, or call SQL GET/MGET through the same PostgreSQL driver. Ordinary DML fences affected entries before commit visibility.</p>
       <div class="hero-actions">
-        <a class="button primary" href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">Install on PostgreSQL 16 <span aria-hidden="true">→</span></a>
-        <a class="button" href="{{ '/docs/BENCHMARKS.html' | relative_url }}">Benchmark methodology <span aria-hidden="true">→</span></a>
+        <a class="button primary" href="https://github.com/profundium/pg_local_cache/releases/latest/download/pg_local_cache-pg18-linux-glibc-amd64.tar.gz">Download PG18 glibc <span aria-hidden="true">→</span></a>
+        <a class="button" href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">Install guide <span aria-hidden="true">→</span></a>
       </div>
       <div class="mini-code">
         <button class="copy-button" type="button" data-copy="hero-sql">Copy</button>
@@ -52,7 +52,7 @@ COMMIT
   </section>
 
   <section class="proof-rail" aria-label="Core properties">
-    <div class="proof-item"><strong>SQL only</strong><p>Primary-key SELECT and SQL GET/MGET use the existing PostgreSQL connection and permissions.</p></div>
+    <div class="proof-item"><strong>PostgreSQL 14–18</strong><p>Linux amd64 packages are built for glibc and musl.</p></div>
     <div class="proof-item"><strong>Whole rows</strong><p>Complete tuples keyed by the table primary key.</p></div>
     <div class="proof-item"><strong>Transaction-aware invalidation</strong><p>Source writes fence affected entries before commit visibility.</p></div>
     <div class="proof-item"><strong>Bounded extension memory</strong><p>Deterministic extension allocations are bounded at startup; host limits remain separate.</p></div>
@@ -67,18 +67,12 @@ COMMIT
         <a href="{{ '/docs/BENCHMARKS.html' | relative_url }}">See ordinary SQL, GET/MGET and RESP results →</a>
       </div>
       <div>
-        <div class="table-scroll" role="region" aria-label="Current SQL MGET benchmark comparison" tabindex="0">
-          <table class="benchmark-table">
-            <thead><tr><th>Protocol</th><th>Exact throughput command</th><th>Key ops/s</th><th>vs stock</th><th>Exact scalar latency command</th><th>p99</th></tr></thead>
-            <tbody>
-              <tr><td>Prepared · stock</td><td><code>SELECT pg_catalog.array_agg(pg_catalog.row_to_json(pglc_source)::text ORDER BY pglc_input.ordinality) FROM pg_catalog.unnest(ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7, :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15, :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23, :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[]) WITH ORDINALITY AS pglc_input(id, ordinality) LEFT JOIN "pglc_sql_bench_e407c3350a"."rows" AS pglc_source USING (id);</code></td><td>6,306</td><td>1.00x</td><td><code>SELECT pg_catalog.row_to_json(pglc_source)::text FROM "pglc_sql_bench_e407c3350a"."rows" AS pglc_source WHERE id = :key;</code></td><td>3.338 ms</td></tr>
-              <tr><td>Prepared · cache on</td><td><code>SELECT local_cache.mget('pglc_sql_bench_e407c3350a.rows'::regclass, ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7, :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15, :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23, :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[]);</code></td><td>64,954</td><td>10.30x</td><td><code>SELECT local_cache.get('pglc_sql_bench_e407c3350a.rows'::regclass, (:key)::bigint);</code></td><td>3.505 ms</td></tr>
-              <tr><td>Unnamed extended · stock</td><td><code>SELECT pg_catalog.array_agg(pg_catalog.row_to_json(pglc_source)::text ORDER BY pglc_input.ordinality) FROM pg_catalog.unnest(ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7, :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15, :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23, :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[]) WITH ORDINALITY AS pglc_input(id, ordinality) LEFT JOIN "pglc_sql_bench_e407c3350a"."rows" AS pglc_source USING (id);</code></td><td>6,365</td><td>1.00x</td><td><code>SELECT pg_catalog.row_to_json(pglc_source)::text FROM "pglc_sql_bench_e407c3350a"."rows" AS pglc_source WHERE id = :key;</code></td><td>4.093 ms</td></tr>
-              <tr><td>Unnamed extended · cache on</td><td><code>SELECT local_cache.mget('pglc_sql_bench_e407c3350a.rows'::regclass, ARRAY[:key_0, :key_1, :key_2, :key_3, :key_4, :key_5, :key_6, :key_7, :key_8, :key_9, :key_10, :key_11, :key_12, :key_13, :key_14, :key_15, :key_16, :key_17, :key_18, :key_19, :key_20, :key_21, :key_22, :key_23, :key_24, :key_25, :key_26, :key_27, :key_28, :key_29, :key_30, :key_31]::bigint[]);</code></td><td>66,156</td><td>10.39x</td><td><code>SELECT local_cache.get('pglc_sql_bench_e407c3350a.rows'::regclass, (:key)::bigint);</code></td><td>3.847 ms</td></tr>
-            </tbody>
-          </table>
+        <div class="benchmark-summary" aria-label="Current SQL MGET benchmark summary">
+          <div class="benchmark-metric"><span>Prepared</span><strong>64,954</strong><p>key ops/s · 10.30x stock</p></div>
+          <div class="benchmark-metric"><span>Unnamed extended</span><strong>66,156</strong><p>key ops/s · 10.39x stock</p></div>
+          <div class="benchmark-metric"><span>Regression gates</span><strong>Passed</strong><p>≥10,000 key ops/s · ≥1.50x stock</p></div>
         </div>
-        <div class="benchmark-note"><span>Throughput counts resolved keys (<code>batch TPS × 32</code>). Latency is a separate scalar GET/SELECT pass, which is why both commands are shown.</span><span>Both cached lanes passed the 10,000 key ops/s and 1.50x relative gates. No p99 limit was configured; this shared-runner result is not a capacity claim.</span></div>
+        <p class="benchmark-note">Throughput counts resolved keys (<code>batch TPS × 32</code>). Shared-runner regression smoke, not a capacity claim; exact commands, latency, limits, and RESP results stay in the benchmark reference.</p>
         <p class="benchmark-evidence"><a href="https://github.com/profundium/pg_local_cache/actions/runs/30803546805">Run 30803546805</a> · <a href="https://github.com/profundium/pg_local_cache/commit/fe2d23c87ddc7e523ada2951376ebcb7d8570fb1">source fe2d23c</a> · <a href="{{ '/assets/benchmark-evidence/fe2d23c/sql-only-benchmark-smoke.zip' | relative_url }}">raw evidence ZIP</a> · digest <code>22be445d…e929d02</code>.</p>
       </div>
     </section>
@@ -86,17 +80,28 @@ COMMIT
 
   <section id="quick-start" class="page-section quick-start" aria-labelledby="quick-start-title">
     <h2 id="quick-start-title">Install on an existing PostgreSQL server</h2>
+    <p class="quick-start-lead">Choose PostgreSQL 14–18 and <code>glibc</code> (Debian, Ubuntu, RHEL-family) or <code>musl</code> (Alpine). Download the stable asset directly—no GitHub CLI or tag lookup. Preparation stays online; first activation needs one controlled restart.</p>
     <div class="steps">
-      <div class="step"><span class="step-number">1</span><strong>Preflight</strong><p>Check PostgreSQL, target paths, role and pending settings.</p></div>
-      <div class="step"><span class="step-number">2</span><strong>Stage files</strong><p>Install the extension and stage postmaster configuration online.</p></div>
-      <div class="step"><span class="step-number">3</span><strong>Restart once</strong><p>Load shared memory and hooks with one controlled restart.</p></div>
-      <div class="step"><span class="step-number">4</span><strong>Attach a table</strong><p>Register the primary key, then use ordinary exact-key SELECT or SQL GET/MGET.</p></div>
+      <div class="step"><span class="step-number">1</span><strong>Download latest</strong><p>Choose the compatible binary or source archive plus checksums.</p></div>
+      <div class="step"><span class="step-number">2</span><strong>Verify &amp; extract</strong><p>Check the published SHA-256 digest before opening the archive.</p></div>
+      <div class="step"><span class="step-number">3</span><strong>Preflight &amp; stage</strong><p>Check the cluster, then copy files and stage settings online.</p></div>
+      <div class="step"><span class="step-number">4</span><strong>Restart &amp; verify</strong><p>Use one controlled restart, verify health, then attach a table.</p></div>
     </div>
     <div class="install-command">
-      <div class="command-label">Read-only preflight</div>
+      <div class="command-label">Example: PostgreSQL 18 · Linux glibc · amd64</div>
       <button class="copy-button" type="button" data-copy="install-command">Copy</button>
-      <pre id="install-command"><code>sudo ./scripts/install-existing.sh preflight --database app --mode sql-only</code></pre>
+      <pre id="install-command"><code>PG_MAJOR=18
+LIBC=glibc
+BASE=https://github.com/profundium/pg_local_cache/releases/latest/download
+curl -fLO "$BASE/pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
+curl -fLO "$BASE/SHA256SUMS"
+sha256sum --check --ignore-missing --strict SHA256SUMS
+tar -xzf "pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
+cd "pg_local_cache-"*-"pg${PG_MAJOR}-linux-${LIBC}-amd64"
+sudo ./install.sh preflight --database app --mode sql-only
+sudo ./install.sh install --database app --mode sql-only</code></pre>
     </div>
+    <p class="quick-start-more"><a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">Continue with restart, verification, source builds, HA, and rollback →</a></p>
   </section>
 
   <section class="architecture">

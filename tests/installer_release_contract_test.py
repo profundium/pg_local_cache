@@ -32,6 +32,11 @@ def _write_executable(path: Path, source: str) -> None:
 def _fake_packaged_install(
     directory: Path,
     *,
+    postgres_major: int = 16,
+    package_postgres_major: int | None = None,
+    package_libc: str = "glibc",
+    package_os: str = "linux",
+    package_architecture: str = "amd64",
     active_preload: str = "pg_stat_statements",
     configured_preload: str | None = None,
     active_max_workers: int = 8,
@@ -46,9 +51,17 @@ def _fake_packaged_install(
     if not sys.platform.startswith("linux"):
         raise unittest.SkipTest("installer runtime fixtures require GNU/Linux")
 
-    package = directory / "pg_local_cache-1.0.0-pg16-bookworm-amd64"
-    package_lib = package / "usr/lib/postgresql/16/lib"
-    package_extension = package / "usr/share/postgresql/16/extension"
+    package_postgres_major = (
+        postgres_major
+        if package_postgres_major is None
+        else package_postgres_major
+    )
+    package = directory / (
+        f"pg_local_cache-pg{package_postgres_major}-linux-"
+        f"{package_libc}-{package_architecture}"
+    )
+    package_lib = package / "lib"
+    package_extension = package / "share/extension"
     target_lib = directory / "target/lib"
     target_share = directory / "target/share"
     target_extension = target_share / "extension"
@@ -77,13 +90,30 @@ def _fake_packaged_install(
         raise RuntimeError("the installer fixture requires a true executable")
     shutil.copyfile(true_binary, source_library)
     source_library.chmod(0o755)
+    (package / "RELEASE-METADATA").write_text(
+        "format=1\n"
+        "version=1.1.0\n"
+        f"postgres_major={package_postgres_major}\n"
+        f"os={package_os}\n"
+        f"libc={package_libc}\n"
+        f"architecture={package_architecture}\n"
+        f"commit={'0' * 40}\n"
+        "build_image=fixture\n",
+        encoding="utf-8",
+    )
     (package_extension / "pg_local_cache.control").write_text(
-        "comment = 'fixture'\ndefault_version = '1.0.0'\n"
+        "comment = 'fixture'\ndefault_version = '1.1.0'\n"
         "module_pathname = '$libdir/pg_local_cache'\n",
         encoding="utf-8",
     )
     (package_extension / "pg_local_cache--1.0.0.sql").write_text(
         "-- fixture SQL\n", encoding="utf-8"
+    )
+    (package_extension / "pg_local_cache--1.1.0.sql").write_text(
+        "-- fixture SQL\n", encoding="utf-8"
+    )
+    (package_extension / "pg_local_cache--1.0.0--1.1.0.sql").write_text(
+        "-- fixture upgrade SQL\n", encoding="utf-8"
     )
 
     auto_conf = data / "postgresql.auto.conf"
@@ -96,7 +126,7 @@ def _fake_packaged_install(
             f"""\
             #!/usr/bin/env bash
             case "$1" in
-              --version) printf '%s\\n' 'PostgreSQL 16.14' ;;
+              --version) printf '%s\\n' 'PostgreSQL {postgres_major}.14' ;;
               --pkglibdir) printf '%s\\n' {str(target_lib)!r} ;;
               --sharedir) printf '%s\\n' {str(target_share)!r} ;;
               --bindir) printf '%s\\n' {str(bin_directory)!r} ;;
@@ -127,7 +157,7 @@ def _fake_packaged_install(
             fi
 
             if [[ "$query" == 'SHOW server_version_num' ]]; then
-              printf '160014\\n'
+              printf '%s\\n' "$FAKE_SERVER_VERSION_NUM"
             elif [[ "$query" == *'rolsuper FROM'* ]]; then
               printf 't\\n'
             elif [[ "$query" == *'NOT pg_catalog.pg_is_in_recovery'* ]]; then
@@ -213,6 +243,7 @@ def _fake_packaged_install(
             "FAKE_ACTIVE_WORKERS": str(active_workers),
             "FAKE_CONFIGURED_PORT": str(configured_port),
             "FAKE_CONFIGURED_WORKERS": str(configured_workers),
+            "FAKE_SERVER_VERSION_NUM": f"{postgres_major}0014",
         }
     )
     return {
@@ -397,9 +428,52 @@ class InstallerContracts(unittest.TestCase):
             self.assertTrue(
                 (
                     Path(fixture["target_extension"])
-                    / "pg_local_cache--1.0.0.sql"
+                    / "pg_local_cache--1.1.0.sql"
                 ).is_file()
             )
+            self.assertTrue(
+                (
+                    Path(fixture["target_extension"])
+                    / "pg_local_cache--1.0.0--1.1.0.sql"
+                ).is_file()
+            )
+
+    def test_binary_mismatch_fails_before_any_install_write(self) -> None:
+        if not sys.platform.startswith("linux"):
+            raise unittest.SkipTest("installer runtime fixtures require GNU/Linux")
+        ldd = subprocess.run(
+            ["ldd", "--version"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        host_libc = "musl" if "musl" in (ldd.stdout + ldd.stderr).lower() else "glibc"
+        wrong_libc = "glibc" if host_libc == "musl" else "musl"
+        cases = (
+            ({"package_postgres_major": 15}, "targets PostgreSQL 15"),
+            ({"package_libc": wrong_libc}, "binary libc"),
+            ({"package_os": "darwin"}, "binary targets darwin"),
+            ({"package_architecture": "arm64"}, "binary architecture arm64"),
+        )
+        for options, message in cases:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as raw:
+                fixture = _fake_packaged_install(Path(raw), **options)
+                result = subprocess.run(
+                    _installer_arguments(fixture, "install", "--mode", "sql-only"),
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=fixture["environment"],
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stdout + result.stderr)
+                self.assertEqual(list(Path(fixture["target_lib"]).iterdir()), [])
+                self.assertEqual(
+                    list(Path(fixture["target_extension"]).iterdir()), []
+                )
+                self.assertFalse(Path(fixture["state"]).exists())
 
     def test_resp_token_accepts_only_owner_readable_0400_or_0600(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
@@ -605,9 +679,8 @@ class ReleaseContracts(unittest.TestCase):
         self.assertIn('stable_sha=""', source)
         self.assertIn('if resolved_stable_sha="$(\n', source)
         self.assertIn('stable_sha="$resolved_stable_sha"', source)
-        self.assertIn('local existing resolved_existing', source)
-        self.assertIn('if resolved_existing="$(\n', source)
-        self.assertIn('existing="$resolved_existing"', source)
+        self.assertIn('local tag="$1" existing', source)
+        self.assertIn('if existing="$(gh api', source)
 
     def test_release_creation_avoids_cross_api_tag_propagation_race(self) -> None:
         source = RELEASE.read_text(encoding="utf-8")
@@ -625,20 +698,22 @@ class ReleaseContracts(unittest.TestCase):
     def test_binary_asset_scope_and_installer_are_explicit(self) -> None:
         workflow = RELEASE.read_text(encoding="utf-8")
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("pg16-bookworm-amd64", workflow)
-        self.assertIn("platform=linux/amd64", workflow)
-        self.assertIn("distribution=debian12-bookworm", workflow)
+        self.assertIn("postgres_major: [14, 15, 16, 17, 18]", workflow)
+        self.assertIn("variant: bookworm", workflow)
+        self.assertIn("variant: alpine3.23", workflow)
+        self.assertIn("libc: glibc", workflow)
+        self.assertIn("libc: musl", workflow)
+        self.assertIn("architecture=amd64", workflow)
         self.assertIn("scripts/install-existing.sh", workflow)
-        self.assertIn("benchmarks/SCENARIOS.md", workflow)
         self.assertIn("docs/MONITORING.md", workflow)
-        self.assertIn("monitoring/README.md", workflow)
         self.assertIn("AS extension", dockerfile)
         self.assertIn("FROM extension AS runtime", dockerfile)
+        self.assertIn('make PG_CONFIG="$pg_config" with_llvm=no clean', dockerfile)
 
     def test_release_requires_both_exact_commit_benchmark_artifacts(self) -> None:
         source = RELEASE.read_text(encoding="utf-8")
         start = source.index(
-            "- name: Preserve benchmark evidence from the successful CI run"
+            "- name: Preserve benchmark evidence from successful CI"
         )
         end = source.index("- name: Create and verify checksums", start)
         evidence_step = source[start:end]
