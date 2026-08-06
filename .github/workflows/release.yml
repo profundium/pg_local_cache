@@ -107,10 +107,17 @@ jobs:
           if [[ -z "$workflow_run_id" ]]; then
             workflow_run_id="$(
               gh api \
-                "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=master&event=push&status=success&per_page=100" \
-                --jq "[.workflow_runs[] | select(.head_sha == \"${sha}\")][0].id // empty"
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=master&head_sha=${sha}&status=success&per_page=100" \
+                --jq '[
+                  .workflow_runs[]
+                  | select(
+                      .event == "push" or
+                      .event == "workflow_dispatch"
+                    )
+                ][0].id // empty'
             )"
           fi
+
           [[ -n "$workflow_run_id" ]] || {
             echo "::error::No successful master CI run exists for ${sha}"
             exit 1
