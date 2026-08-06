@@ -163,11 +163,15 @@ jobs:
             --tag "$image" \
             .
 
-          reported="$(docker run --rm --entrypoint postgres "$image" --version)"
+          reported="$(
+            docker run --rm \
+              --env LD_BIND_NOW=1 \
+              --env "LD_PRELOAD=${pkglibdir}/pg_local_cache.so" \
+              --entrypoint postgres \
+              "$image" \
+              --version
+          )"
           [[ "$reported" == *" ${POSTGRES_MAJOR}."* ]]
-          pkglibdir="$(docker run --rm --entrypoint /bin/sh "$image" -ec 'pg_config --pkglibdir')"
-          docker run --rm --entrypoint /bin/sh "$image" -ec \
-            "ldd '${pkglibdir}/pg_local_cache.so'"
 
       - name: Assemble deterministic binary archive
         shell: bash
