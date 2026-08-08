@@ -230,6 +230,169 @@ def assert_no_custom_scan(plan: str) -> None:
     assert "pg_local_cache_sql" not in plan, plan
 
 
+def wait_for_query(
+    marker: str,
+    *,
+    expected_state: str,
+    expected_wait_event_type: str | None = None,
+    expected_wait_event: str | None = None,
+) -> int:
+    escaped_marker = marker.replace("'", "''")
+    deadline = time.monotonic() + 10
+    while True:
+        observed = admin_sql(
+            "SELECT pid::text || '|' || state || '|' || "
+            "COALESCE(wait_event_type, '') || '|' || COALESCE(wait_event, '') "
+            "FROM pg_catalog.pg_stat_activity "
+            "WHERE pid <> pg_backend_pid() "
+            f"AND pg_catalog.strpos(query, '{escaped_marker}') > 0 "
+            "ORDER BY query_start DESC LIMIT 1"
+        )
+        if observed:
+            pid, state, wait_event_type, wait_event = observed.split("|", 3)
+            if (
+                state == expected_state
+                and (
+                    expected_wait_event_type is None
+                    or wait_event_type == expected_wait_event_type
+                )
+                and (
+                    expected_wait_event is None
+                    or wait_event == expected_wait_event
+                )
+            ):
+                return int(pid)
+        assert time.monotonic() < deadline, (
+            marker,
+            observed,
+            expected_state,
+            expected_wait_event_type,
+            expected_wait_event,
+        )
+        time.sleep(0.02)
+
+
+def assert_negative_cache_respects_old_snapshot(
+    *,
+    relation: str,
+    barrier: str,
+    source_id: int,
+    mutation_sql: str,
+    expected_json: str,
+    suffix: str,
+    case: str,
+) -> None:
+    blocker_marker = f"pglc_neg_block_{case}_{suffix}"
+    reader_marker = f"pglc_neg_reader_{case}_{suffix}"
+    blocker = subprocess.Popen(
+        psql_base_args(application=False),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=os.environ.copy(),
+    )
+    reader: subprocess.Popen[str] | None = None
+    blocker_pid: int | None = None
+    try:
+        assert blocker.stdin is not None
+        blocker.stdin.write(
+            "BEGIN;\n"
+            f"UPDATE {barrier} SET value = value + 1 WHERE id = 1;\n"
+            f"SELECT pg_sleep(30) /* {blocker_marker} */;\n"
+            "COMMIT;\n"
+        )
+        blocker.stdin.close()
+        blocker_pid = wait_for_query(
+            blocker_marker,
+            expected_state="active",
+            expected_wait_event_type="Timeout",
+            expected_wait_event="PgSleep",
+        )
+
+        reader = subprocess.Popen(
+            psql_base_args(application=True)
+            + [
+                "-c",
+                f"/* {reader_marker} */ "
+                "WITH gate AS MATERIALIZED ("
+                f"SELECT id FROM {barrier} WHERE id = 1 FOR UPDATE) "
+                "SELECT local_cache.get("
+                f"'{relation}'::regclass, {source_id}::bigint), "
+                "array_to_json(local_cache.mget("
+                f"'{relation}'::regclass, "
+                f"ARRAY[{source_id}]::bigint[]))::text FROM gate",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={**os.environ, "PGPASSWORD": APP_PASSWORD},
+        )
+        wait_for_query(
+            reader_marker,
+            expected_state="active",
+            expected_wait_event_type="Lock",
+        )
+
+        admin_sql(mutation_sql)
+        assert (
+            app_sql(
+                "SELECT local_cache.get("
+                f"'{relation}'::regclass, {source_id}::bigint)"
+            )
+            == ""
+        )
+        before = stats()
+
+        assert (
+            admin_sql(
+                "SELECT pg_catalog.pg_terminate_backend("
+                f"{blocker_pid})"
+            )
+            == "t"
+        )
+        blocker_pid = None
+        blocker.wait(timeout=10)
+        blocker_output = blocker.stdout.read() if blocker.stdout is not None else ""
+        assert reader is not None
+        reader_output, _ = reader.communicate(timeout=10)
+        assert reader.returncode == 0, reader_output
+        columns = reader_output.strip().split("|", 1)
+        assert columns[0] == expected_json, {
+            "case": case,
+            "reader": reader_output,
+            "blocker": blocker_output,
+        }
+        assert json.loads(columns[1]) == [expected_json], {
+            "case": case,
+            "reader": reader_output,
+        }
+        assert_counter_delta(before, stats(), sql_cache_misses=2)
+    finally:
+        if blocker_pid is not None:
+            try:
+                admin_sql(
+                    "SELECT pg_catalog.pg_terminate_backend("
+                    f"{blocker_pid})"
+                )
+            except AssertionError:
+                pass
+        if blocker.poll() is None:
+            blocker.terminate()
+            try:
+                blocker.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                blocker.kill()
+                blocker.wait(timeout=5)
+        if reader is not None and reader.poll() is None:
+            reader.terminate()
+            try:
+                reader.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                reader.kill()
+                reader.wait(timeout=5)
+
+
 def main() -> None:
     suffix = str(os.getpid())
     table = f"pglc_sql_fastpath_{suffix}"
@@ -476,8 +639,8 @@ def main() -> None:
         assert_counter_delta(
             before,
             stats(),
-            sql_cache_hits=5,
-            sql_cache_misses=3,
+            sql_cache_hits=4,
+            sql_cache_misses=4,
             sql_cache_fills=3,
         )
 
@@ -700,6 +863,46 @@ def main() -> None:
             before, stats(), sql_cache_hits=1, sql_cache_bypasses=3
         )
 
+        # A latest-snapshot negative entry cannot prove absence for a
+        # statement whose READ COMMITTED snapshot was taken before a concurrent
+        # DELETE or primary-key move.  SQL GET and MGET must execute the source
+        # plan so PostgreSQL can return the older visible row version.
+        negative_delete_id = missing_id + 1
+        negative_move_id = missing_id + 2
+        negative_moved_id = missing_id + 3
+        admin_sql(
+            f"INSERT INTO {relation} VALUES "
+            f"({negative_delete_id}, 'delete-visible'), "
+            f"({negative_move_id}, 'move-visible')"
+        )
+        assert_negative_cache_respects_old_snapshot(
+            relation=relation,
+            barrier=barrier,
+            source_id=negative_delete_id,
+            mutation_sql=(
+                f"DELETE FROM {relation} WHERE id = {negative_delete_id}"
+            ),
+            expected_json=(
+                f'{{"id":{negative_delete_id},"value":"delete-visible"}}'
+            ),
+            suffix=suffix,
+            case="delete",
+        )
+        assert_negative_cache_respects_old_snapshot(
+            relation=relation,
+            barrier=barrier,
+            source_id=negative_move_id,
+            mutation_sql=(
+                f"UPDATE {relation} SET id = {negative_moved_id} "
+                f"WHERE id = {negative_move_id}"
+            ),
+            expected_json=(
+                f'{{"id":{negative_move_id},"value":"move-visible"}}'
+            ),
+            suffix=suffix,
+            case="pk_move",
+        )
+
         if RESP_PORT != 0:
             # RESP negative entries are never authoritative for ordinary SQL.
             client = RespClient()
@@ -863,8 +1066,8 @@ def main() -> None:
             "Param and LIMIT 1, EXPLAIN, "
             "GUC fallback, transactional read-your-writes/rollback, "
             "JSON GET/MGET, commit and inheritance invalidation, "
-            "old-snapshot bypass, "
-            "negative fallback, unsupported-shape fallback, and NOSUPERUSER "
+            "old-snapshot and negative MVCC fallback, "
+            "unsupported-shape fallback, and NOSUPERUSER "
             "ACL enforcement"
         )
     finally:

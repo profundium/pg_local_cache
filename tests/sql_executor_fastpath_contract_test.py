@@ -194,6 +194,17 @@ class SqlExecutorFastPathContracts(unittest.TestCase):
         self.assertIn("if (payload_cacheable)", canonical)
         self.assertNotIn("if (!found || payload_cacheable)", canonical)
 
+    def test_sql_negative_entries_are_not_mvcc_authoritative(self) -> None:
+        canonical = c_function("pglc_sql_get_canonical")
+        negative_guard = canonical.index("if (!negative)")
+        miss = canonical.index("pglc_note_sql_cache_miss()")
+        self.assertLess(negative_guard, miss)
+        negative_path = canonical[negative_guard:miss]
+        preceding_comment = canonical[:negative_guard]
+        self.assertIn("latest committed absence", preceding_comment)
+        self.assertIn("READ COMMITTED statement snapshot", preceding_comment)
+        self.assertNotIn("PG_RETURN_NULL()", negative_path)
+
     def test_runtime_common_path_uses_an_exact_validation_version(self) -> None:
         invalidate = c_function("pglc_sql_relcache_invalidation")
         self.assertGreaterEqual(

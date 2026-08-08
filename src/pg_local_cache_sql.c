@@ -2516,31 +2516,37 @@ pglc_sql_get_canonical(FunctionCallInfo fcinfo,
 			&state->mapping, canonical, state->payload, PGLC_VALUE_MAX,
 			&cached_len, &negative, &source_xmin, &token))
 	{
-		if (negative)
+		/*
+		 * A negative entry proves only latest committed absence.  The active
+		 * READ COMMITTED statement snapshot may still see a row version that
+		 * a concurrent DELETE or primary-key UPDATE removed after the snapshot
+		 * was taken.  SQL GET/MGET must let PostgreSQL resolve that snapshot.
+		 */
+		if (!negative)
 		{
-			pglc_note_sql_cache_hit();
-			PG_RETURN_NULL();
+			visibility = pglc_sql_source_visibility(
+				source_xmin, token.source_observed_full_xid,
+				GetActiveSnapshot());
+			if (visibility == PGLC_SOURCE_VISIBLE &&
+				pglc_row_payload_get_json_checked(
+					state->payload, cached_len, state->mapping.row_type_oid,
+					state->mapping.row_typmod, state->mapping.row_natts,
+					state->mapping.row_descriptor_fingerprint,
+					&json, &json_len))
+			{
+				(void) pglc_sql_row_cache_store(
+					&state->mapping, state->mapping.row_desc,
+					state->mapping.row_descriptor_fingerprint, canonical,
+					canonical_len, row_cache_hash, state->payload, cached_len,
+					source_xmin, &token, true, NULL);
+				pglc_note_sql_cache_hit();
+				PG_RETURN_TEXT_P(cstring_to_text_with_len(json, json_len));
+			}
+			if (visibility == PGLC_SOURCE_AGE_EXPIRED ||
+				visibility == PGLC_SOURCE_VISIBLE)
+				(void) pglc_cache_retire_positive(
+					&state->mapping, canonical, &token, source_xmin);
 		}
-		visibility = pglc_sql_source_visibility(
-			source_xmin, token.source_observed_full_xid, GetActiveSnapshot());
-		if (visibility == PGLC_SOURCE_VISIBLE &&
-			pglc_row_payload_get_json_checked(
-				state->payload, cached_len, state->mapping.row_type_oid,
-				state->mapping.row_typmod, state->mapping.row_natts,
-				state->mapping.row_descriptor_fingerprint, &json, &json_len))
-		{
-			(void) pglc_sql_row_cache_store(
-				&state->mapping, state->mapping.row_desc,
-				state->mapping.row_descriptor_fingerprint, canonical,
-				canonical_len, row_cache_hash, state->payload, cached_len,
-				source_xmin, &token, true, NULL);
-			pglc_note_sql_cache_hit();
-			PG_RETURN_TEXT_P(cstring_to_text_with_len(json, json_len));
-		}
-		if (visibility == PGLC_SOURCE_AGE_EXPIRED ||
-			visibility == PGLC_SOURCE_VISIBLE)
-			(void) pglc_cache_retire_positive(
-				&state->mapping, canonical, &token, source_xmin);
 	}
 	if (cacheable)
 	{
