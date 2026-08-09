@@ -5,6 +5,12 @@ on:
     branches: ["master"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Dispatch release after successful CI
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -249,3 +255,31 @@ jobs:
           path: ${{ runner.temp }}/sql-only-benchmark/
           if-no-files-found: warn
           retention-days: 30
+
+  dispatch-release:
+    name: dispatch release
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    needs:
+      - source-unit
+      - monitoring-config
+      - comparative-docker-smoke
+      - docker-integration
+      - docker-compatibility
+      - docker-sql-only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Dispatch release for the successful version commit
+        shell: bash
+        run: |
+          gh workflow run release.yml \
+            --ref master \
+            --raw-field "ref=${GITHUB_SHA}" \
+            --raw-field "ci_run_id=${GITHUB_RUN_ID}" \
+            --field publish_pgxn=true

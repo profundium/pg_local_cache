@@ -54,6 +54,11 @@ on:
         required: false
         default: master
         type: string
+      publish:
+        description: Publish an existing stable release
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -64,7 +69,9 @@ concurrency:
 
 jobs:
   validate:
-    if: github.event_name != 'workflow_run'
+    if: >-
+      github.event_name != 'workflow_run' &&
+      (github.event_name != 'workflow_dispatch' || !inputs.publish)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -88,17 +95,25 @@ jobs:
 
   publish:
     if: >-
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'master' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'master' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      ) || (
+        github.event_name == 'workflow_dispatch' &&
+        inputs.publish
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+      RELEASE_SHA: >-
+        ${{ github.event_name == 'workflow_run'
+            && github.event.workflow_run.head_sha
+            || inputs.ref }}
     steps:
       - name: Check out released source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -267,7 +282,7 @@ jobs:
               ;;
           esac
 
-          for attempt in $(seq 1 18); do
+          for attempt in $(seq 1 72); do
             if curl --fail --silent --show-error \
                 --output "$mirrored" "$remote_archive" 2>/dev/null; then
               cmp --silent "$asset" "$mirrored" || {

@@ -6,6 +6,20 @@ on:
     branches: ["master"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact commit SHA to release
+        required: false
+        type: string
+      ci_run_id:
+        description: CI run containing benchmark evidence
+        required: false
+        type: string
+      publish_pgxn:
+        description: Dispatch PGXN publication after release
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -45,10 +59,12 @@ jobs:
       TARGET_SHA: >-
         ${{ github.event_name == 'workflow_run'
             && github.event.workflow_run.head_sha
+            || inputs.ref
             || github.sha }}
       TRIGGER_RUN_ID: >-
         ${{ github.event_name == 'workflow_run'
             && github.event.workflow_run.id
+            || inputs.ci_run_id
             || '' }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -348,7 +364,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-      actions: read
+      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -428,3 +444,12 @@ jobs:
             upload_missing_assets "$STABLE_TAG"
             gh release edit "$STABLE_TAG" --draft=false --prerelease=false
           fi
+
+      - name: Dispatch PGXN publication
+        if: inputs.publish_pgxn
+        shell: bash
+        run: |
+          gh workflow run pgxn.yml \
+            --ref master \
+            --raw-field "ref=${RELEASE_SHA}" \
+            --field publish=true

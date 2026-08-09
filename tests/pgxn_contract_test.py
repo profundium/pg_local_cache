@@ -176,6 +176,8 @@ class PgxnArchiveContracts(unittest.TestCase):
             'workflows: ["Release PostgreSQL 14-18 Linux artifacts"]',
             source,
         )
+        self.assertIn("github.event_name == 'workflow_dispatch'", source)
+        self.assertIn("inputs.publish", source)
         self.assertIn("make pgxn-check dist", source)
         self.assertIn('commit_tag="master-${sha:0:12}"', source)
         self.assertIn('stable_tag="v${version}"', source)
@@ -191,6 +193,7 @@ class PgxnArchiveContracts(unittest.TestCase):
         self.assertIn('--form "archive=@${asset};type=application/zip"', source)
         self.assertIn("api.pgxn.org/dist/pg_local_cache", source)
         self.assertIn('cmp --silent "$asset" "$mirrored"', source)
+        self.assertIn("for attempt in $(seq 1 72)", source)
         self.assertNotIn("pgxn/pgxn-tools", source)
 
 

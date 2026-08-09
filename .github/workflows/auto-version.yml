@@ -94,4 +94,4 @@ jobs:
 
           # Pushes made with GITHUB_TOKEN do not recursively start workflows.
           # Dispatch CI explicitly for the new version-bearing master commit.
-          gh workflow run ci.yml --ref master
+          gh workflow run ci.yml --ref master --field release=true

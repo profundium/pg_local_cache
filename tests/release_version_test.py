@@ -281,7 +281,19 @@ class VersionWorkflowSourceTests(unittest.TestCase):
         self.assertIn('-m "chore(release): v${RELEASE_VERSION}"', source)
         self.assertIn('-m "[skip version]"', source)
         self.assertIn("git push origin HEAD:master", source)
-        self.assertIn("gh workflow run ci.yml --ref master", source)
+        self.assertIn(
+            "gh workflow run ci.yml --ref master --field release=true", source
+        )
+
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.release", ci)
+        self.assertIn("GH_REPO: ${{ github.repository }}", ci)
+        self.assertIn("gh workflow run release.yml", ci)
+        self.assertIn('--raw-field "ref=${GITHUB_SHA}"', ci)
+        self.assertIn('--raw-field "ci_run_id=${GITHUB_RUN_ID}"', ci)
+        self.assertIn("--field publish_pgxn=true", ci)
 
     def test_release_workflow_skips_unprepared_and_superseded_commits(self) -> None:
         source = (
@@ -296,6 +308,10 @@ class VersionWorkflowSourceTests(unittest.TestCase):
         self.assertIn(
             "if: needs.metadata.outputs.release_ready == 'true'", source
         )
+        self.assertIn("|| inputs.ref", source)
+        self.assertIn("|| inputs.ci_run_id", source)
+        self.assertIn("gh workflow run pgxn.yml", source)
+        self.assertIn("--field publish=true", source)
 
 
 if __name__ == "__main__":
