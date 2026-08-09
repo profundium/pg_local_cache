@@ -280,8 +280,16 @@ class VersionWorkflowSourceTests(unittest.TestCase):
         self.assertIn('git commit \\', source)
         self.assertIn('-m "chore(release): v${RELEASE_VERSION}"', source)
         self.assertIn('-m "[skip version]"', source)
-        self.assertIn("git push origin HEAD:master", source)
+        self.assertIn('release_ref="release/v${RELEASE_VERSION}"', source)
         self.assertIn(
+            'git push --atomic origin HEAD:master "HEAD:refs/heads/${release_ref}"',
+            source,
+        )
+        self.assertIn(
+            'gh workflow run ci.yml --ref "$release_ref" --field release=true',
+            source,
+        )
+        self.assertNotIn(
             "gh workflow run ci.yml --ref master --field release=true", source
         )
 
