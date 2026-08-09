@@ -27,6 +27,10 @@ auto_version = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = auto_version
 SPEC.loader.exec_module(auto_version)
 
+BASE_VERSION = auto_version.read_control_version(ROOT)
+MINOR_VERSION = BASE_VERSION.bump("minor")
+PATCH_VERSION = BASE_VERSION.bump("patch")
+
 
 def run(root: Path, *arguments: str) -> str:
     result = subprocess.run(
@@ -76,8 +80,8 @@ def copy_fixture(destination: Path) -> Path:
     run(root, "git", "config", "user.name", "Release Test")
     run(root, "git", "config", "user.email", "release-test@example.invalid")
     run(root, "git", "add", "-A")
-    run(root, "git", "commit", "-m", "chore: establish 1.1.0 baseline")
-    run(root, "git", "tag", "v1.1.0")
+    run(root, "git", "commit", "-m", f"chore: establish {BASE_VERSION} baseline")
+    run(root, "git", "tag", f"v{BASE_VERSION}")
     return root
 
 
@@ -123,45 +127,57 @@ class VersionWorkflowTests(unittest.TestCase):
 
             plan = auto_version.plan_version(root)
             self.assertEqual(plan.action, "bump")
-            self.assertEqual(str(plan.next_version), "1.2.0")
+            self.assertEqual(plan.next_version, MINOR_VERSION)
             self.assertEqual(plan.bump, "minor")
             auto_version.apply_version(root, plan)
 
             self.assertIn(
-                "default_version = '1.2.0'",
+                f"default_version = '{MINOR_VERSION}'",
                 (root / "pg_local_cache.control").read_text(),
             )
             metadata = json.loads((root / "META.json").read_text())
-            self.assertEqual(metadata["version"], "1.2.0")
+            self.assertEqual(metadata["version"], str(MINOR_VERSION))
             self.assertEqual(
                 metadata["provides"]["pg_local_cache"]["file"],
-                "sql/pg_local_cache--1.2.0.sql",
+                f"sql/pg_local_cache--{MINOR_VERSION}.sql",
             )
             worker = (root / "src" / "pg_local_cache_worker.c").read_text()
-            self.assertIn("pg_local_cache_version:1.2.0\\r\\n", worker)
-            self.assertIn("$5\\r\\n1.2.0\\r\\n", worker)
+            self.assertIn(
+                f"pg_local_cache_version:{MINOR_VERSION}\\r\\n", worker
+            )
+            self.assertIn(
+                f"${len(str(MINOR_VERSION))}\\r\\n{MINOR_VERSION}\\r\\n", worker
+            )
             for compose in ("compose.yaml", "compose.sql-only.yaml"):
                 self.assertIn(
-                    "image: pg_local_cache:1.2.0",
+                    f"image: pg_local_cache:{MINOR_VERSION}",
                     (root / compose).read_text(),
                 )
-            self.assertTrue((root / "sql/pg_local_cache--1.2.0.sql").is_file())
-            upgrade = root / "sql/pg_local_cache--1.1.0--1.2.0.sql"
+            self.assertTrue(
+                (root / f"sql/pg_local_cache--{MINOR_VERSION}.sql").is_file()
+            )
+            upgrade = (
+                root
+                / f"sql/pg_local_cache--{BASE_VERSION}--{MINOR_VERSION}.sql"
+            )
             self.assertIn("SQL objects are unchanged", upgrade.read_text())
             makefile = (root / "Makefile").read_text()
-            self.assertIn("sql/pg_local_cache--1.2.0.sql", makefile)
-            self.assertIn("sql/pg_local_cache--1.1.0--1.2.0.sql", makefile)
+            self.assertIn(f"sql/pg_local_cache--{MINOR_VERSION}.sql", makefile)
+            self.assertIn(
+                f"sql/pg_local_cache--{BASE_VERSION}--{MINOR_VERSION}.sql",
+                makefile,
+            )
             auto_version.validate_repository(root)
 
             run(root, "git", "add", "-A")
-            run(root, "git", "commit", "-m", "chore(release): v1.2.0")
+            run(root, "git", "commit", "-m", f"chore(release): v{MINOR_VERSION}")
             handoff = auto_version.plan_version(root)
             self.assertEqual(handoff.action, "release")
             self.assertTrue(handoff.release_ready)
             self.assertFalse(handoff.changed)
-            self.assertEqual(str(handoff.next_version), "1.2.0")
+            self.assertEqual(handoff.next_version, MINOR_VERSION)
 
-            run(root, "git", "tag", "v1.2.0")
+            run(root, "git", "tag", f"v{MINOR_VERSION}")
             complete = auto_version.plan_version(root)
             self.assertEqual(complete.action, "none")
             self.assertFalse(complete.release_ready)
@@ -181,18 +197,18 @@ class VersionWorkflowTests(unittest.TestCase):
 
             forced = auto_version.plan_version(root, "patch")
             self.assertEqual(forced.action, "bump")
-            self.assertEqual(str(forced.next_version), "1.1.1")
+            self.assertEqual(forced.next_version, PATCH_VERSION)
             auto_version.apply_version(root, forced)
             run(root, "git", "add", "-A")
-            run(root, "git", "commit", "-m", "chore(release): v1.1.1")
+            run(root, "git", "commit", "-m", f"chore(release): v{PATCH_VERSION}")
             handoff = auto_version.plan_version(root)
             self.assertEqual(handoff.action, "release")
-            self.assertEqual(str(handoff.current_version), "1.1.1")
+            self.assertEqual(handoff.current_version, PATCH_VERSION)
 
     def test_sql_changes_require_an_incremental_fragment(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             root = copy_fixture(Path(raw_directory))
-            install = root / "sql/pg_local_cache--1.1.0.sql"
+            install = root / f"sql/pg_local_cache--{BASE_VERSION}.sql"
             baseline = install.read_text()
             install.write_text(baseline + "\nCREATE FUNCTION local_cache.fixture() RETURNS int LANGUAGE sql AS 'SELECT 1';\n")
             run(root, "git", "add", str(install.relative_to(root)))
@@ -217,15 +233,21 @@ class VersionWorkflowTests(unittest.TestCase):
             plan = auto_version.plan_version(root)
             auto_version.apply_version(root, plan)
             self.assertEqual(
-                (root / "sql/pg_local_cache--1.1.0.sql").read_text(),
+                (root / f"sql/pg_local_cache--{BASE_VERSION}.sql").read_text(),
                 baseline,
             )
             self.assertIn(
                 "local_cache.fixture",
-                (root / "sql/pg_local_cache--1.2.0.sql").read_text(),
+                (root / f"sql/pg_local_cache--{MINOR_VERSION}.sql").read_text(),
             )
-            upgrade = (root / "sql/pg_local_cache--1.1.0--1.2.0.sql").read_text()
-            self.assertIn("ALTER EXTENSION pg_local_cache UPDATE TO '1.2.0'", upgrade)
+            upgrade = (
+                root
+                / f"sql/pg_local_cache--{BASE_VERSION}--{MINOR_VERSION}.sql"
+            ).read_text()
+            self.assertIn(
+                f"ALTER EXTENSION pg_local_cache UPDATE TO '{MINOR_VERSION}'",
+                upgrade,
+            )
             self.assertIn("local_cache.fixture", upgrade)
             self.assertFalse(fragment.exists())
 
