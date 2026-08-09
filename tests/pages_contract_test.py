@@ -63,6 +63,25 @@ def front_matter(path: Path) -> dict[str, str]:
 
 
 class PagesSourceContracts(unittest.TestCase):
+    def test_docs_publish_bounded_batch_contracts_without_benchmark_leakage(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        technical = (ROOT / "docs" / "TECHNICAL.md").read_text(encoding="utf-8")
+        install = (ROOT / "docs" / "INSTALL_EXISTING.md").read_text(
+            encoding="utf-8"
+        )
+        benchmarks = (ROOT / "docs" / "BENCHMARKS.md").read_text(
+            encoding="utf-8"
+        )
+        homepage = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("two-dimensional `text[][]`", readme)
+        self.assertIn("`MGET key [key ...]`", technical)
+        self.assertIn("There is no separate prewarm or pin API", readme)
+        self.assertIn("ARRAY[['tenant-a', '42']", install)
+        for source in (readme, benchmarks, homepage):
+            self.assertIn("single-column", source)
+            self.assertIn("RESP MGET", source)
+
     def test_homepage_is_semantic_static_html(self) -> None:
         source = (ROOT / "index.html").read_text(encoding="utf-8")
         parser = _IndexParser()

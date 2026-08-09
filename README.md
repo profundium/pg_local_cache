@@ -37,7 +37,7 @@ amd64 (glibc or musl), one configured database, and one writable primary.
 | Whole rows | Each entry stores one versioned PostgreSQL composite row. |
 | Transactional invalidation | `INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE` fence affected entries before commit visibility. |
 | Bounded extension memory | Entry capacity, client slots, and deterministic extension allocations are fixed at startup. |
-| Optional RESP2 | Trusted internal clients can use authenticated whole-row `GET`, `SET`, and `DEL`. |
+| Optional RESP2 | Trusted internal clients can use authenticated whole-row `GET`, bounded `MGET`, `SET`, and `DEL`. |
 | Operations | SQL metrics, health checks, Prometheus rules, and a Grafana dashboard are included. |
 
 ## Docker quick start
@@ -156,7 +156,25 @@ SELECT local_cache.mget(
     'public.items'::regclass,
     ARRAY[42, 7, 42]::bigint[]
 );
+
+SELECT local_cache.mget(
+    'public.tenant_items'::regclass,
+    ARRAY[['tenant-a', '42'], ['tenant-b', '7']]::text[][]
+);
 ```
+
+For a single-column primary key, `mget` preserves input order, duplicates and
+`NULL` positions; a missing row also produces an aligned `NULL` result.
+
+The same `mget(regclass, anyarray)` function accepts composite keys as a
+two-dimensional `text[][]`: each inner row contains one complete primary key in
+`attach_table()` column order. Composite batches preserve order and duplicates,
+return `NULL` for a missing row, reject `NULL` key components, and are limited to
+1,024 keys. Each component is converted with its primary-key type's normal
+PostgreSQL input function.
+
+SQL `mget` and RESP `MGET` are also the supported way to warm a known set of
+keys. There is no separate prewarm or pin API.
 
 The functions are `SECURITY INVOKER`: the caller still needs `SELECT` on the
 source table. Ordinary tuple reads need no `local_cache` schema or function
@@ -285,8 +303,9 @@ A separate [CI run 30803546805](https://github.com/profundium/pg_local_cache/act
 for [source `fe2d23c`](https://github.com/profundium/pg_local_cache/commit/fe2d23c87ddc7e523ada2951376ebcb7d8570fb1)
 measured `local_cache.mget()` at 64,954 prepared and 66,156 unnamed-extended
 key ops/s: 10.30x and 10.39x the stock PostgreSQL batch query in that specific
-32-key JSON workload. This explicit API and workload are not directly
-comparable with ordinary `SELECT`, statements/s, or RESP `GET`.
+32-key JSON workload. This historical measurement covers only single-column
+`bigint[]` SQL MGET. It does not measure composite SQL MGET or RESP MGET and is
+not directly comparable with ordinary `SELECT`, statements/s, or RESP `GET`.
 
 See the [benchmark methodology and exact commands](docs/BENCHMARKS.md), the
 [scenario definitions](benchmarks/SCENARIOS.md), the latest
@@ -317,6 +336,8 @@ Older reviewed versions remain available on the
 - Encoded cache entries are limited to 8 KiB; oversized rows use PostgreSQL.
 - Transparent single-column `IN`/`ANY` accepts at most 1,024 elements and 16 MiB
   of query-local tuple copies; larger or mixed-safe batches use PostgreSQL.
+- Composite SQL `mget(text[][])` and RESP `MGET` accept at most 1,024 keys;
+  RESP additionally rejects an encoded batch response above its fixed bound.
 - At most 128 mappings and 16 primary-key columns per mapping.
 - No TTL, Redis Cluster, Lua, Pub/Sub, multi-primary, or standby cache serving.
 - RESP authentication is a shared-token boundary, not PostgreSQL user

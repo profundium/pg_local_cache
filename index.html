@@ -74,7 +74,7 @@ COMMIT
           <div class="benchmark-metric"><span>32-key SELECT IN</span><strong>2.64x</strong><p>865,201 vs 328,282 key ops/s</p></div>
           <div class="benchmark-metric"><span>Warm RESP GET</span><strong>0.72x Redis</strong><p>143,104 vs 197,522 ops/s</p></div>
         </div>
-        <p class="benchmark-note">The slower RESP result is shown deliberately: dedicated Redis and Valkey remain better raw protocol servers in this profile. A separate SQL MGET profile measured 10.30–10.39x its stock PostgreSQL batch, but it is a different API and workload.</p>
+        <p class="benchmark-note">The slower RESP result is shown deliberately: dedicated Redis and Valkey remain better raw protocol servers in this profile. A separate SQL MGET profile for single-column <code>bigint[]</code> measured 10.30–10.39x its stock PostgreSQL batch, but it is a different API and workload; it is not evidence for composite SQL or RESP MGET.</p>
         <p class="benchmark-evidence"><a href="https://github.com/profundium/pg_local_cache/actions/runs/31172234073">Run 31172234073</a> · <a href="https://github.com/profundium/pg_local_cache/commit/71b0aa3a27c5c009b7ba08bbaa660147f078bde8">source 71b0aa3</a> · <a href="{{ '/assets/benchmark-evidence/71b0aa3/whole-row.json' | relative_url }}">raw JSON</a> · <a href="{{ '/assets/benchmark-evidence/71b0aa3/whole-row.txt' | relative_url }}">rendered report</a>.</p>
       </div>
     </section>

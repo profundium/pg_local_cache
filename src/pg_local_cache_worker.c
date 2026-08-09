@@ -120,7 +120,9 @@ static bool cached_row_json(PgLocalCacheMapping *mapping,
 							char **json, Size *json_length);
 static void ensure_mapping_current(const PgLocalCacheMapping *mapping);
 static char *command_get(PgLocalCacheMapping *mapping, const char *raw_key,
-							 Size *response_length);
+							 TimestampTz deadline, Size *response_length);
+static char *command_mget(PgLocalCacheRespArg *args, int argc,
+							  Size *response_length);
 static char *command_set(PgLocalCacheMapping *mapping, const char *raw_key,
 							 const PgLocalCacheRespArg *value_arg,
 							 Size *response_length);
@@ -1071,7 +1073,7 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 		if (is_get)
 		{
 			pg_atomic_fetch_add_u64(&pglc_shared->client_gets, 1);
-			return command_get(mapping, raw_key, response_length);
+			return command_get(mapping, raw_key, 0, response_length);
 		}
 		if (is_set)
 		{
@@ -1080,6 +1082,16 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 		}
 		pg_atomic_fetch_add_u64(&pglc_shared->client_dels, 1);
 		return command_delete(mapping, raw_key, response_length);
+	}
+	if (pglc_resp_arg_equals(&args[0], "MGET"))
+	{
+		if (argc < 2)
+			return pglc_resp_error("ERR wrong number of arguments",
+								  response_length);
+		if (argc > PGLC_MGET_MAX_KEYS + 1)
+			return pglc_resp_error("ERR MGET accepts at most 1024 keys",
+								  response_length);
+		return command_mget(args, argc, response_length);
 	}
 
 	if (pglc_resp_arg_equals(&args[0], "PING"))
@@ -1572,16 +1584,17 @@ source_row_json(TupleTableSlot *slot, TupleDesc descriptor, Datum row,
 }
 
 static void
-begin_spi_transaction(void)
+begin_spi_transaction(int statement_timeout_ms)
 {
 	char		timeout[32];
 
+	Assert(statement_timeout_ms > 0);
 	StartTransactionCommand();
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "pg_local_cache could not connect to SPI");
 	PushActiveSnapshot(GetTransactionSnapshot());
 
-	snprintf(timeout, sizeof(timeout), "%d", pglc_statement_timeout_ms);
+	snprintf(timeout, sizeof(timeout), "%d", statement_timeout_ms);
 	(void) set_config_option("statement_timeout", timeout,
 							 PGC_USERSET, PGC_S_SESSION,
 							 GUC_ACTION_LOCAL, true, ERROR, false);
@@ -1589,7 +1602,7 @@ begin_spi_transaction(void)
 	(void) set_config_option("lock_timeout", timeout,
 							 PGC_USERSET, PGC_S_SESSION,
 							 GUC_ACTION_LOCAL, true, ERROR, false);
-	enable_timeout_after(STATEMENT_TIMEOUT, pglc_statement_timeout_ms);
+	enable_timeout_after(STATEMENT_TIMEOUT, statement_timeout_ms);
 }
 
 static void
@@ -1629,7 +1642,7 @@ note_resp_cache_lookup(bool hit, bool negative)
 
 static char *
 command_get(PgLocalCacheMapping *mapping, const char *raw_key,
-			Size *response_length)
+			TimestampTz deadline, Size *response_length)
 {
 	Datum		key_values[PGLC_MAX_KEY_COLUMNS];
 	char	   *canonical;
@@ -1651,8 +1664,11 @@ command_get(PgLocalCacheMapping *mapping, const char *raw_key,
 	bool		database_payload_cacheable = false;
 	TransactionId database_xmin = InvalidTransactionId;
 	MemoryContext result_context = CurrentMemoryContext;
+	int			statement_timeout_ms = pglc_statement_timeout_ms;
 	int			i;
 
+	if (deadline != 0 && GetCurrentTimestamp() >= deadline)
+		return pglc_resp_error("ERR MGET deadline exceeded", response_length);
 	if (!canonicalize_key(mapping, raw_key, key_values,
 						  &canonical, &key_error))
 		return pglc_resp_error(key_error, response_length);
@@ -1695,8 +1711,11 @@ command_get(PgLocalCacheMapping *mapping, const char *raw_key,
 	wait_started = GetCurrentTimestamp();
 	for (;;)
 	{
-		PgLocalCacheLoadClaim claim =
-			pglc_cache_claim_load(mapping, canonical, &token, &load_id);
+		PgLocalCacheLoadClaim claim;
+
+		if (deadline != 0 && GetCurrentTimestamp() >= deadline)
+			return pglc_resp_error("ERR MGET deadline exceeded", response_length);
+		claim = pglc_cache_claim_load(mapping, canonical, &token, &load_id);
 
 		if (claim == PGLC_LOAD_OWNER)
 		{
@@ -1755,10 +1774,24 @@ command_get(PgLocalCacheMapping *mapping, const char *raw_key,
 		ResetLatch(MyLatch);
 		CHECK_FOR_INTERRUPTS();
 	}
+	if (deadline != 0)
+	{
+		long		remaining_ms = TimestampDifferenceMilliseconds(
+			GetCurrentTimestamp(), deadline);
+
+		if (remaining_ms <= 0)
+		{
+			if (owns_load)
+				pglc_cache_release_load(mapping, canonical, &token, load_id);
+			return pglc_resp_error("ERR MGET deadline exceeded", response_length);
+		}
+		statement_timeout_ms = (int) Min((long) pglc_statement_timeout_ms,
+										 remaining_ms);
+	}
 
 	PG_TRY();
 	{
-		begin_spi_transaction();
+		begin_spi_transaction(statement_timeout_ms);
 		ensure_mapping_current(mapping);
 		pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
 		if (SPI_execute_plan(mapping->get_plan, values, NULL, true, 1) !=
@@ -1859,6 +1892,59 @@ command_get(PgLocalCacheMapping *mapping, const char *raw_key,
 }
 
 static char *
+command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
+{
+	int			key_count = argc - 1;
+	TimestampTz deadline = TimestampTzPlusMilliseconds(
+		GetCurrentTimestamp(), pglc_statement_timeout_ms);
+	PgLocalCacheMapping **mappings;
+	char	  **raw_keys;
+	int			key_index;
+	StringInfoData response;
+
+	mappings = palloc(mul_size(sizeof(*mappings), (Size) key_count));
+	raw_keys = palloc(mul_size(sizeof(*raw_keys), (Size) key_count));
+	for (key_index = 0; key_index < key_count; key_index++)
+	{
+		Datum		key_values[PGLC_MAX_KEY_COLUMNS];
+		char	   *canonical;
+		char	   *key_error = NULL;
+
+		if (!resolve_wire_key(&args[key_index + 1], &mappings[key_index],
+							  &raw_keys[key_index], &key_error) ||
+			!canonicalize_key(mappings[key_index], raw_keys[key_index],
+							  key_values, &canonical, &key_error))
+			return pglc_resp_error(key_error, response_length);
+		(void) canonical;
+	}
+
+	pg_atomic_fetch_add_u64(&pglc_shared->client_gets, (uint64) key_count);
+	initStringInfo(&response);
+	appendStringInfo(&response, "*%d\r\n", key_count);
+	for (key_index = 0; key_index < key_count; key_index++)
+	{
+		Size		element_length;
+		char	   *element = command_get(
+			mappings[key_index], raw_keys[key_index], deadline, &element_length);
+
+		if (element_length > 0 && element[0] == '-')
+		{
+			*response_length = element_length;
+			return element;
+		}
+		if (element_length > PGLC_RESPONSE_MAX ||
+			(Size) response.len > PGLC_RESPONSE_MAX - element_length)
+			return pglc_resp_error("ERR response exceeds limit",
+								  response_length);
+		appendBinaryStringInfo(&response, element, (int) element_length);
+	}
+	if (GetCurrentTimestamp() >= deadline)
+		return pglc_resp_error("ERR MGET deadline exceeded", response_length);
+	*response_length = (Size) response.len;
+	return response.data;
+}
+
+static char *
 command_set(PgLocalCacheMapping *mapping, const char *raw_key,
 			const PgLocalCacheRespArg *value_arg,
 			Size *response_length)
@@ -1887,7 +1973,7 @@ command_set(PgLocalCacheMapping *mapping, const char *raw_key,
 		values[i] = key_values[i];
 	row = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
 										 CStringGetDatum(value_text)));
-	begin_spi_transaction();
+	begin_spi_transaction(pglc_statement_timeout_ms);
 	ensure_mapping_current(mapping);
 	if (!row_json_validate(mapping, row, key_values, &key_error))
 		ereport(ERROR,
@@ -1924,7 +2010,7 @@ command_delete(PgLocalCacheMapping *mapping, const char *raw_key,
 		return pglc_resp_error(key_error, response_length);
 	(void) canonical;
 
-	begin_spi_transaction();
+	begin_spi_transaction(pglc_statement_timeout_ms);
 	ensure_mapping_current(mapping);
 	pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
 	pg_atomic_fetch_add_u64(&pglc_shared->sql_dels, 1);
@@ -2018,7 +2104,7 @@ reload_mappings(uint64 target_generation)
 		bool		count_is_null;
 		const char *mapping_query;
 
-		begin_spi_transaction();
+		begin_spi_transaction(pglc_statement_timeout_ms);
 		free_mapping_plans();
 		worker_mappings = NULL;
 		worker_mapping_count = 0;

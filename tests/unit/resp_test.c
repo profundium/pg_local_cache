@@ -121,7 +121,7 @@ test_malformed_requests(void)
 		{"PING\r\n", "only RESP2 arrays are accepted"},
 		{"*0\r\n", "invalid argument count"},
 		{"*-1\r\n", "invalid argument count"},
-		{"*17\r\n", "invalid argument count"},
+		{"*999999\r\n", "invalid argument count"},
 		{"*x\r\n", "invalid decimal length"},
 		{"*\r\n", "empty decimal length"},
 		{"*1\n", "invalid decimal length"},
@@ -156,6 +156,7 @@ test_argument_boundaries(void)
 {
 	char	   *request;
 	char	   *cursor;
+	char		header[64];
 	Size		request_length;
 	PgLocalCacheRespArg args[PGLC_RESP_MAX_ARGS];
 	const char *error;
@@ -163,12 +164,13 @@ test_argument_boundaries(void)
 	int			argc;
 	int			i;
 
-	request_length = strlen("*16\r\n") + (Size) PGLC_RESP_MAX_ARGS * 7;
+	snprintf(header, sizeof(header), "*%d\r\n", PGLC_RESP_MAX_ARGS);
+	request_length = strlen(header) + (Size) PGLC_RESP_MAX_ARGS * 7;
 	request = malloc(request_length + 1);
 	CHECK(request != NULL);
 	cursor = request;
-	memcpy(cursor, "*16\r\n", strlen("*16\r\n"));
-	cursor += strlen("*16\r\n");
+	memcpy(cursor, header, strlen(header));
+	cursor += strlen(header);
 	for (i = 0; i < PGLC_RESP_MAX_ARGS; i++)
 	{
 		memcpy(cursor, "$1\r\nx\r\n", strlen("$1\r\nx\r\n"));
@@ -186,6 +188,11 @@ test_argument_boundaries(void)
 		CHECK(args[i].data[0] == 'x');
 	}
 	free(request);
+
+	snprintf(header, sizeof(header), "*%d\r\n", PGLC_RESP_MAX_ARGS + 1);
+	CHECK(parse(header, strlen(header), args, &argc, &consumed,
+				&error) == -1);
+	CHECK(strcmp(error, "invalid argument count") == 0);
 
 	request_length = strlen("*1\r\n$65536\r\n") + PGLC_REQUEST_MAX + 2;
 	request = malloc(request_length);

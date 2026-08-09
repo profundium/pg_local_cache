@@ -170,12 +170,27 @@ KV-style callers can opt into the JSON functions:
 ```sql
 SELECT local_cache.get('public.items'::regclass, $1::bigint);
 SELECT local_cache.mget('public.items'::regclass, $1::bigint[]);
+SELECT local_cache.mget(
+    'public.tenant_items'::regclass,
+    ARRAY[['tenant-a', '42'], ['tenant-b', '7']]::text[][]
+);
 ```
 
 `get(regclass, anyelement)` returns complete-row JSON text and
-`mget(regclass, anyarray)` returns `text[]`. Duplicate keys and `NULL` elements
-are preserved. Bind or cast the scalar/array element to the actual single-column
-primary-key type.
+`mget(regclass, anyarray)` returns `text[]`. For a single-column primary key,
+duplicate keys and `NULL` elements are preserved; bind or cast the array element
+to the actual key type.
+
+For a composite primary key, `mget` accepts a two-dimensional `text[][]`. Each
+inner row is one key in `attach_table()` column order. The result preserves key
+order and duplicates and uses `NULL` for a missing row. Composite batches reject
+`NULL` components and more than 1,024 keys before reading the cache or source.
+Components are converted with their primary-key type's normal PostgreSQL input
+function.
+
+SQL `mget` and RESP `MGET` are the supported prewarm operation for a known key
+set. They use the normal lookup/fill paths; there is no separate prewarm or pin
+API.
 
 `get(regclass, text[])` is the fallback for composite and heterogeneous primary
 keys. Its components are in the order recorded by `attach_table()`. The function
@@ -360,12 +375,20 @@ whole-row mappings cannot contain `.` or `:`.
 | `AUTH token` | Authenticate with the shared token. |
 | `AUTH username token` | Authenticate when `username` equals the configured worker role. |
 | `GET CRUD:db.schema.table:{pk-json}` | Return complete row JSON; on a cache miss, read the source table. Return RESP null when the source row does not exist. |
+| `MGET key [key ...]` | Return an ordered RESP2 array using GET semantics for up to 1,024 whole-row keys, including composite keys and keys from different mappings. |
 | `SET CRUD:db.schema.table:{pk-json} row-json` | Perform a whole-row PostgreSQL upsert for a writable mapping and reply after commit. |
 | `DEL CRUD:db.schema.table:{pk-json}` | Delete the source row for a writable mapping and reply after commit. |
 | `INVALIDATE <scope>` | Invalidate an exact key, table, configured database, or the complete instance. |
 | `STAT` / `STATS` | Return native statistics plus a subset of KVik-style counter aliases. |
 | `PING`, `ECHO`, `HELLO 2`, `INFO`, `QUIT` | Supported connection and diagnostic subset. |
 | `CLIENT`, `COMMAND`, `SELECT 0` | Minimal compatibility responses for common Redis clients. |
+
+`MGET` validates every key before reading. Its response must fit the existing
+64 KiB value plus protocol-overhead bound or the command returns one error and
+queues no partial array. Existing `client_gets`, cache and database-read counters
+are incremented per logical key, as if the same keys were read with `GET`. One
+`pg_local_cache.statement_timeout_ms` deadline covers the complete command,
+including all single-flight waits and source reads.
 
 `SET` treats the wire key as authoritative. Primary-key fields may be omitted
 from the row JSON; when present, they must match the wire key. The value is a
@@ -385,7 +408,7 @@ operation without reading the source can repeat application effects.
 |---|---|---|
 | `CRUD:database.schema.table:{pk-json}` keys | Implemented | Whole-row mappings only. |
 | Composite primary keys | Implemented | 1–16 supported PK columns. |
-| Source fallback on `GET` | Implemented | Missing rows may be stored as negative RESP entries. |
+| Source fallback on `GET` / `MGET` | Implemented | Missing rows may be stored as negative RESP entries. |
 | Whole-row `SET` and `DEL` | Implemented | Mapping must be attached with `writable=true`; operations are PostgreSQL transactions. |
 | Key/table/database/global invalidation | Implemented | Uses version fences in shared memory. |
 | KVik-style statistic names | Partial aliases | Native counters remain authoritative; internal meanings are not claimed identical. |
@@ -393,7 +416,7 @@ operation without reading the source can repeat application effects.
 | PostgreSQL per-user authentication and ACLs | Not provided on RESP | One shared token and worker role cover every mapping. |
 | TLS | Not provided | Use loopback or an authenticated TLS proxy. |
 | TTL and expiration commands | Not provided | Entries have no TTL. |
-| Redis Cluster, Lua, Pub/Sub, transactions | Not provided | No `MGET`, `MULTI/WATCH`, scripting, or RESP3. |
+| Redis Cluster, Lua, Pub/Sub, transactions | Not provided | No `MULTI/WATCH`, scripting, or RESP3. |
 | Multiple databases, standbys, multi-primary | Not provided | One configured database on one writable primary. |
 
 ## Row payload format

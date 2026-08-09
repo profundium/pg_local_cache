@@ -317,6 +317,22 @@ GRANT EXECUTE ON FUNCTION local_cache.get(regclass, anyelement) TO app_user;
 GRANT EXECUTE ON FUNCTION local_cache.mget(regclass, anyarray) TO app_user;
 ```
 
+Use that same function for ordered single-column or composite batches:
+
+```sql
+SELECT local_cache.mget(
+    'public.items'::regclass,
+    ARRAY[42, 7, 42]::bigint[]
+);
+SELECT local_cache.mget(
+    'public.tenant_items'::regclass,
+    ARRAY[['tenant-a', '42'], ['tenant-b', '7']]::text[][]
+);
+```
+
+These calls also prewarm the requested keys through the normal lookup/fill path;
+no separate prewarm or pin function is needed.
+
 Verify the transparent exact-PK fast path:
 
 ```sql
@@ -370,6 +386,11 @@ installation changes to RESP or an active RESP worker count increases.
 Keep the RESP listener on loopback or a separately authenticated private
 network. Its shared token grants access to every mapping; PostgreSQL
 application-user ACL and RLS do not apply to RESP commands.
+
+After `AUTH`, RESP clients may issue `MGET key [key ...]` for up to 1,024
+whole-row keys. Keys may be composite or belong to different attached mappings;
+the ordered response contains a bulk value or null per key and is rejected as a
+single error if its encoded size exceeds the fixed response bound.
 
 ## Existing Docker volume
 

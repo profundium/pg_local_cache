@@ -138,6 +138,20 @@ def app_sql_fails(query: str, expected: str) -> None:
     assert expected.lower() in result.stdout.lower(), result.stdout
 
 
+def app_sql_raises_state(expression: str, expected_state: str) -> None:
+    app_script(
+        "DO $pglc$\n"
+        "BEGIN\n"
+        f"  PERFORM {expression};\n"
+        "  RAISE EXCEPTION USING ERRCODE = 'XX000', "
+        f"MESSAGE = 'expected SQLSTATE {expected_state}';\n"
+        "EXCEPTION\n"
+        f"  WHEN SQLSTATE '{expected_state}' THEN NULL;\n"
+        "END\n"
+        "$pglc$;\n"
+    )
+
+
 def stats() -> dict[str, int]:
     value = json.loads(admin_sql("SELECT local_cache.stats()::text"))
     for counter in SQL_COUNTERS:
@@ -393,11 +407,115 @@ def assert_negative_cache_respects_old_snapshot(
                 reader.wait(timeout=5)
 
 
+def test_composite_mget(relation: str, namespace: str) -> None:
+    alpha = '{"tenant":"alpha","id":1,"value":"one"}'
+    beta = '{"tenant":"beta","id":2,"value":"two"}'
+
+    admin_sql(f"SELECT local_cache.invalidate('{namespace}')")
+    rows = json.loads(
+        app_sql(
+            "SELECT array_to_json(local_cache.mget("
+            f"'{relation}'::regclass, "
+            "ARRAY[['alpha', '1'], ['beta', '2'], "
+            "['alpha', '1'], ['missing', '9']]::text[][]))::text"
+        )
+    )
+    assert rows == [alpha, beta, alpha, None], rows
+    assert app_sql(
+        "SELECT cardinality(local_cache.mget("
+        f"'{relation}'::regclass, ARRAY[]::text[][]))"
+    ) == "0"
+    assert app_sql(
+        "SELECT cardinality(local_cache.mget("
+        f"'{relation}'::regclass, ARRAY("
+        "SELECT ARRAY['alpha', '1']::text[] "
+        "FROM generate_series(1, 1024))))"
+    ) == "1024"
+
+    before = stats()
+    invalid = (
+        ("ARRAY['alpha', '1']::text[]", "22023"),
+        ("ARRAY[['alpha']]::text[][]", "22023"),
+        ("ARRAY[['alpha', NULL]]::text[][]", "22004"),
+        ("ARRAY[['alpha', 'not-a-bigint']]::text[][]", "22P02"),
+        (
+            "ARRAY(SELECT ARRAY['alpha', '1']::text[] "
+            "FROM generate_series(1, 1025))",
+            "22023",
+        ),
+    )
+    for keys, expected_state in invalid:
+        app_sql_raises_state(
+            f"local_cache.mget('{relation}'::regclass, {keys})",
+            expected_state,
+        )
+    assert_counter_delta(before, stats())
+
+    admin_sql(f"SELECT local_cache.invalidate('{namespace}')")
+    before = stats()
+    dirty_rows = app_script(
+        "BEGIN;\n"
+        f"UPDATE {relation} SET value = 'dirty' "
+        "WHERE tenant = 'alpha' AND id = 1;\n"
+        "SELECT array_to_json(local_cache.mget("
+        f"'{relation}'::regclass, "
+        "ARRAY[['alpha', '1'], ['beta', '2']]::text[][]))::text;\n"
+        "ROLLBACK;\n"
+    )
+    assert json.loads(dirty_rows) == [
+        '{"tenant":"alpha","id":1,"value":"dirty"}',
+        beta,
+    ], dirty_rows
+    assert_counter_delta(before, stats(), sql_cache_bypasses=2)
+
+    app_sql(
+        f"UPDATE {relation} SET value = 'committed' "
+        "WHERE tenant = 'alpha' AND id = 1"
+    )
+    rows = json.loads(
+        app_sql(
+            "SELECT array_to_json(local_cache.mget("
+            f"'{relation}'::regclass, "
+            "ARRAY[['alpha', '1'], ['beta', '2']]::text[][]))::text"
+        )
+    )
+    assert rows == [
+        '{"tenant":"alpha","id":1,"value":"committed"}',
+        beta,
+    ], rows
+
+    app_sql(f"DELETE FROM {relation} WHERE tenant = 'beta' AND id = 2")
+    assert json.loads(
+        app_sql(
+            "SELECT array_to_json(local_cache.mget("
+            f"'{relation}'::regclass, ARRAY[['beta', '2']]::text[][]))::text"
+        )
+    ) == [None]
+
+    app_sql(
+        f"UPDATE {relation} SET id = 3 "
+        "WHERE tenant = 'alpha' AND id = 1"
+    )
+    rows = json.loads(
+        app_sql(
+            "SELECT array_to_json(local_cache.mget("
+            f"'{relation}'::regclass, "
+            "ARRAY[['alpha', '1'], ['alpha', '3']]::text[][]))::text"
+        )
+    )
+    assert rows == [
+        None,
+        '{"tenant":"alpha","id":3,"value":"committed"}',
+    ], rows
+
+
 def main() -> None:
     suffix = str(os.getpid())
     table = f"pglc_sql_fastpath_{suffix}"
     barrier = f"public.pglc_sql_barrier_{suffix}"
     namespace = f"sqlfast{suffix}"
+    composite_relation = f"public.pglc_sql_composite_{suffix}"
+    composite_namespace = f"sqlcomposite{suffix}"
     inheritance_schema = f"pglc_sql_inh_{suffix}"
     inheritance_namespace = f"sqlinh{suffix}"
     inheritance_parent = f"{inheritance_schema}.parent_rows"
@@ -421,11 +539,21 @@ def main() -> None:
             f"CREATE TABLE {relation} ("
             "id bigint PRIMARY KEY, value text NOT NULL);"
             f"INSERT INTO {relation} VALUES (1, 'one'), (-1, 'minus-one');"
+            f"CREATE TABLE {composite_relation} ("
+            "tenant text, id bigint, value text NOT NULL, "
+            "PRIMARY KEY (tenant, id));"
+            f"INSERT INTO {composite_relation} VALUES "
+            "('alpha', 1, 'one'), ('beta', 2, 'two');"
             f"CREATE TABLE {barrier} (id integer PRIMARY KEY, value integer);"
             f"INSERT INTO {barrier} VALUES (1, 0);"
             "SELECT local_cache.attach_table("
             f"'{relation}'::regclass, false, '{namespace}');"
+            "SELECT local_cache.attach_table("
+            f"'{composite_relation}'::regclass, false, "
+            f"'{composite_namespace}');"
             f"GRANT SELECT, UPDATE ON TABLE {relation} TO {quoted_app_role};"
+            f"GRANT SELECT, UPDATE, DELETE ON TABLE {composite_relation} "
+            f"TO {quoted_app_role};"
             f"GRANT SELECT, UPDATE ON TABLE {barrier} TO {quoted_app_role};"
             f"GRANT USAGE ON SCHEMA local_cache TO {quoted_app_role};"
             "GRANT EXECUTE ON FUNCTION local_cache.get(regclass, text[]) "
@@ -643,6 +771,8 @@ def main() -> None:
             sql_cache_misses=4,
             sql_cache_fills=3,
         )
+
+        test_composite_mget(composite_relation, composite_namespace)
 
         # The canonical KV API stays inside ordinary PostgreSQL SQL.  Its
         # first execution reads the attached source and fills; the second
@@ -1066,6 +1196,7 @@ def main() -> None:
             "Param and LIMIT 1, EXPLAIN, "
             "GUC fallback, transactional read-your-writes/rollback, "
             "JSON GET/MGET, commit and inheritance invalidation, "
+            "composite MGET validation and transaction semantics, "
             "old-snapshot and negative MVCC fallback, "
             "unsupported-shape fallback, and NOSUPERUSER "
             "ACL enforcement"
@@ -1099,6 +1230,7 @@ def main() -> None:
                 "END\n"
                 "$cleanup$;\n"
                 f"DROP TABLE IF EXISTS {relation};\n"
+                f"DROP TABLE IF EXISTS {composite_relation};\n"
                 f"DROP TABLE IF EXISTS {barrier};\n"
                 f"DROP SCHEMA IF EXISTS {inheritance_schema} CASCADE;\n"
             ),

@@ -74,6 +74,9 @@ failed batches.
 
 ## SQL GET/MGET results (separate snapshot)
 
+This preserved profile measures only single-column `bigint[]` SQL MGET. It is
+not evidence for composite SQL MGET or RESP MGET.
+
 The strict throughput profile used 16 connections and a 32-key array. These
 are the complete SQL commands after pgbench created the 32 key variables; both
 protocol lanes used the same SQL text:

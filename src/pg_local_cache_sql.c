@@ -236,6 +236,13 @@ typedef struct PgLocalCacheSqlGetState
 	char	   *payload;
 } PgLocalCacheSqlGetState;
 
+typedef struct PgLocalCacheSqlMgetKey
+{
+	Datum		values[PGLC_MAX_KEY_COLUMNS];
+	char		canonical[PGLC_KEY_MAX];
+	Size		canonical_len;
+} PgLocalCacheSqlMgetKey;
+
 bool		pglc_sql_cache = true;
 
 static set_rel_pathlist_hook_type previous_set_rel_pathlist_hook = NULL;
@@ -2296,22 +2303,13 @@ pglc_sql_get_state(FunctionCallInfo fcinfo, Oid relation_oid)
 }
 
 static bool
-pglc_sql_get_keys(PgLocalCacheSqlGetState *state, ArrayType *array,
-				  Datum *values, char *canonical, Size *canonical_len)
+pglc_sql_get_values(PgLocalCacheSqlGetState *state, Datum *elements,
+					bool *nulls, int count, Datum *values,
+					char *canonical, Size *canonical_len)
 {
-	Datum	   *elements;
-	bool	   *nulls;
 	bool		key_nulls[PGLC_MAX_KEY_COLUMNS] = {false};
-	int			count;
 	int			key_index;
 
-	deconstruct_array(array, TEXTOID, -1, false, TYPALIGN_INT,
-					  &elements, &nulls, &count);
-	if (count != state->mapping.key_count)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("expected %d primary-key values, got %d",
-						state->mapping.key_count, count)));
 	for (key_index = 0; key_index < count; key_index++)
 	{
 		char	   *input;
@@ -2329,6 +2327,25 @@ pglc_sql_get_keys(PgLocalCacheSqlGetState *state, ArrayType *array,
 	return pglc_canonical_key_typed(
 		values, key_nulls, count, state->mapping.key_types,
 		state->mapping.key_outputs, canonical, PGLC_KEY_MAX, canonical_len);
+}
+
+static bool
+pglc_sql_get_keys(PgLocalCacheSqlGetState *state, ArrayType *array,
+				  Datum *values, char *canonical, Size *canonical_len)
+{
+	Datum	   *elements;
+	bool	   *nulls;
+	int			count;
+
+	deconstruct_array(array, TEXTOID, -1, false, TYPALIGN_INT,
+					  &elements, &nulls, &count);
+	if (count != state->mapping.key_count)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("expected %d primary-key values, got %d",
+						state->mapping.key_count, count)));
+	return pglc_sql_get_values(
+		state, elements, nulls, count, values, canonical, canonical_len);
 }
 
 static bool
@@ -2658,6 +2675,80 @@ pglc_sql_get_scalar_common(FunctionCallInfo fcinfo,
 }
 
 static Datum
+pglc_sql_mget_rows(FunctionCallInfo fcinfo,
+				   PgLocalCacheSqlGetState *state, ArrayType *key_array)
+{
+	Datum	   *elements;
+	bool	   *nulls;
+	int			element_count;
+	int			key_count;
+	int			key_index;
+	int			component_count;
+	PgLocalCacheSqlMgetKey *keys;
+	ArrayBuildState *result = NULL;
+
+	if (ARR_ELEMTYPE(key_array) != TEXTOID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("SQL mget for a composite primary key requires text[][]")));
+	if (ARR_NDIM(key_array) == 0)
+		return PointerGetDatum(construct_empty_array(TEXTOID));
+	if (ARR_NDIM(key_array) != 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("SQL mget for a composite primary key requires a two-dimensional array")));
+	key_count = ARR_DIMS(key_array)[0];
+	component_count = ARR_DIMS(key_array)[1];
+	if (component_count != state->mapping.key_count)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("expected %d primary-key values per key, got %d",
+						state->mapping.key_count, component_count)));
+	if (key_count > PGLC_SQL_ARRAY_MAX_KEYS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("SQL composite mget accepts at most %d keys",
+						PGLC_SQL_ARRAY_MAX_KEYS)));
+	deconstruct_array(key_array, TEXTOID, -1, false, TYPALIGN_INT,
+					  &elements, &nulls, &element_count);
+	Assert(element_count == key_count * component_count);
+	keys = palloc0(mul_size((Size) key_count, sizeof(*keys)));
+
+	/* Validate and canonicalize the complete batch before any cache/source read. */
+	for (key_index = 0; key_index < key_count; key_index++)
+	{
+		PgLocalCacheSqlMgetKey *key = &keys[key_index];
+		int			component_offset = key_index * component_count;
+
+		if (!pglc_sql_get_values(
+				state, &elements[component_offset], &nulls[component_offset],
+				component_count, key->values, key->canonical,
+				&key->canonical_len) || key->canonical_len == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("canonical primary key exceeds %d bytes",
+							PGLC_KEY_MAX - 1)));
+	}
+	for (key_index = 0; key_index < key_count; key_index++)
+	{
+		PgLocalCacheSqlMgetKey *key = &keys[key_index];
+		Datum		value;
+		bool		isnull;
+
+		fcinfo->isnull = false;
+		value = pglc_sql_get_canonical(
+			fcinfo, state, key->values, key->canonical, key->canonical_len);
+		isnull = fcinfo->isnull;
+		fcinfo->isnull = false;
+		result = accumArrayResult(
+			result, value, isnull, TEXTOID, CurrentMemoryContext);
+	}
+	if (result == NULL)
+		return PointerGetDatum(construct_empty_array(TEXTOID));
+	return makeArrayResult(result, CurrentMemoryContext);
+}
+
+static Datum
 pglc_sql_mget_common(FunctionCallInfo fcinfo,
 					 PgLocalCacheSqlGetState *state)
 {
@@ -2681,6 +2772,8 @@ pglc_sql_mget_common(FunctionCallInfo fcinfo,
 	key_array = PG_GETARG_ARRAYTYPE_P(1);
 	key_type = ARR_ELEMTYPE(key_array);
 	pglc_sql_get_acl_check(state);
+	if (state->mapping.key_count > 1)
+		return pglc_sql_mget_rows(fcinfo, state, key_array);
 	if (state->mapping.key_count != 1 ||
 		key_type != state->mapping.key_types[0])
 		ereport(ERROR,

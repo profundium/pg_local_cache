@@ -31,6 +31,7 @@ WRITER_PASSWORD = os.environ.get("PG_LOCAL_CACHE_TEST_WRITER_PASSWORD", "")
 WRITER_HOST = os.environ.get("PG_LOCAL_CACHE_TEST_WRITER_HOST", "127.0.0.1")
 BACKPRESSURE_VALUE_BYTES = 3_900
 MAX_PIPELINE_INPUT_BYTES = 65_536
+MAX_RESPONSE_BYTES = 65_536 + 1_024
 
 if WORKER_ROLE and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]{0,62}", WORKER_ROLE):
     raise ValueError("PG_LOCAL_CACHE_TEST_ROLE is not a safe SQL identifier")
@@ -217,6 +218,22 @@ def crud_key(table: str, row_id: int | str) -> str:
     )
 
 
+def composite_key(table: str, tenant: str, row_id: int | str) -> str:
+    return (
+        f"CRUD:{PGDATABASE}.public.{table}:"
+        + json.dumps(
+            {"tenant": tenant, "id": str(row_id)}, separators=(",", ":")
+        )
+    )
+
+
+def composite_row_bytes(tenant: str, row_id: int, value: str) -> bytes:
+    return json.dumps(
+        {"tenant": tenant, "id": row_id, "value": value},
+        separators=(",", ":"),
+    ).encode()
+
+
 def start_idle_writer(
     table: str, value: str, *, application_name: str
 ) -> subprocess.Popen[str]:
@@ -346,6 +363,112 @@ def test_warm_pipeline_has_no_sql_reads(table: str) -> None:
         assert after["cache_misses"] - before["cache_misses"] == 0
         assert after["database_reads"] - before["database_reads"] == 0
         assert after["cache_hits"] - before["cache_hits"] == count
+    finally:
+        client.close()
+
+
+def test_mget(table: str, composite_table: str) -> None:
+    unauthenticated = RespConnection(authenticate=False)
+    try:
+        try:
+            unauthenticated.command("MGET", crud_key(table, 1))
+            raise AssertionError("unauthenticated MGET did not fail")
+        except RespError as error:
+            assert "NOAUTH" in str(error)
+    finally:
+        unauthenticated.close()
+
+    client = RespConnection()
+    try:
+        try:
+            client.command("MGET")
+            raise AssertionError("zero-key MGET did not fail")
+        except RespError as error:
+            assert "wrong number of arguments" in str(error)
+
+        key_one = crud_key(table, 1)
+        key_two = crud_key(table, 2)
+        missing = crud_key(table, 9_000_000_000)
+        composite = composite_key(composite_table, "tenant-a", 1)
+        malformed = f"CRUD:{PGDATABASE}.public.unknown:{{\"id\":\"1\"}}"
+
+        before_invalid = json.loads(client.command("STAT"))
+        try:
+            client.command("MGET", key_one, malformed)
+            raise AssertionError("partially valid MGET did not fail")
+        except RespError as error:
+            assert "unknown KVik table mapping" in str(error)
+        after_invalid = json.loads(client.command("STAT"))
+        for counter in ("client_gets", "cache_hits", "cache_misses", "database_reads"):
+            assert after_invalid[counter] == before_invalid[counter], (
+                counter,
+                before_invalid,
+                after_invalid,
+            )
+
+        mixed_arguments = (key_one, missing, key_one, composite, key_two)
+        mixed_request = client.encode("MGET", *mixed_arguments)
+        assert len(mixed_request) < MAX_PIPELINE_INPUT_BYTES
+        before = json.loads(client.command("STAT"))
+        client.socket.sendall(mixed_request)
+        mixed = client.read_response()
+        assert mixed == [
+            row_bytes(1, "initial"),
+            None,
+            row_bytes(1, "initial"),
+            composite_row_bytes("tenant-a", 1, "composite"),
+            row_bytes(2, "x" * BACKPRESSURE_VALUE_BYTES),
+        ], mixed
+        after = json.loads(client.command("STAT"))
+        assert after["client_gets"] - before["client_gets"] == 5
+        assert after["cache_hits"] - before["cache_hits"] == 3
+        assert after["cache_misses"] - before["cache_misses"] == 2
+        assert after["database_reads"] - before["database_reads"] == 2
+
+        repeated = client.command("MGET", *mixed_arguments)
+        assert repeated == mixed
+        repeated_stats = json.loads(client.command("STAT"))
+        assert repeated_stats["client_gets"] - after["client_gets"] == 5
+        assert repeated_stats["cache_hits"] - after["cache_hits"] == 5
+        assert repeated_stats["negative_hits"] - after["negative_hits"] == 1
+        assert repeated_stats["database_reads"] == after["database_reads"]
+
+        maximum_arguments = [key_one] * 1_024
+        maximum_request = client.encode("MGET", *maximum_arguments)
+        assert len(maximum_request) < MAX_PIPELINE_INPUT_BYTES
+        maximum = client.command("MGET", *maximum_arguments)
+        assert maximum == [row_bytes(1, "initial")] * 1_024
+
+        one_over_request = client.encode("MGET", *([key_one] * 1_025))
+        assert len(one_over_request) < MAX_PIPELINE_INPUT_BYTES
+        try:
+            client.socket.sendall(one_over_request)
+            client.read_response()
+            raise AssertionError("1025-key MGET did not fail")
+        except RespError as error:
+            assert "at most 1024 keys" in str(error)
+        assert client.command("PING") == "PONG"
+
+        large_value = row_bytes(2, "x" * BACKPRESSURE_VALUE_BYTES)
+
+        def encoded_array_size(count: int) -> int:
+            element_size = len(f"${len(large_value)}\r\n") + len(large_value) + 2
+            return len(f"*{count}\r\n") + count * element_size
+
+        large_count = 1
+        while encoded_array_size(large_count + 1) <= MAX_RESPONSE_BYTES:
+            large_count += 1
+        assert encoded_array_size(large_count) <= MAX_RESPONSE_BYTES
+        assert encoded_array_size(large_count + 1) > MAX_RESPONSE_BYTES
+        assert client.command("MGET", *([key_two] * large_count)) == [
+            large_value
+        ] * large_count
+        try:
+            client.command("MGET", *([key_two] * (large_count + 1)))
+            raise AssertionError("oversized MGET response did not fail")
+        except RespError as error:
+            assert "response exceeds limit" in str(error)
+        assert client.command("PING") == "PONG"
     finally:
         client.close()
 
@@ -641,12 +764,15 @@ def test_transactional_commit_and_rollback(table: str) -> None:
 
 def main() -> None:
     suffix = str(os.getpid())
-    table = f"pglc_pipeline_{suffix}"
+    table = f"p{suffix}"
+    composite_table = f"c{suffix}"
     mapping_namespace = f"pipeline{suffix}"
+    composite_namespace = f"pipelinec{suffix}"
     granted_roles = list(dict.fromkeys(filter(None, (WORKER_ROLE, WRITER_ROLE))))
     grant = "".join(
         f"GRANT USAGE ON SCHEMA public TO {sql_identifier(role)};"
-        f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.{table} "
+        f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+        f"public.{table}, public.{composite_table} "
         f"TO {sql_identifier(role)};"
         for role in granted_roles
     )
@@ -658,9 +784,17 @@ def main() -> None:
         f"(1, 'initial'), (2, repeat('x', {BACKPRESSURE_VALUE_BYTES})), "
         "(3, 'delete-once'), "
         "(4, 'malformed-tail'), (5, 'auth-tail');"
+        f"CREATE TABLE public.{composite_table} ("
+        "tenant text, id bigint, value text NOT NULL, "
+        "PRIMARY KEY (tenant, id));"
+        f"INSERT INTO public.{composite_table} VALUES "
+        "('tenant-a', 1, 'composite');"
         f"{grant}"
         f"SELECT local_cache.attach_table("
-        f"'public.{table}'::regclass, true, '{mapping_namespace}')"
+        f"'public.{table}'::regclass, true, '{mapping_namespace}');"
+        f"SELECT local_cache.attach_table("
+        f"'public.{composite_table}'::regclass, true, "
+        f"'{composite_namespace}')"
     )
     try:
         bootstrap = RespConnection()
@@ -677,6 +811,7 @@ def main() -> None:
         test_fragmented_suffix_and_order(table)
         test_command_error_does_not_poison_batch(table)
         test_warm_pipeline_has_no_sql_reads(table)
+        test_mget(table, composite_table)
         test_pipeline_budget_is_a_fairness_yield()
         test_half_close_drains_final_pipeline(table)
         test_backpressure_preserves_every_response(table)
@@ -685,12 +820,16 @@ def main() -> None:
         print(
             "pipeline integration passed: fragmentation/order, warm-hit stats, "
             "error recovery, fairness resume, half-close drain, backpressure, "
-            "close-after-flush, commit/rollback fence, non-superuser writer"
+            "bounded MGET, close-after-flush, commit/rollback fence, "
+            "non-superuser writer"
         )
     finally:
         sql(
             f"SELECT local_cache.detach_table('public.{table}'::regclass);"
-            f"DROP TABLE IF EXISTS public.{table}"
+            f"SELECT local_cache.detach_table("
+            f"'public.{composite_table}'::regclass);"
+            f"DROP TABLE IF EXISTS public.{table};"
+            f"DROP TABLE IF EXISTS public.{composite_table}"
         )
 
 

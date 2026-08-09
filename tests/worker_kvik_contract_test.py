@@ -5,6 +5,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKER = (ROOT / "src" / "pg_local_cache_worker.c").read_text()
+RESP_LIMITS = (ROOT / "src" / "resp_limits.h").read_text()
 WHOLE_ROW_INTEGRATION = (
     ROOT / "tests" / "whole_row_integration.py"
 ).read_text()
@@ -71,6 +72,47 @@ class KvikWireContractTests(unittest.TestCase):
         self.assertIn("pglc_cache_invalidate_key", dispatch)
         self.assertIn("pglc_database", dispatch)
         self.assertNotIn("get_database_name", dispatch)
+
+    def test_mget_is_authenticated_bounded_and_prevalidated(self):
+        dispatch = c_function(WORKER, "execute_command_inner")
+        mget_at = dispatch.index('pglc_resp_arg_equals(&args[0], "MGET")')
+        self.assertLess(dispatch.index("if (!client->authenticated)"), mget_at)
+        self.assertLess(dispatch.index("is_get ="), mget_at)
+        self.assertIn("PGLC_MGET_MAX_KEYS + 1", dispatch)
+        self.assertIn("command_get(mapping, raw_key, 0, response_length)", dispatch)
+
+        mget = c_function(WORKER, "command_mget")
+        validate_at = mget.index("resolve_wire_key(")
+        deadline_at = mget.index("TimestampTzPlusMilliseconds(")
+        canonical_at = mget.index("canonicalize_key(")
+        count_at = mget.index("client_gets")
+        read_at = mget.index("command_get(")
+        self.assertLess(deadline_at, validate_at)
+        self.assertLess(validate_at, canonical_at)
+        self.assertLess(canonical_at, count_at)
+        self.assertLess(count_at, read_at)
+        self.assertIn("PGLC_RESPONSE_MAX - element_length", mget)
+        self.assertIn('element[0] == \'-\'', mget)
+        self.assertNotIn("pglc_cache_lookup", mget)
+        self.assertIn("TimestampTzPlusMilliseconds(", mget)
+        self.assertIn("pglc_statement_timeout_ms", mget)
+        self.assertIn("raw_keys[key_index], deadline", mget)
+        self.assertIn("ERR MGET deadline exceeded", mget)
+
+        get = c_function(WORKER, "command_get")
+        wait_loop = get[get.index("for (;;)") :]
+        self.assertIn("TimestampDifferenceMilliseconds(", get)
+        self.assertIn("begin_spi_transaction(statement_timeout_ms)", get)
+        self.assertIn("ERR MGET deadline exceeded", get)
+        self.assertLess(
+            wait_loop.index("GetCurrentTimestamp() >= deadline"),
+            wait_loop.index("pglc_cache_claim_load("),
+        )
+        self.assertLess(
+            get.index("ERR MGET deadline exceeded"),
+            get.index("begin_spi_transaction(statement_timeout_ms)"),
+        )
+        self.assertIn("#define PGLC_MGET_MAX_KEYS 1024", RESP_LIMITS)
 
 
 class WholeRowWorkerContractTests(unittest.TestCase):

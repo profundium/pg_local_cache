@@ -202,6 +202,22 @@ class SqlExecutorFastPathContracts(unittest.TestCase):
         self.assertIn("if (payload_cacheable)", canonical)
         self.assertNotIn("if (!found || payload_cacheable)", canonical)
 
+    def test_composite_mget_prevalidates_before_reads(self) -> None:
+        common = c_function("pglc_sql_mget_common")
+        self.assertIn("state->mapping.key_count > 1", common)
+        composite = c_function("pglc_sql_mget_rows")
+        for guard in (
+            "ARR_NDIM(key_array) == 0",
+            "ARR_NDIM(key_array) != 2",
+            "ARR_DIMS(key_array)[1]",
+            "key_count > PGLC_SQL_ARRAY_MAX_KEYS",
+        ):
+            self.assertIn(guard, composite)
+        validate_at = composite.index("pglc_sql_get_values(")
+        read_at = composite.index("pglc_sql_get_canonical(")
+        self.assertLess(validate_at, read_at)
+        self.assertNotIn("mget_" + "composite", SOURCE + INSTALL_SQL)
+
     def test_sql_negative_entries_are_not_mvcc_authoritative(self) -> None:
         canonical = c_function("pglc_sql_get_canonical")
         negative_guard = canonical.index("if (!negative)")
