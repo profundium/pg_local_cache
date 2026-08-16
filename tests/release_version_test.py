@@ -107,6 +107,12 @@ class VersionClassificationTests(unittest.TestCase):
             ),
             "major",
         )
+        self.assertEqual(
+            auto_version.classify_message(
+                "docs: explain migration\n\nBREAKING CHANGE: old API removed"
+            ),
+            "major",
+        )
         self.assertEqual(auto_version.classify_message("Improve validation"), "patch")
         self.assertEqual(auto_version.classify_message("Merge pull request #42"), "none")
         self.assertEqual(

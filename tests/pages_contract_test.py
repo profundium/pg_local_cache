@@ -24,7 +24,6 @@ class DocumentationContracts(unittest.TestCase):
     def test_product_surface_is_mget_only(self) -> None:
         for retired in (
             "local_cache.get(",
-            "pg_local_cache.sql_cache",
             "Custom Scan",
             "transparent SQL",
             "planner hook",
@@ -58,6 +57,20 @@ class DocumentationContracts(unittest.TestCase):
             "source table",
         ):
             self.assertIn(phrase, TEXT)
+
+    def test_2_0_breaking_upgrade_is_explicit(self) -> None:
+        readme = DOCS[0].read_text(encoding="utf-8")
+        install = DOCS[1].read_text(encoding="utf-8")
+        self.assertIn("BREAKING CHANGE", readme)
+        for phrase in (
+            "Version 2.0",
+            "ordinary `SELECT`",
+            "local_cache.get",
+            "array element `[1]`",
+            "one-row `text[][]`",
+            "pg_local_cache.sql_cache",
+        ):
+            self.assertIn(phrase, install)
 
     def test_benchmark_docs_have_no_retired_sql_lane(self) -> None:
         benchmark_text = (ROOT / "docs" / "BENCHMARKS.md").read_text()

@@ -11,6 +11,10 @@ Ordinary `SELECT` is untouched and always uses PostgreSQL's normal planner.
 PostgreSQL remains the source of truth; writes invalidate affected cache entries
 transactionally.
 
+**BREAKING CHANGE:** 2.0 removes the 1.x transparent `SELECT` acceleration and
+the `local_cache.get` function. Use ordinary SQL or explicit
+`local_cache.mget`; see [upgrade from 1.x](docs/INSTALL_EXISTING.md#upgrade-from-1x).
+
 ## Install
 
 Linux amd64, PostgreSQL 14–18, glibc or musl:
