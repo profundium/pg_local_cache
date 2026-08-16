@@ -293,16 +293,16 @@ jobs:
             --dbname postgres >/dev/null
           docker cp "$extracted_root/." "$container:/artifact/"
           docker exec --user root "$container" chown -R 0:0 /artifact
-          before="$(docker exec "$container" sha256sum \
-            /var/lib/postgresql/data/postgresql.auto.conf)"
+          before="$(docker exec "$container" sh -c \
+            'sha256sum "$PGDATA/postgresql.auto.conf"')"
           docker exec "$container" /artifact/install.sh preflight \
             --database postgres --postgres-os-user postgres \
             --pg-config pg_config --psql psql --mode sql-only
           docker exec "$container" /artifact/install.sh install --dry-run \
             --database postgres --postgres-os-user postgres \
             --pg-config pg_config --psql psql --mode sql-only
-          after="$(docker exec "$container" sha256sum \
-            /var/lib/postgresql/data/postgresql.auto.conf)"
+          after="$(docker exec "$container" sh -c \
+            'sha256sum "$PGDATA/postgresql.auto.conf"')"
           test "$before" = "$after"
           python3 scripts/release_archive.py verify-identity \
             --archive "$archive" --identity "$identity"

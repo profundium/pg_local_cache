@@ -1930,6 +1930,10 @@ class ReleaseContracts(unittest.TestCase):
         )
         self.assertIn('docker cp "$extracted_root/."', binary)
         self.assertIn('/artifact/install.sh install --dry-run', binary)
+        self.assertEqual(
+            binary.count('sha256sum "$PGDATA/postgresql.auto.conf"'), 2
+        )
+        self.assertNotIn("/var/lib/postgresql/data/postgresql.auto.conf", binary)
         self.assertNotIn("scripts/install-existing.sh --help", binary)
 
         package_start = source.index("- name: Validate source and create source archive")
