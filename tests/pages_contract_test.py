@@ -300,24 +300,22 @@ class PagesSourceContracts(unittest.TestCase):
             self.assertIn(RELEASES_LATEST, source)
             self.assertNotIn("/releases/latest/download", source)
         for marker in (
-            'destination="$(pwd -P)/pg_local_cache-package"',
-            '[[ ! -e "$destination" ]]',
-            'mktemp -d "${TMPDIR:-/tmp}/pg_local_cache-bootstrap.XXXXXX"',
-            'trap cleanup EXIT',
-            "--write-out '%{url_effective}'",
-            "releases/tag/v(0|[1-9][0-9]*)",
+            "tag=vX.Y.Z",
+            'tmp="$(mktemp -d)"',
+            "trap 'rm -rf -- \"$tmp\"' EXIT",
+            "curl -fsSL",
+            "--proto '=https' --proto-redir '=https' --tlsv1.2",
             'base="https://github.com/profundium/pg_local_cache/releases/download/${tag}"',
-            '--output "$bootstrap/SHA256SUMS"',
-            '--output "$bootstrap/fetch-release.sh"',
+            '-o "$tmp/SHA256SUMS" "$base/SHA256SUMS"',
+            '-o "$tmp/fetch-release.sh" "$base/fetch-release.sh"',
             "awk '$2 == \"fetch-release.sh\"' SHA256SUMS",
+            '[ "$(wc -l < helper.sha256)" -eq 1 ]',
             "sha256sum --check --strict",
-            "sed -n '1,260p' ./fetch-release.sh",
-            "bash ./fetch-release.sh",
+            'bash "$tmp/fetch-release.sh"',
             '--release-tag "$tag"',
-            '--output-directory "$destination"',
+            '--output-directory "$(pwd -P)/pg_local_cache-package"',
         ):
             self.assertIn(marker, readme)
-        self.assertEqual(readme.count("--write-out '%{url_effective}'"), 1)
         self.assertNotIn("mktemp -d", install)
         self.assertNotIn("fetch-release.sh", homepage)
         self.assertIn("Manual release download", install)

@@ -186,50 +186,18 @@ for the exact planner, snapshot, and type rules.
 
 ## Verified binary release
 
-This bootstrap resolves the latest stable tag once, downloads the helper and
-its checksum from that immutable tag, leaves the final package at a path you
-choose, and deletes only its private temporary directory. Review the helper
-locally before running it. It uses no GitHub API or GitHub CLI.
+Open the [latest stable release](https://github.com/profundium/pg_local_cache/releases/latest)
+and copy its exact `vX.Y.Z` tag. The tag-bound helper selects and verifies the
+right package; it never executes the installer.
 
 ```bash
-destination="$(pwd -P)/pg_local_cache-package"
-[[ ! -e "$destination" ]] || { echo "destination already exists" >&2; exit 1; }
-
-umask 077
-bootstrap="$(mktemp -d "${TMPDIR:-/tmp}/pg_local_cache-bootstrap.XXXXXX")"
-cleanup() { rm -rf -- "$bootstrap"; }
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-latest_url="$(curl --fail --silent --show-error --location \
-  --proto '=https' --tlsv1.2 --output /dev/null --write-out '%{url_effective}' \
-  https://github.com/profundium/pg_local_cache/releases/latest)"
-[[ "$latest_url" =~ ^https://github\.com/profundium/pg_local_cache/releases/tag/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || exit 1
-tag="${latest_url##*/}"
-base="https://github.com/profundium/pg_local_cache/releases/download/${tag}"
-
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-  --output "$bootstrap/SHA256SUMS" "$base/SHA256SUMS"
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-  --output "$bootstrap/fetch-release.sh" "$base/fetch-release.sh"
-
-(
-  cd "$bootstrap"
-  helper_checksum="$(awk '$2 == "fetch-release.sh"' SHA256SUMS)"
-  [[ "$(printf '%s\n' "$helper_checksum" | wc -l)" -eq 1 ]]
-  printf '%s\n' "$helper_checksum" | sha256sum --check --strict
-  sed -n '1,260p' ./fetch-release.sh
-  bash ./fetch-release.sh \
-    --release-tag "$tag" \
-    --output-directory "$destination"
-)
+(tag=vX.Y.Z; base="https://github.com/profundium/pg_local_cache/releases/download/${tag}"; tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT; curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" -o "$tmp/fetch-release.sh" "$base/fetch-release.sh" && (cd "$tmp" && awk '$2 == "fetch-release.sh"' SHA256SUMS > helper.sha256 && [ "$(wc -l < helper.sha256)" -eq 1 ] && sha256sum --check --strict helper.sha256) && bash "$tmp/fetch-release.sh" --release-tag "$tag" --output-directory "$(pwd -P)/pg_local_cache-package")
 ```
 
-The helper detects PostgreSQL 14–18, Linux amd64 and glibc/musl, verifies the
-selected archive, and never executes its installer. If the target is not a
-published binary platform, use the [PGXN/source path](PGXN.md#install-from-pgxn).
+The helper validates the tag, detects PostgreSQL 14–18, Linux amd64 and
+glibc/musl, verifies the selected archive against that tag's `SHA256SUMS`, and
+safely extracts it. If the target is not a published binary platform, use the
+[PGXN/source path](PGXN.md#install-from-pgxn).
 The [manual release-asset route](docs/INSTALL_EXISTING.md#manual-release-download)
 keeps both the archive and `SHA256SUMS` directly reachable.
 
@@ -237,8 +205,8 @@ Run preflight, then stage files and settings online. Keep the state-directory
 path printed by `install`; staging is not activation:
 
 ```bash
-sudo "$destination/install.sh" preflight --database app --mode sql-only
-sudo "$destination/install.sh" install --database app --mode sql-only
+sudo ./pg_local_cache-package/install.sh preflight --database app --mode sql-only
+sudo ./pg_local_cache-package/install.sh install --database app --mode sql-only
 ```
 
 Have the operator restart PostgreSQL with the cluster's existing orchestration.
@@ -246,7 +214,7 @@ Then use the exact printed state path for expectation-only activation and
 verification:
 
 ```bash
-sudo "$destination/install.sh" verify \
+sudo ./pg_local_cache-package/install.sh verify \
   --state-directory /var/lib/pg_local_cache/install-state/install-PRINTED-ID
 ```
 
