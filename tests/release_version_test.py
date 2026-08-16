@@ -68,6 +68,7 @@ def copy_fixture(destination: Path) -> Path:
         "compose.yaml",
         "compose.sql-only.yaml",
         "pg_local_cache.control",
+        "src/pg_local_cache.h",
         "src/pg_local_cache_worker.c",
     ):
         target = root / relative
@@ -141,12 +142,12 @@ class VersionWorkflowTests(unittest.TestCase):
                 metadata["provides"]["pg_local_cache"]["file"],
                 f"sql/pg_local_cache--{MINOR_VERSION}.sql",
             )
-            worker = (root / "src" / "pg_local_cache_worker.c").read_text()
+            header = (root / "src" / "pg_local_cache.h").read_text()
             self.assertIn(
-                f"pg_local_cache_version:{MINOR_VERSION}\\r\\n", worker
+                f'#define PGLC_VERSION "{MINOR_VERSION}"', header
             )
             self.assertIn(
-                f"${len(str(MINOR_VERSION))}\\r\\n{MINOR_VERSION}\\r\\n", worker
+                f'#define PGLC_VERSION_LENGTH "{len(str(MINOR_VERSION))}"', header
             )
             for compose in ("compose.yaml", "compose.sql-only.yaml"):
                 self.assertIn(

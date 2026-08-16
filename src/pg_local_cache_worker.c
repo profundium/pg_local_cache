@@ -54,6 +54,7 @@
 #define PGLC_OUTPUT_BUFFER_MAX \
 	(PGLC_RESPONSE_MAX + PGLC_OUTPUT_BATCH_BYTES)
 #define PGLC_READY_CLIENTS_PER_TURN 8
+#define PGLC_AUTH_TOKEN_FILE_MAX 256
 
 typedef struct PgLocalCacheClient
 {
@@ -299,8 +300,9 @@ load_auth_token(void)
 			ereport(FATAL,
 					(errmsg("could not open pg_local_cache auth token file \"%s\": %m",
 							token_file)));
-		buffer = palloc0(PGLC_AUTH_TOKEN_MAX + 2);
-		if (fgets(buffer, PGLC_AUTH_TOKEN_MAX + 2, file) == NULL)
+		buffer = palloc0(PGLC_AUTH_TOKEN_FILE_MAX + 3);
+		length = fread(buffer, 1, PGLC_AUTH_TOKEN_FILE_MAX + 2, file);
+		if (length == 0)
 		{
 			FreeFile(file);
 			ereport(FATAL,
@@ -312,7 +314,7 @@ load_auth_token(void)
 			FreeFile(file);
 			ereport(FATAL,
 					(errmsg("pg_local_cache auth token file must contain exactly one token of at most %d bytes",
-							PGLC_AUTH_TOKEN_MAX)));
+							PGLC_AUTH_TOKEN_FILE_MAX)));
 		}
 		if (ferror(file))
 		{
@@ -326,19 +328,29 @@ load_auth_token(void)
 					(errmsg("could not close pg_local_cache auth token file \"%s\": %m",
 							token_file)));
 
-		length = strlen(buffer);
-		while (length > 0 &&
-			   (buffer[length - 1] == '\n' || buffer[length - 1] == '\r'))
-			buffer[--length] = '\0';
-		if (length == 0 || length > PGLC_AUTH_TOKEN_MAX)
+		if (memchr(buffer, '\0', length) != NULL)
 			ereport(FATAL,
-					(errmsg("pg_local_cache auth token must contain 1-%d bytes",
-							PGLC_AUTH_TOKEN_MAX)));
+					(errmsg("pg_local_cache auth token contains a non-base64url byte")));
+		if (length > 0 && buffer[length - 1] == '\n')
+		{
+			buffer[--length] = '\0';
+			if (length > 0 && buffer[length - 1] == '\r')
+				buffer[--length] = '\0';
+		}
+		else if (length > 0 && buffer[length - 1] == '\r')
+			ereport(FATAL,
+					(errmsg("pg_local_cache auth token permits only one terminal LF or CRLF")));
+		if (length < 32 || length > PGLC_AUTH_TOKEN_FILE_MAX)
+			ereport(FATAL,
+					(errmsg("pg_local_cache auth token must contain 32-256 base64url bytes")));
 		for (i = 0; i < length; i++)
 		{
-			if (iscntrl((unsigned char) buffer[i]))
+			if (!((buffer[i] >= 'A' && buffer[i] <= 'Z') ||
+				  (buffer[i] >= 'a' && buffer[i] <= 'z') ||
+				  (buffer[i] >= '0' && buffer[i] <= '9') ||
+				  buffer[i] == '_' || buffer[i] == '-'))
 				ereport(FATAL,
-						(errmsg("pg_local_cache auth token contains a control character")));
+						(errmsg("pg_local_cache auth token contains a non-base64url byte")));
 		}
 		worker_auth_token = buffer;
 	}
@@ -1126,7 +1138,7 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 		return raw_response(
 			"*14\r\n"
 			"$6\r\nserver\r\n$14\r\npg_local_cache\r\n"
-			"$7\r\nversion\r\n$5\r\n1.3.0\r\n"
+			"$7\r\nversion\r\n$" PGLC_VERSION_LENGTH "\r\n" PGLC_VERSION "\r\n"
 			"$5\r\nproto\r\n:2\r\n"
 			"$2\r\nid\r\n:0\r\n"
 			"$4\r\nmode\r\n$10\r\nstandalone\r\n"
@@ -1139,7 +1151,7 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 		const char *info =
 			"# Server\r\n"
 			"server:pg_local_cache\r\n"
-			"pg_local_cache_version:1.3.0\r\n"
+			"pg_local_cache_version:" PGLC_VERSION "\r\n"
 			"redis_mode:standalone\r\n";
 
 		if (argc != 1 && argc != 2)

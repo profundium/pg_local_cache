@@ -13,6 +13,12 @@
 
 #include "resp_limits.h"
 
+#define PGLC_VERSION "1.3.0"
+#define PGLC_VERSION_LENGTH "5"
+#ifndef PGLC_BUILD_ID
+#error "PGLC_BUILD_ID must be supplied by the build"
+#endif
+
 #define PGLC_NAMESPACE_MAX 64
 #define PGLC_MAX_KEY_COLUMNS 16
 #define PGLC_KEY_MAX 1024

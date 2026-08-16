@@ -29,6 +29,19 @@ endif
 endif
 
 ifndef SKIP_PGXS
+PGLC_BUILD_ID_RESOLVED := $(strip $(PGLC_BUILD_ID))
+ifeq ($(PGLC_BUILD_ID_RESOLVED),)
+ifneq ($(wildcard BUILD-ID),)
+PGLC_BUILD_ID_RESOLVED := $(strip $(shell sed -n '1p' BUILD-ID))
+else
+PGLC_BUILD_ID_RESOLVED := $(strip $(shell test -z "$$(git status --porcelain --untracked-files=all 2>/dev/null)" && git rev-parse --verify HEAD 2>/dev/null))
+endif
+endif
+ifeq ($(shell printf '%s\n' '$(PGLC_BUILD_ID_RESOLVED)' | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$$' && printf yes),)
+$(error supply a trustworthy PGLC_BUILD_ID, BUILD-ID, or build from a clean Git checkout)
+endif
+PG_CPPFLAGS += -DPGLC_BUILD_ID='"$(PGLC_BUILD_ID_RESOLVED)"'
+
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
@@ -42,6 +55,7 @@ verify-static:
 	python3 -m py_compile benchmarks/compare.py benchmarks/scenarios.py \
 		benchmarks/whole_row.py benchmarks/sql_only.py \
 		scripts/auto_version.py scripts/build_pgxn_dist.py \
+		scripts/release_archive.py \
 		scripts/validate_pgxn_meta.py \
 		scripts/validate_benchmark_evidence.py \
 		tests/cache_contract_test.py \
@@ -64,7 +78,7 @@ verify-static:
 		tests/docker_sql_only_smoke.sh \
 		tests/compatibility_matrix.sh \
 		monitoring/postgres/provision-monitor.sh \
-		benchmarks/run.sh scripts/install-existing.sh
+		benchmarks/run.sh scripts/install-existing.sh scripts/fetch-release.sh
 	python3 -m json.tool \
 		monitoring/grafana/dashboards/pg-local-cache.json >/dev/null
 	python3 scripts/validate_pgxn_meta.py

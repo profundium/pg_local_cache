@@ -7,6 +7,7 @@ FROM postgres:${POSTGRES_MAJOR}-${POSTGRES_VARIANT} AS builder
 
 ARG POSTGRES_MAJOR
 ARG POSTGRES_VARIANT
+ARG PGLC_BUILD_ID
 
 RUN case "$POSTGRES_MAJOR" in \
         14|15|16|17|18) ;; \
@@ -21,13 +22,13 @@ RUN case "$POSTGRES_VARIANT" in \
         bookworm) \
             apt-get update \
             && apt-get install --yes --no-install-recommends \
-                build-essential \
+                build-essential python3 \
                 "postgresql-server-dev-${POSTGRES_MAJOR}" \
             && rm -rf /var/lib/apt/lists/* \
             && printf '%s\n' "/usr/lib/postgresql/${POSTGRES_MAJOR}/bin/pg_config" \
                 >/tmp/pg_config ;; \
         alpine3.23) \
-            apk add --no-cache build-base \
+            apk add --no-cache bash build-base python3 \
             && printf '%s\n' /usr/local/bin/pg_config >/tmp/pg_config ;; \
     esac
 
@@ -37,17 +38,22 @@ COPY Makefile pg_local_cache.control ./
 COPY sql/ ./sql/
 COPY src/ ./src/
 
-RUN pg_config="$(cat /tmp/pg_config)" \
+RUN case "$PGLC_BUILD_ID" in \
+        ''|*[!A-Za-z0-9._:-]*) printf 'invalid PGLC_BUILD_ID\n' >&2; exit 1 ;; \
+    esac \
+    && printf '%s\n' "$PGLC_BUILD_ID" > BUILD-ID \
+    && pg_config="$(cat /tmp/pg_config)" \
     && installed_version="$("$pg_config" --version)" \
     && case "$installed_version" in \
         "PostgreSQL ${POSTGRES_MAJOR}."*) ;; \
         *) printf 'PostgreSQL major mismatch: expected %s, got: %s\n' \
             "$POSTGRES_MAJOR" "$installed_version" >&2; exit 1 ;; \
     esac \
-    && make PG_CONFIG="$pg_config" with_llvm=no clean \
-    && make -j"$(nproc)" PG_CONFIG="$pg_config" with_llvm=no \
-    && make PG_CONFIG="$pg_config" with_llvm=no DESTDIR=/stage install \
+    && make PG_CONFIG="$pg_config" PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no clean \
+    && make -j"$(nproc)" PG_CONFIG="$pg_config" PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no \
+    && make PG_CONFIG="$pg_config" PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no DESTDIR=/stage install \
     && install -d /stage/extension/lib /stage/extension/share/extension \
+    && install -m 0644 BUILD-ID /stage/extension/BUILD-ID \
     && install -m 0755 \
         "/stage$($pg_config --pkglibdir)/pg_local_cache.so" \
         /stage/extension/lib/pg_local_cache.so \
@@ -70,7 +76,7 @@ RUN case "$POSTGRES_VARIANT" in \
             pkglibdir="/usr/lib/postgresql/${POSTGRES_MAJOR}/lib"; \
             sharedir="/usr/share/postgresql/${POSTGRES_MAJOR}" ;; \
         alpine3.23) \
-            apk add --no-cache bash; \
+            apk add --no-cache bash su-exec; \
             pkglibdir=/usr/local/lib/postgresql; \
             sharedir=/usr/local/share/postgresql ;; \
     esac \

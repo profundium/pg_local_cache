@@ -440,12 +440,12 @@ def validate_repository(root: Path) -> dict[str, Any]:
         version == control_version,
         "META.json version must match pg_local_cache.control default_version",
     )
-    worker = (root / "src" / "pg_local_cache_worker.c").read_text(
+    header = (root / "src" / "pg_local_cache.h").read_text(
         encoding="utf-8"
     )
     _require(
-        f"pg_local_cache_version:{version}" in worker,
-        "META.json version must match the RESP VERSION token",
+        f'#define PGLC_VERSION "{version}"' in header,
+        "META.json version must match the shared binary/RESP version",
     )
     makefile = (root / "Makefile").read_text(encoding="utf-8")
     _require(

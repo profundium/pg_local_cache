@@ -1,7 +1,7 @@
 ---
 layout: doc
 title: Install on an existing PostgreSQL server
-description: Install pg_local_cache on PostgreSQL 14–18 Linux servers with direct latest downloads, preflight, rollback and one controlled restart.
+description: Install pg_local_cache on PostgreSQL 14–18 Linux servers with verified releases, online staging, recovery and one controlled restart.
 section: Existing database
 permalink: /docs/INSTALL_EXISTING.html
 ---
@@ -85,42 +85,49 @@ confirm its path:
 /usr/lib/postgresql/18/bin/pg_config --pgxs
 ```
 
-## 1. Download and verify
+## 1. Fetch and verify one release
 
-Download the exact compatible asset through GitHub's `latest` redirect. This
-needs only `curl`; it does not need GitHub CLI, an API token, or the current tag:
+The README owns the shortest
+[tag-bound verified fetch](https://github.com/profundium/pg_local_cache#verified-binary-release).
+It detects the local PostgreSQL major and libc, verifies `SHA256SUMS`, safely
+extracts one compatible package, never runs the installer, and prints the
+package path. Continue below from that exact directory; do not substitute a
+wildcard path.
+
+### Manual release download
+
+For offline review or a source build, open the
+[latest stable release](https://github.com/profundium/pg_local_cache/releases/latest),
+record its exact `vX.Y.Z` tag, then download both the selected asset and
+`SHA256SUMS` from that same immutable tag. This example makes every choice
+explicit; set the tag, PostgreSQL major and libc for the target:
 
 ```bash
+TAG=v1.3.0
 PG_MAJOR=18
 LIBC=glibc # glibc or musl
-BASE=https://github.com/profundium/pg_local_cache/releases/latest/download
+VERSION="${TAG#v}"
+ASSET="pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
+PACKAGE="pg_local_cache-${VERSION}-pg${PG_MAJOR}-linux-${LIBC}-amd64"
+BASE="https://github.com/profundium/pg_local_cache/releases/download/${TAG}"
 
-curl -fLO "$BASE/pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
-curl -fLO "$BASE/SHA256SUMS"
+curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+  --output "$ASSET" "$BASE/$ASSET"
+curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+  --output SHA256SUMS "$BASE/SHA256SUMS"
+awk -v asset="$ASSET" '$2 == asset' SHA256SUMS > "$ASSET.sha256"
+[[ "$(wc -l < "$ASSET.sha256")" -eq 1 ]]
+sha256sum --check --strict "$ASSET.sha256"
+tar -xzf "$ASSET"
+cd "$PACKAGE"
 ```
 
-For a local PGXS build, download
-`$BASE/pg_local_cache-source.tar.gz` instead.
-
-Verify the files you downloaded before extracting them. `--ignore-missing`
-skips the other assets listed in the release checksum file:
-
-```bash
-sha256sum --check --ignore-missing --strict SHA256SUMS
-
-tar -xzf "pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
-cd "pg_local_cache-"*-"pg${PG_MAJOR}-linux-${LIBC}-amd64"
-```
-
-For a source build, extract the source archive instead:
-
-```bash
-tar -xzf pg_local_cache-source.tar.gz
-cd pg_local_cache-*-source
-```
-
-The source archive exposes `scripts/install-existing.sh`; the binary archive
-places the same program at `./install.sh`.
+For local PGXS, select `pg_local_cache-source.tar.gz`, verify its one checksum
+row the same way, and extract the exact root
+`pg_local_cache-${VERSION}-source`. The source archive exposes
+`scripts/install-existing.sh`; the binary package places the same program at
+`./install.sh`. The [PGXN guide](https://github.com/profundium/pg_local_cache/blob/master/PGXN.md#install-from-pgxn)
+owns the alternative PGXN build path.
 
 The installer never accepts a RESP token value on the command line. It accepts
 only a path, avoiding token disclosure through process listings and shell
@@ -189,19 +196,34 @@ sudo ./install.sh install \
 With `--restart-method none` (the default), this command does not interrupt the
 server. It:
 
-1. builds with the selected PGXS or validates the packaged binary;
-2. atomically installs `.so`, control and versioned SQL files;
-3. creates or strictly validates `local_cache_worker` as
+1. builds with the selected PGXS or validates every packaged target, path,
+   type, mode, version and digest before changing the cluster;
+2. acquires one mode-`0700` lock inside canonical `PGDATA` and writes a
+   cluster/package/restart-bound state path;
+3. records the complete file, configuration, role and direct-ACL journal;
+4. stages `.so`, control and versioned SQL files with per-file atomic rename;
+5. creates or strictly validates `local_cache_worker` as
    `LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION
    NOBYPASSRLS`;
-4. grants that role `CONNECT` only to the configured database;
-5. saves the exact current `postgresql.auto.conf` plus metadata under
+6. grants that role `CONNECT` only to the configured database;
+7. saves the exact current `postgresql.auto.conf` plus metadata under
    `/var/lib/pg_local_cache/install-state/`;
-6. appends `pg_local_cache` to the effective `shared_preload_libraries`
+8. appends `pg_local_cache` to the effective `shared_preload_libraries`
    instead of replacing other active or already-staged libraries;
-7. writes conservative SQL-only sizing (`port=0`, no RESP token/workers);
-8. calls `pg_reload_conf()` only to parse the staged file and rejects any
+9. uses conservative SQL-only defaults on a fresh install; on an existing
+   configured install, omitted mode/sizing/security flags preserve their
+   effective pending values and explicit flags change only those fields;
+10. calls `pg_reload_conf()` only to parse the staged file and rejects any
    `pg_file_settings` error.
+
+Keep the printed state-directory path. This is validated staging, not one
+atomic multi-file transaction. Before any restart attempt, ordinary failures
+restore only bytes, metadata, role and direct ACL proved to belong to that
+journal. Manual recovery uses the same bound state:
+
+```bash
+sudo ./install.sh recover --state-directory /var/lib/pg_local_cache/install-state/install-PRINTED-ID
+```
 
 Reload validates the file but does not activate the extension. PostgreSQL
 reports the relevant settings as pending restart.
@@ -214,9 +236,12 @@ sudo ./install.sh install --database app --mode sql-only --dry-run
 ```
 
 If different extension files already exist, installation fails closed. Use
-`--force` only for a deliberate, reviewed upgrade; upgrading a loaded native
-library still requires a restart so old and new backends never mix code
-generations.
+`--force` only for a deliberate, reviewed replacement. The installer records
+the existing extension OID, schema, owner and opaque version before restart;
+after restart it accepts only a PostgreSQL-reported update path to the packaged
+default. It never orders version strings or invents a downgrade. A loaded
+native library upgrade still requires a restart so old and new backends never
+mix code generations.
 
 ## 4. Perform one restart
 
@@ -232,13 +257,32 @@ sudo systemctl restart postgresql@18-main
 Then activate and verify:
 
 ```bash
-sudo ./install.sh verify --database app --mode sql-only
+sudo ./install.sh verify \
+  --state-directory /var/lib/pg_local_cache/install-state/install-PRINTED-ID
 ```
 
-`verify` fails until the new preload setting is actually active. Once active,
-it creates the extension, grants the technical role access to its mapping
-catalog and requires `local_cache.health().ready=true`, port `0` and zero RESP
-workers.
+The staged command prints this exact expectation-only continuation. `verify`
+fails until postmaster start identity changes; an unchanged postmaster keeps
+pre-restart `recover` available. Once restart is proved, it checks the
+non-user-settable binary version/build ID and rehashes every staged target. In
+one serializable transaction it then creates the packaged version, skips DDL
+when already current, or updates only through a live
+`pg_extension_update_paths()` route. The same transaction applies the worker
+grants. It finally requires the packaged `pg_extension.extversion`,
+`local_cache.health().ready=true`, port `0` and zero RESP workers.
+
+If the SQL transaction commits but the installer stops before journaling it,
+run the same state-bound `verify` again. Exact catalog/grant state is reconciled
+without replaying DDL. A migration error, missing path, changed extension
+identity, or file/build mismatch retains the state for inspection and never
+downgrades the live `.so` automatically.
+
+For an already-current installation with no pending state, this is a read-only
+identity/health check and does not write GUCs or catalogs:
+
+```bash
+sudo ./install.sh verify --database app
+```
 
 ### Installer-controlled systemd restart
 
@@ -256,11 +300,10 @@ sudo ./install.sh install \
 
 The script measures time until a SQL query succeeds. Exceeding 30 seconds is a
 warning; failing to become ready within the larger readiness timeout is an
-error. If the postmaster is confirmed stopped after a failed restart, the
-installer atomically restores the exact pre-install `postgresql.auto.conf` and
-attempts one rollback restart. If a postmaster is still running or recovering,
-the installer leaves it alone and reports the state-backup path instead of
-risking a second restart during recovery.
+error. State changes to `restart_requested` immediately before invoking the
+restart. From that point automatic file/config rollback is permanently
+forbidden because the new library may have loaded. Retain the printed state and
+use state-bound `verify` or manual recovery after inspecting PostgreSQL logs.
 
 ### Installer-controlled `pg_ctl`
 
@@ -377,9 +420,11 @@ sudo ./install.sh install \
   --systemd-unit postgresql@18-main
 ```
 
-The token must be a non-symlink regular file owned by and readable by the
-PostgreSQL OS user, have mode exactly `0400` or `0600`, and contain 32–256
-base64url characters. The installer preserves effective pending worker-budget
+The token must be a one-link, non-symlink regular file owned by and readable by
+the PostgreSQL OS user, have mode exactly `0400` or `0600`, and contain 32–256
+base64url characters followed by no suffix, one LF, or one CRLF. The installer
+and worker reject all other framing without logging token bytes. The installer
+preserves effective pending worker-budget
 changes and adds only the positive RESP-worker delta when an active SQL-only
 installation changes to RESP or an active RESP worker count increases.
 
@@ -394,13 +439,16 @@ single error if its encoded size exceeds the fixed response bound.
 
 ## Existing Docker volume
 
-Build the `extension` target from exactly the matching PostgreSQL base image used by
-the current container:
+Build the `extension` target for the same PostgreSQL major and distribution variant
+as the current container:
 
 ```bash
+build_id="$(git rev-parse --verify HEAD 2>/dev/null || sed -n '1p' BUILD-ID)"
 docker build \
   --target extension \
-  --build-arg POSTGRES_IMAGE=postgres:16.14-bookworm \
+  --build-arg POSTGRES_MAJOR=16 \
+  --build-arg POSTGRES_VARIANT=bookworm \
+  --build-arg "PGLC_BUILD_ID=$build_id" \
   --tag company-postgres:16-pg-local-cache \
   .
 ```
@@ -455,11 +503,12 @@ installer does not attempt to bypass that boundary.
 
 ## Rollback and uninstall
 
-For an immediate failed installation before any mapping is attached, restore
-the exact `postgresql.auto.conf.before` from the state directory and perform
-one restart. This exact restore is safe only if nobody has changed
-`postgresql.auto.conf` since installation; otherwise remove only the
-installer-written keys after reviewing the recorded `metadata.tsv`.
+Before restart invocation, use `recover --state-directory PRINTED_PATH`. It
+restores only a matching `prepared`/`files_staged` journal when package,
+cluster, database, postmaster, lock, destination and live-file identities all
+match. After `restart_requested` or any observed postmaster change, automatic
+restore is forbidden; use state-bound `verify` or inspect the retained journal
+and recover manually.
 
 For an active installation:
 

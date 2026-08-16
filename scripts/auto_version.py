@@ -448,28 +448,21 @@ def _update_makefile(root: Path) -> None:
 
 
 def _update_worker_version(root: Path, old: Version, new: Version) -> None:
-    path = root / "src" / "pg_local_cache_worker.c"
+    path = root / "src" / "pg_local_cache.h"
     source = path.read_text(encoding="utf-8")
     old_text = str(old)
     new_text = str(new)
-    hello_pattern = re.compile(
-        rf'"\$7\\r\\nversion\\r\\n\$\d+\\r\\n'
-        rf'{re.escape(old_text)}\\r\\n"'
-    )
-    source, hello_count = hello_pattern.subn(
-        f'"$7\\\\r\\\\nversion\\\\r\\\\n${len(new_text)}'
-        f'\\\\r\\\\n{new_text}\\\\r\\\\n"',
-        source,
-    )
-    if hello_count != 1:
-        raise VersionError(
-            f"expected one RESP HELLO version token, found {hello_count}"
-        )
     source = _replace_once(
         source,
-        f"pg_local_cache_version:{old_text}\\r\\n",
-        f"pg_local_cache_version:{new_text}\\r\\n",
-        "RESP INFO version token",
+        f'#define PGLC_VERSION "{old_text}"',
+        f'#define PGLC_VERSION "{new_text}"',
+        "shared extension version",
+    )
+    source = _replace_once(
+        source,
+        f'#define PGLC_VERSION_LENGTH "{len(old_text)}"',
+        f'#define PGLC_VERSION_LENGTH "{len(new_text)}"',
+        "shared extension version length",
     )
     _write_text(path, source)
 

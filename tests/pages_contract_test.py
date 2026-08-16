@@ -207,7 +207,7 @@ class PagesSourceContracts(unittest.TestCase):
         for source in (readme, homepage):
             self.assertNotIn(mget_command, source)
             self.assertNotIn(stock_batch_command, source)
-        self.assertIn("./install.sh install", readme)
+        self.assertIn('"$destination/install.sh" install', readme)
 
         for source in (readme_benchmarks, benchmarks):
             self.assertIn("stock PostgreSQL", source)
@@ -281,28 +281,88 @@ class PagesSourceContracts(unittest.TestCase):
         self.assertIn("1.36–1.38x faster", benchmarks)
         self.assertIn("not a production capacity", benchmarks)
 
-    def test_public_pages_use_browser_release_downloads(self) -> None:
+    def test_public_install_paths_are_tag_bound_and_single_owner(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         homepage = (ROOT / "index.html").read_text(encoding="utf-8")
         install = (ROOT / "docs" / "INSTALL_EXISTING.md").read_text(
             encoding="utf-8"
         )
+        pgxn = (ROOT / "PGXN.md").read_text(encoding="utf-8")
         public_sources = (readme, homepage) + tuple(
             path.read_text(encoding="utf-8")
             for path in (ROOT / "docs").glob("*.md")
         )
         for source in public_sources:
             self.assertNotRegex(source, r"(?m)^\s*(?:[$#]\s*)?gh(?:\s|$)")
+            self.assertNotRegex(source, r"curl[^\n]*\|[^\n]*(?:ba)?sh")
+            self.assertNotRegex(source, r"(?m)^\s*cd\s+[^\n]*\*")
         for source in (readme, homepage, install):
             self.assertIn(RELEASES_LATEST, source)
+            self.assertNotIn("/releases/latest/download", source)
         for marker in (
-            "SHA256SUMS",
-            "pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz",
-            "pg_local_cache-source.tar.gz",
+            'destination="$(pwd -P)/pg_local_cache-package"',
+            '[[ ! -e "$destination" ]]',
+            'mktemp -d "${TMPDIR:-/tmp}/pg_local_cache-bootstrap.XXXXXX"',
+            'trap cleanup EXIT',
+            "--write-out '%{url_effective}'",
+            "releases/tag/v(0|[1-9][0-9]*)",
+            'base="https://github.com/profundium/pg_local_cache/releases/download/${tag}"',
+            '--output "$bootstrap/SHA256SUMS"',
+            '--output "$bootstrap/fetch-release.sh"',
+            "awk '$2 == \"fetch-release.sh\"' SHA256SUMS",
+            "sha256sum --check --strict",
+            "sed -n '1,260p' ./fetch-release.sh",
+            "bash ./fetch-release.sh",
+            '--release-tag "$tag"',
+            '--output-directory "$destination"',
+        ):
+            self.assertIn(marker, readme)
+        self.assertEqual(readme.count("--write-out '%{url_effective}'"), 1)
+        self.assertNotIn("mktemp -d", install)
+        self.assertNotIn("fetch-release.sh", homepage)
+        self.assertIn("Manual release download", install)
+        self.assertIn("pg_local_cache-source.tar.gz", install)
+        self.assertIn("SHA256SUMS", install)
+        self.assertIn("PGXN/source build step only", pgxn)
+
+    def test_demo_and_staged_install_journeys_are_explicit(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        homepage = (ROOT / "index.html").read_text(encoding="utf-8")
+        install = (ROOT / "docs" / "INSTALL_EXISTING.md").read_text(
+            encoding="utf-8"
+        )
+        demo = readme.split("## Local demo", 1)[1].split("## SQL API", 1)[0]
+        self.assertEqual(demo.count("up --detach --build --wait"), 1)
+        self.assertEqual(demo.count("exec -T postgres"), 1)
+        self.assertEqual(demo.count("down --volumes"), 1)
+        self.assertGreaterEqual(demo.count("--project-name pg_local_cache_demo"), 3)
+        self.assertIn("publishes no host port", demo)
+        self.assertIn("not a production configuration", re.sub(r"\s+", " ", demo))
+        self.assertNotIn("--remove-orphans", readme + homepage + install)
+
+        binary = readme.split("## Verified binary release", 1)[1].split(
+            "## Optional RESP2 endpoint", 1
+        )[0]
+        order = [
+            binary.index('"$destination/install.sh" preflight'),
+            binary.index('"$destination/install.sh" install'),
+            binary.index("operator restart PostgreSQL"),
+            binary.index('"$destination/install.sh" verify'),
+        ]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("staging is not activation", binary)
+        self.assertIn("--state-directory", binary)
+        for marker in (
+            "Existing Docker volume",
+            "Patroni and HA",
+            "Managed PostgreSQL",
+            "Rollback and uninstall",
+            "recover --state-directory",
         ):
             self.assertIn(marker, install)
-        for source in (readme, homepage, install):
-            self.assertIn("/releases/latest/download", source)
+        self.assertIn("Run local demo", homepage)
+        self.assertIn("Latest release", homepage)
+        self.assertNotRegex(homepage, r"pg_local_cache-pg\d+-linux-")
 
     def test_pages_publish_supported_postgresql_and_linux_matrix(self) -> None:
         sources = [
@@ -452,6 +512,17 @@ class PagesSourceContracts(unittest.TestCase):
                 self.assertEqual(metadata.get("permalink"), permalink)
                 self.assertTrue(metadata.get("title"))
                 self.assertGreater(len(metadata.get("description", "")), 50)
+
+    def test_pages_excludes_repository_only_compose_profiles(self) -> None:
+        config = (ROOT / "_config.yml").read_text(encoding="utf-8")
+        for name in (
+            "compose.demo.yaml",
+            "compose.monitoring.yaml",
+            "compose.sql-only.yaml",
+            "compose.yaml",
+        ):
+            with self.subTest(name=name):
+                self.assertRegex(config, rf"(?m)^  - {re.escape(name)}$")
 
     def test_published_documents_do_not_link_to_unbuilt_markdown(self) -> None:
         github_source_prefix = (

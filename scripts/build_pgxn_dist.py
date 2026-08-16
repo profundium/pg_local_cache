@@ -7,10 +7,13 @@ import argparse
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 from validate_pgxn_meta import MetadataError, validate_repository
@@ -35,6 +38,14 @@ def _run(command: list[str], *, cwd: Path) -> str:
 
 
 def _verify_clean_head(root: Path, revision: str, allow_dirty: bool) -> str:
+    if not (root / ".git").exists():
+        build_id_path = root / "BUILD-ID"
+        if revision != "HEAD" or not build_id_path.is_file():
+            raise MetadataError("source archive requires its packaged BUILD-ID")
+        resolved = build_id_path.read_text(encoding="ascii").strip()
+        if re.fullmatch(r"[0-9a-f]{40}", resolved) is None:
+            raise MetadataError("source archive BUILD-ID is invalid")
+        return resolved
     resolved = _run(["git", "rev-parse", "--verify", f"{revision}^{{commit}}"], cwd=root)
     if revision == "HEAD" and not allow_dirty:
         status = _run(
@@ -48,16 +59,92 @@ def _verify_clean_head(root: Path, revision: str, allow_dirty: bool) -> str:
     return resolved
 
 
+def _source_archive_files(root: Path) -> list[Path]:
+    excluded_parts = {
+        ".git",
+        ".supergoal",
+        ".codegraph",
+        "__pycache__",
+        "benchmark-results",
+        "dist",
+        "log",
+        "results",
+        "secrets",
+        "tmp_check",
+        "tmp_check_iso",
+    }
+    excluded_suffixes = {".bc", ".o", ".so"}
+    sensitive_names = {
+        ".authinfo",
+        ".authinfo.gpg",
+        ".netrc",
+        ".envrc",
+        ".npmrc",
+        ".pgpass",
+        ".pypirc",
+        "credentials",
+        "credentials.json",
+        "id_dsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_rsa",
+    }
+    sensitive_parts = {".aws", ".azure", ".docker", ".gnupg", ".kube", ".ssh"}
+    sensitive_suffixes = {".key", ".p12", ".pem", ".pfx"}
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if excluded_parts.intersection(relative.parts):
+            continue
+        if path.is_symlink():
+            raise MetadataError(f"source archive contains symlink: {relative}")
+        if not path.is_file() or path.name == "BUILD-ID":
+            continue
+        lowered = path.name.lower()
+        if (
+            sensitive_parts.intersection(relative.parts)
+            or lowered == ".env"
+            or lowered.startswith(".env.")
+            or lowered in sensitive_names
+            or path.suffix.lower() in sensitive_suffixes
+            or re.search(
+                r"(^|[._-])(credential|credentials|private[-_]?key|secret|secrets)($|[._-])",
+                lowered,
+            )
+        ):
+            raise MetadataError(f"source archive contains sensitive file: {relative}")
+        if path.suffix in excluded_suffixes or path.name in {
+            "resp_test",
+            "resp_test_sanitized",
+        }:
+            continue
+        files.append(path)
+    return sorted(files, key=lambda path: path.relative_to(root).as_posix())
+
+
+def _build_without_git(root: Path, temporary: Path, prefix: str, epoch: int) -> None:
+    with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as package:
+        for path in _source_archive_files(root):
+            relative = path.relative_to(root).as_posix()
+            info = zipfile.ZipInfo(prefix + relative, time.gmtime(epoch)[:6])
+            info.create_system = 3
+            info.external_attr = (stat.S_IFREG | stat.S_IMODE(path.stat().st_mode)) << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            package.writestr(info, path.read_bytes())
+
+
 def _verify_archive(
     archive: Path,
     *,
     distribution: str,
     version: str,
+    build_id: str,
     expected_meta: dict[str, object],
 ) -> None:
     prefix = f"{distribution}-{version}/"
     required = {
         f"{prefix}LICENSE",
+        f"{prefix}BUILD-ID",
         f"{prefix}META.json",
         f"{prefix}Makefile",
         f"{prefix}PGXN.md",
@@ -97,6 +184,8 @@ def _verify_archive(
             raise MetadataError(f"could not read archived META.json: {error}") from error
         if archived_meta != expected_meta:
             raise MetadataError("archived META.json differs from the validated source")
+        if package.read(f"{prefix}BUILD-ID").decode("ascii") != f"{build_id}\n":
+            raise MetadataError("archived BUILD-ID differs from the resolved revision")
 
 
 def build_distribution(
@@ -118,21 +207,38 @@ def build_distribution(
 
     with tempfile.TemporaryDirectory(prefix="pg_local_cache_pgxn_") as raw:
         temporary = Path(raw) / destination.name
-        _run(
-            [
-                "git",
-                "archive",
-                "--format=zip",
-                f"--prefix={distribution}-{version}/",
-                f"--output={temporary}",
-                resolved,
-            ],
-            cwd=root,
+        if (root / ".git").exists():
+            _run(
+                [
+                    "git",
+                    "archive",
+                    "--format=zip",
+                    f"--prefix={distribution}-{version}/",
+                    f"--output={temporary}",
+                    resolved,
+                ],
+                cwd=root,
+            )
+            epoch = int(_run(["git", "show", "-s", "--format=%ct", resolved], cwd=root))
+        else:
+            epoch = int((root / "BUILD-ID").stat().st_mtime)
+            _build_without_git(
+                root, temporary, f"{distribution}-{version}/", epoch
+            )
+        build_info = zipfile.ZipInfo(
+            f"{distribution}-{version}/BUILD-ID",
+            time.gmtime(epoch)[:6],
         )
+        build_info.create_system = 3
+        build_info.external_attr = (stat.S_IFREG | 0o644) << 16
+        build_info.compress_type = zipfile.ZIP_DEFLATED
+        with zipfile.ZipFile(temporary, "a") as package:
+            package.writestr(build_info, f"{resolved}\n")
         _verify_archive(
             temporary,
             distribution=distribution,
             version=version,
+            build_id=resolved,
             expected_meta=metadata,
         )
         staged = destination.with_suffix(".zip.tmp")

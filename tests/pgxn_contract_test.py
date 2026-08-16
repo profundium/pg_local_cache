@@ -142,7 +142,7 @@ class PgxnArchiveContracts(unittest.TestCase):
     def test_builder_creates_pgxn_shaped_archive(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             output = Path(raw_directory)
-            archive = builder.build_distribution(ROOT, output)
+            archive = builder.build_distribution(ROOT, output, allow_dirty=True)
             self.assertEqual(
                 archive.name,
                 f"pg_local_cache-{CURRENT_VERSION}.zip",
@@ -151,6 +151,7 @@ class PgxnArchiveContracts(unittest.TestCase):
                 names = set(package.namelist())
                 prefix = f"pg_local_cache-{CURRENT_VERSION}/"
                 for path in (
+                    "BUILD-ID",
                     "META.json",
                     "Makefile",
                     "PGXN.md",
@@ -160,6 +161,21 @@ class PgxnArchiveContracts(unittest.TestCase):
                     "src/pg_local_cache.c",
                 ):
                     self.assertIn(prefix + path, names)
+                expected_build_id = (
+                    (ROOT / "BUILD-ID").read_text(encoding="ascii").strip()
+                    if not (ROOT / ".git").exists()
+                    else subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=ROOT,
+                        check=True,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                    ).stdout.strip()
+                )
+                self.assertEqual(
+                    package.read(prefix + "BUILD-ID").decode("ascii").strip(),
+                    expected_build_id,
+                )
                 self.assertFalse(
                     any(
                         part in {".agent", ".git", ".tmp", "dist", "secrets"}
@@ -167,6 +183,73 @@ class PgxnArchiveContracts(unittest.TestCase):
                         for part in Path(name).parts
                     )
                 )
+
+    def test_source_archive_builds_pgxn_without_git(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            source = directory / "source"
+            shutil.copytree(
+                ROOT,
+                source,
+                ignore=shutil.ignore_patterns(
+                    ".git",
+                    ".supergoal",
+                    ".codegraph",
+                    "plans",
+                    "dist",
+                    "__pycache__",
+                    "resp_test",
+                    "resp_test_sanitized",
+                    "*.o",
+                    "*.so",
+                    "*.bc",
+                ),
+            )
+            build_id = (
+                subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=ROOT,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                ).stdout.strip()
+                if (ROOT / ".git").exists()
+                else (ROOT / "BUILD-ID").read_text(encoding="ascii").strip()
+            )
+            (source / "BUILD-ID").write_text(build_id + "\n", encoding="ascii")
+            archive = builder.build_distribution(source, directory / "output")
+            with zipfile.ZipFile(archive) as package:
+                self.assertEqual(
+                    package.read(f"pg_local_cache-{CURRENT_VERSION}/BUILD-ID")
+                    .decode("ascii")
+                    .strip(),
+                    build_id,
+                )
+
+    def test_source_archive_rejects_common_secret_files_without_git(self) -> None:
+        for name in (
+            ".env",
+            ".env.production",
+            ".envrc",
+            ".netrc",
+            ".authinfo",
+            ".authinfo.gpg",
+            "credentials.json",
+            "id_rsa",
+            "server.pem",
+            ".docker/config.json",
+            ".aws/credentials",
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                (root / "README.md").write_text("safe\n", encoding="utf-8")
+                secret = root / name
+                secret.parent.mkdir(parents=True, exist_ok=True)
+                secret.write_text("private\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    builder.MetadataError, "contains sensitive file"
+                ):
+                    builder._source_archive_files(root)
 
     def test_workflow_publishes_exact_stable_release_to_pgxn(self) -> None:
         source = (

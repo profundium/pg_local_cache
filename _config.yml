@@ -22,6 +22,7 @@ exclude:
   - Dockerfile
   - Makefile
   - compose.monitoring.yaml
+  - compose.demo.yaml
   - compose.sql-only.yaml
   - compose.yaml
   - pg_local_cache.control

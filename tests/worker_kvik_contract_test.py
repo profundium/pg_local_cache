@@ -14,6 +14,14 @@ PIPELINE_INTEGRATION = (
 ).read_text()
 
 
+class AuthTokenContractTests(unittest.TestCase):
+    def test_token_file_checks_embedded_nul_using_raw_byte_length(self) -> None:
+        loader = c_function(WORKER, "load_auth_token")
+        self.assertIn("length = fread(", loader)
+        self.assertIn("memchr(buffer, '\\0', length)", loader)
+        self.assertNotIn("length = strlen(buffer)", loader)
+
+
 def c_function(source: str, name: str) -> str:
     match = re.search(rf"(?m)^{re.escape(name)}\s*\(", source)
     if not match:

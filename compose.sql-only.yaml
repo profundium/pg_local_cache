@@ -8,6 +8,7 @@ services:
       args:
         POSTGRES_MAJOR: ${POSTGRES_MAJOR:-16}
         POSTGRES_VARIANT: ${POSTGRES_VARIANT:-bookworm}
+        PGLC_BUILD_ID: ${PGLC_BUILD_ID:-local-compose}
     image: pg_local_cache:1.3.0
     restart: unless-stopped
     stop_grace_period: 60s

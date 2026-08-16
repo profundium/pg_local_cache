@@ -37,6 +37,41 @@ class ReleaseMatrixContracts(unittest.TestCase):
         for key in ("version", "postgres_major", "os", "libc", "architecture"):
             self.assertIn(f"printf '{key}=", source)
 
+    def test_pgxn_artifact_has_one_fresh_sql_only_lifecycle(self) -> None:
+        source = (ROOT / "tests/compatibility_matrix.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("python3 -m zipfile -e", source)
+        self.assertIn("! command -v python3", source)
+        self.assertIn('docker wait "$pgxn_build_container"', source)
+        self.assertIn('--volume "$pgxn_release_root:/release"', source)
+        self.assertNotIn('docker cp "$pgxn_build_container:', source)
+        self.assertIn('--volume "$pgxn_release_root:/artifact:ro"', source)
+        self.assertNotIn('docker cp "$pgxn_release_root/', source)
+        self.assertIn("--mode sql-only", source)
+        self.assertIn("/artifact/install.sh verify", source)
+        self.assertIn("local_cache.stats() ->> 'sql_cache_hits'", source)
+        self.assertIn("test_upgrade_preserves_an_existing_extension_owner", source)
+        self.assertIn("^Ran 8 tests in ", source)
+        self.assertIn('rm -f -- "$source_archive"', source)
+        self.assertIn('$repository_directory/compose.demo.yaml', source)
+        self.assertIn('$repository_directory/docker/initdb/020_demo.sql', source)
+
+    def test_full_runtime_is_bounded_to_one_major_per_libc(self) -> None:
+        source = (ROOT / "tests/compatibility_matrix.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('if [[ "$major" == 16 ]]; then', source)
+        self.assertIn("artifact_preflight_smoke", source)
+        self.assertIn(
+            'fetch_log="$results_directory/pg16-${fetch_libc}-fetcher-tests.txt"',
+            source,
+        )
+        self.assertGreaterEqual(
+            source.count("PostgreSQL init process complete; ready for start up."),
+            2,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

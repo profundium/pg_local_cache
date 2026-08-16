@@ -104,10 +104,21 @@ if (( port != 0 )); then
     [[ "$token_mode" == "600" ]] \
         || fail "auth token file must have mode 0600 (actual: ${token_mode})"
 
+    token_bytes="$(stat -c '%s' "$token_file")"
     auth_token="$(<"$token_file")"
-    (( ${#auth_token} >= 32 && ${#auth_token} <= 256 )) \
+    token_suffix_bytes=0
+    token_last_byte="$(tail -c 1 "$token_file" | od -An -tu1 | tr -d ' \n')"
+    token_last_two="$(tail -c 2 "$token_file" | od -An -tx1 | tr -d ' \n')"
+    if [[ "$auth_token" == *$'\r' && "$token_last_two" == "0d0a" ]]; then
+        auth_token="${auth_token%$'\r'}"
+        token_suffix_bytes=2
+    elif (( token_bytes == ${#auth_token} + 1 )) && [[ "$token_last_byte" == "10" ]]; then
+        token_suffix_bytes=1
+    fi
+    (( token_bytes == ${#auth_token} + token_suffix_bytes )) \
+        && (( ${#auth_token} >= 32 && ${#auth_token} <= 256 )) \
         && [[ "$auth_token" != *[!A-Za-z0-9_-]* ]] \
-        || fail "auth token must be 32-256 base64url characters"
+        || fail "auth token must be 32-256 base64url characters with at most one terminal LF or CRLF"
 
     if [[ "$bind_address" != "127.0.0.1" && ${#auth_token} -lt 32 ]]; then
         fail "a non-loopback listener requires an auth token of at least 32 characters"

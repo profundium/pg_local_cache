@@ -63,7 +63,18 @@ if [[ -f "$runtime_token" ]]; then
 fi
 [[ -f "$token_file" && ! -L "$token_file" ]]
 [[ "$(stat -c '%a' "$token_file")" == "600" ]]
+token_bytes="$(stat -c '%s' "$token_file")"
 auth_token="$(<"$token_file")"
+token_suffix_bytes=0
+token_last_byte="$(tail -c 1 "$token_file" | od -An -tu1 | tr -d ' \n')"
+token_last_two="$(tail -c 2 "$token_file" | od -An -tx1 | tr -d ' \n')"
+if [[ "$auth_token" == *$'\r' && "$token_last_two" == "0d0a" ]]; then
+    auth_token="${auth_token%$'\r'}"
+    token_suffix_bytes=2
+elif (( token_bytes == ${#auth_token} + 1 )) && [[ "$token_last_byte" == "10" ]]; then
+    token_suffix_bytes=1
+fi
+(( token_bytes == ${#auth_token} + token_suffix_bytes ))
 (( ${#auth_token} >= 32 && ${#auth_token} <= 256 ))
 [[ "$auth_token" != *[!A-Za-z0-9_-]* ]]
 

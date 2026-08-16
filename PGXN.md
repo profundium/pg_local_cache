@@ -111,6 +111,12 @@ migration fragment exists while the install SQL is unchanged.
 
 ## Install from PGXN
 
+This section owns the PGXN/source build step only. For the isolated demo or a
+verified binary package, start with the
+[README](https://github.com/profundium/pg_local_cache#choose-an-install-path).
+After PGXN copies the files, the existing-server guide owns preload settings,
+restart orchestration, state-bound verification and rollback.
+
 Requirements:
 
 - PostgreSQL 14–18 server development files for the target installation;

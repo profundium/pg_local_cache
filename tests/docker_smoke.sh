@@ -26,6 +26,8 @@ require_small_cache="${PG_LOCAL_CACHE_SMOKE_REQUIRE_SMALL_CACHE:-0}"
 require_2pc="${PG_LOCAL_CACHE_SMOKE_REQUIRE_2PC:-0}"
 postgres_major="${POSTGRES_MAJOR:-16}"
 postgres_variant="${POSTGRES_VARIANT:-bookworm}"
+build_id="$(git -C "$repository_directory" rev-parse --verify HEAD)"
+release_root="${PGLC_RELEASE_ROOT:-}"
 
 [[ "$database" =~ ^[A-Za-z_][A-Za-z0-9_$]{0,62}$ ]]
 [[ "$worker_role" =~ ^[A-Za-z_][A-Za-z0-9_$]{0,62}$ ]]
@@ -42,6 +44,13 @@ case "$postgres_major" in
     14|15|16|17|18) ;;
     *) printf 'unsupported POSTGRES_MAJOR: %s\n' "$postgres_major" >&2; exit 1 ;;
 esac
+[[ "$build_id" =~ ^[0-9a-f]{40}$ ]]
+if [[ -n "$release_root" ]]; then
+    [[ "$release_root" == /* && -d "$release_root" ]]
+    [[ -x "$release_root/install.sh" ]]
+    [[ -f "$release_root/BUILD-ID" && -f "$release_root/RELEASE-METADATA" ]]
+fi
+export PGLC_BUILD_ID="$build_id"
 case "$postgres_variant" in
     bookworm|alpine3.23) ;;
     *) printf 'unsupported POSTGRES_VARIANT: %s\n' "$postgres_variant" >&2; exit 1 ;;
@@ -66,6 +75,36 @@ compose() {
         --file "${repository_directory}/compose.yaml" \
         --file "$override_file" \
         "$@"
+}
+
+check_auth_framing() {
+    PG_LOCAL_CACHE_AUTH_TOKEN="$auth_token" \
+    PG_LOCAL_CACHE_RESP_PORT="$cache_host_port" \
+        python3 -B - <<'PY'
+import os
+import socket
+
+
+def auth(token: bytes) -> bytes:
+    request = (
+        b"*2\r\n$4\r\nAUTH\r\n$"
+        + str(len(token)).encode("ascii")
+        + b"\r\n"
+        + token
+        + b"\r\n"
+    )
+    with socket.create_connection(
+        ("127.0.0.1", int(os.environ["PG_LOCAL_CACHE_RESP_PORT"])), timeout=5
+    ) as client:
+        client.sendall(request)
+        return client.recv(256)
+
+
+token = os.environ["PG_LOCAL_CACHE_AUTH_TOKEN"].encode("ascii")
+assert auth(token) == b"+OK\r\n"
+changed = token[:-1] + (b"A" if token[-1:] != b"A" else b"B")
+assert auth(changed).startswith(b"-WRONGPASS ")
+PY
 }
 
 cleanup() {
@@ -1139,6 +1178,16 @@ expected_extension_version="$(
 [[ -n "$expected_extension_version" ]]
 [[ "$extension_version" == "$expected_extension_version" ]]
 
+check_auth_framing
+printf '%s\r\n' "$auth_token" >"$cache_secret"
+compose restart postgres >/dev/null
+compose up --detach --wait >/dev/null
+check_auth_framing
+printf '%s' "$auth_token" >"$cache_secret"
+compose restart postgres >/dev/null
+compose up --detach --wait >/dev/null
+check_auth_framing
+
 worker_count="$(
     compose exec -T postgres \
         psql --username postgres --dbname "$database" --no-psqlrc \
@@ -1197,6 +1246,150 @@ PG_LOCAL_CACHE_TEST_APP_ROLE="$app_role" \
     python3 -B "${repository_directory}/tests/oom_monitoring_integration.py"
 
 compose exec -T postgres /usr/local/bin/pg_local_cache_healthcheck
+
+binary_identity="$(
+    compose exec -T postgres \
+        psql --username postgres --dbname "$database" --no-psqlrc \
+        --tuples-only --no-align --set ON_ERROR_STOP=1 --command \
+        "SELECT current_setting('pg_local_cache.binary_version'), current_setting('pg_local_cache.binary_build_id')"
+)"
+[[ "$binary_identity" == "${expected_extension_version}|${build_id}" ]]
+if compose exec -T postgres \
+    psql --username postgres --dbname "$database" --no-psqlrc \
+    --set ON_ERROR_STOP=1 --command \
+    "SET pg_local_cache.binary_version = 'spoof'" >/dev/null 2>&1; then
+    printf 'session SET unexpectedly overrode binary identity\n' >&2
+    exit 1
+fi
+if compose exec -T postgres \
+    psql --username postgres --dbname "$database" --no-psqlrc \
+    --set ON_ERROR_STOP=1 --command \
+    "ALTER SYSTEM SET pg_local_cache.binary_build_id = 'spoof'" >/dev/null 2>&1; then
+    printf 'ALTER SYSTEM unexpectedly overrode binary identity\n' >&2
+    exit 1
+fi
+if compose exec -T --env PGOPTIONS="-c pg_local_cache.binary_version=spoof" postgres \
+    psql --username postgres --dbname "$database" --no-psqlrc \
+    --command "SELECT 1" >/dev/null 2>&1; then
+    printf 'PGOPTIONS unexpectedly overrode binary identity\n' >&2
+    exit 1
+fi
+compose exec -T --user postgres postgres sh -eu <<'SH'
+cp "$PGDATA/postgresql.auto.conf" /tmp/postgresql.auto.conf.phase2
+printf "pg_local_cache.binary_version = 'spoof'\n" >> "$PGDATA/postgresql.auto.conf"
+SH
+config_spoof_errors="$(
+    compose exec -T postgres \
+        psql --username postgres --dbname "$database" --no-psqlrc \
+        --tuples-only --no-align --set ON_ERROR_STOP=1 --command \
+        "SELECT pg_reload_conf(); SELECT count(*) FROM pg_catalog.pg_file_settings WHERE name = 'pg_local_cache.binary_version' AND error IS NOT NULL"
+)"
+[[ "$config_spoof_errors" == $'t\n1' ]]
+compose exec -T --user postgres postgres sh -eu <<'SH'
+cp /tmp/postgresql.auto.conf.phase2 "$PGDATA/postgresql.auto.conf"
+rm /tmp/postgresql.auto.conf.phase2
+SH
+compose exec -T postgres \
+    psql --username postgres --dbname "$database" --no-psqlrc \
+    --set ON_ERROR_STOP=1 --command "SELECT pg_reload_conf()" >/dev/null
+
+compose exec -T postgres \
+    psql --username postgres --dbname "$database" --no-psqlrc \
+    --set ON_ERROR_STOP=1 --command "DROP EXTENSION pg_local_cache CASCADE"
+container_id="$(compose ps --quiet postgres)"
+package_root="/tmp/pg_local_cache-phase2"
+if [[ -n "$release_root" ]]; then
+    docker cp "$release_root/." "$container_id:${package_root}/"
+else
+    compose exec -T --user root \
+        --env PGLC_BUILD_ID="$build_id" \
+        --env PGLC_VERSION="$expected_extension_version" \
+        --env PGLC_MAJOR="$postgres_major" \
+        --env PGLC_VARIANT="$postgres_variant" \
+        postgres sh -eu <<'SH'
+package_root=/tmp/pg_local_cache-phase2
+pkglibdir="$(pg_config --pkglibdir)"
+extension_dir="$(pg_config --sharedir)/extension"
+case "$PGLC_VARIANT" in bookworm) libc=glibc ;; alpine3.23) libc=musl ;; esac
+architecture="$(uname -m)"
+case "$architecture" in x86_64|amd64) architecture=amd64 ;; esac
+install -d "$package_root/lib" "$package_root/share/extension"
+install -m 0755 "$pkglibdir/pg_local_cache.so" "$package_root/lib/"
+install -m 0644 "$extension_dir/pg_local_cache.control" "$package_root/share/extension/"
+for sql_file in "$extension_dir"/pg_local_cache--*.sql; do
+    install -m 0644 "$sql_file" "$package_root/share/extension/"
+done
+printf '%s\n' "$PGLC_BUILD_ID" > "$package_root/BUILD-ID"
+{
+    printf 'format=1\nversion=%s\npostgres_major=%s\nos=linux\n' "$PGLC_VERSION" "$PGLC_MAJOR"
+    printf 'libc=%s\narchitecture=%s\ncommit=%s\n' "$libc" "$architecture" "$PGLC_BUILD_ID"
+    printf 'build_image=phase2-runtime\n'
+} > "$package_root/RELEASE-METADATA"
+SH
+    docker cp "${repository_directory}/scripts/install-existing.sh" \
+        "$container_id:${package_root}/install.sh"
+fi
+compose exec -T --user root postgres chmod 0755 "$package_root/install.sh"
+install_output="$(
+    compose exec -T --user root postgres \
+        "$package_root/install.sh" install \
+        --database "$database" --postgres-os-user postgres \
+        --pg-config pg_config --psql psql \
+        --state-root /var/lib/postgresql/data/pg_local_cache-install-state
+)"
+state_directory="$(printf '%s\n' "$install_output" | sed -n 's/^.*state directory: //p' | tail -n 1)"
+[[ "$state_directory" == /var/lib/postgresql/data/pg_local_cache-install-state/* ]]
+compose restart postgres >/dev/null
+for _attempt in {1..60}; do
+    if compose exec -T postgres pg_isready --username postgres --dbname "$database" \
+        >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.2
+done
+compose exec -T postgres pg_isready --username postgres --dbname "$database" \
+    >/dev/null
+compose exec -T --user postgres postgres \
+    "$package_root/install.sh" verify --state-directory "$state_directory" \
+    --postgres-os-user postgres --pg-config pg_config --psql psql
+compose up --detach --wait >/dev/null
+compose exec -T postgres \
+    psql --username postgres --dbname "$database" --no-psqlrc \
+    --set ON_ERROR_STOP=1 <<'SQL'
+CREATE TABLE public.phase2_resp (id bigint PRIMARY KEY, payload text NOT NULL);
+INSERT INTO public.phase2_resp VALUES (1, 'fresh-installer-cache');
+SELECT local_cache.attach_table('public.phase2_resp'::regclass);
+SQL
+PG_LOCAL_CACHE_AUTH_TOKEN="$auth_token" \
+PG_LOCAL_CACHE_RESP_PORT="$cache_host_port" \
+PG_LOCAL_CACHE_DATABASE="$database" \
+    python3 -B - <<'PY'
+import os
+import socket
+
+
+def command(*parts: bytes) -> bytes:
+    payload = b"*" + str(len(parts)).encode() + b"\r\n"
+    payload += b"".join(
+        b"$" + str(len(part)).encode() + b"\r\n" + part + b"\r\n"
+        for part in parts
+    )
+    with socket.create_connection(
+        ("127.0.0.1", int(os.environ["PG_LOCAL_CACHE_RESP_PORT"])), timeout=5
+    ) as client:
+        token = os.environ["PG_LOCAL_CACHE_AUTH_TOKEN"].encode()
+        auth = b"*2\r\n$4\r\nAUTH\r\n$" + str(len(token)).encode() + b"\r\n" + token + b"\r\n"
+        client.sendall(auth)
+        assert client.recv(256) == b"+OK\r\n"
+        client.sendall(payload)
+        return client.recv(4096)
+
+
+key = f'CRUD:{os.environ["PG_LOCAL_CACHE_DATABASE"]}.public.phase2_resp:{{"id":1}}'.encode()
+response = command(b"GET", key)
+assert response.startswith(b"$") and b"fresh-installer-cache" in response, response
+PY
+check_auth_framing
 
 printf 'docker smoke test passed (PostgreSQL %s, RESP %s)\n' \
     "$postgres_host_port" "$cache_host_port"

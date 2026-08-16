@@ -123,7 +123,7 @@ jobs:
           commit_tag="master-${short_sha}"
           test -f "sql/pg_local_cache--${version}.sql"
           grep -Fq 'pg_local_cache--' Dockerfile
-          grep -Fq "pg_local_cache_version:${version}" src/pg_local_cache_worker.c
+          grep -Fqx "#define PGLC_VERSION \"${version}\"" src/pg_local_cache.h
           python3 scripts/validate_pgxn_meta.py
 
           if stable_sha="$(
@@ -203,6 +203,7 @@ jobs:
             --target extension \
             --build-arg "POSTGRES_MAJOR=${POSTGRES_MAJOR}" \
             --build-arg "POSTGRES_VARIANT=${POSTGRES_VARIANT}" \
+            --build-arg "PGLC_BUILD_ID=${RELEASE_SHA}" \
             --tag "$image" \
             .
 
@@ -230,20 +231,23 @@ jobs:
           image="pg_local_cache-release:pg${POSTGRES_MAJOR}-${LIBC}-${RELEASE_SHA}"
           asset="pg_local_cache-pg${POSTGRES_MAJOR}-linux-${LIBC}-amd64"
           root="release-stage/pg_local_cache-${VERSION}-pg${POSTGRES_MAJOR}-linux-${LIBC}-amd64"
-          install -d "$root/lib" "$root/share/extension" "$root/docs" dist extracted
+          install -d "$root/lib" "$root/share/extension" "$root/docs" extracted
 
           pkglibdir="$(docker run --rm --entrypoint /bin/sh "$image" -ec 'pg_config --pkglibdir')"
           sharedir="$(docker run --rm --entrypoint /bin/sh "$image" -ec 'pg_config --sharedir')"
-          container="$(docker create "$image")"
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-          docker cp "${container}:${pkglibdir}/pg_local_cache.so" "$root/lib/"
-          docker cp "${container}:${sharedir}/extension/." extracted/
+          artifact_container="$(docker create "$image")"
+          trap 'docker rm -f "$artifact_container" >/dev/null 2>&1 || true' EXIT
+          docker cp "${artifact_container}:${pkglibdir}/pg_local_cache.so" "$root/lib/"
+          docker cp "${artifact_container}:${sharedir}/extension/." extracted/
+          docker rm -f "$artifact_container" >/dev/null
+          trap - EXIT
           install -m 0644 extracted/pg_local_cache.control "$root/share/extension/"
           find extracted -maxdepth 1 -type f -name 'pg_local_cache--*.sql' \
             -exec install -m 0644 {} "$root/share/extension/" \;
 
           install -m 0755 scripts/install-existing.sh "$root/install.sh"
           install -m 0644 README.md LICENSE "$root/"
+          printf '%s\n' "$RELEASE_SHA" > "$root/BUILD-ID"
           install -m 0644 \
             docs/INSTALL_EXISTING.md docs/BENCHMARKS.md \
             docs/MONITORING.md docs/TECHNICAL.md "$root/docs/"
@@ -259,19 +263,58 @@ jobs:
           } > "$root/RELEASE-METADATA"
 
           epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
-          find release-stage -exec touch -h -d "@${epoch}" {} +
-          tar \
-            --sort=name --format=posix \
-            --pax-option=delete=atime,delete=ctime \
-            --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
-            -C release-stage -cf - "$(basename "$root")" |
-            gzip -n -9 > "dist/${asset}.tar.gz"
+          archive="$PWD/dist/${asset}.tar.gz"
+          identity="$RUNNER_TEMP/${asset}.identity.json"
+          python3 scripts/release_archive.py build \
+            --stage release-stage --root "$(basename "$root")" \
+            --output "$archive" --epoch "$epoch"
+          python3 scripts/release_archive.py inspect \
+            --archive "$archive" --root "$(basename "$root")" \
+            --extract-dir "$RUNNER_TEMP/${asset}-extracted" \
+            --identity-out "$identity" | tee "$RUNNER_TEMP/${asset}.members.txt"
+
+          extracted_root="$RUNNER_TEMP/${asset}-extracted/$(basename "$root")"
+          test -x "$extracted_root/install.sh"
+          test -r "$extracted_root/README.md"
+          test -r "$extracted_root/LICENSE"
+          test -r "$extracted_root/BUILD-ID"
+          test -r "$extracted_root/RELEASE-METADATA"
+          test "$(cat "$extracted_root/BUILD-ID")" = "$RELEASE_SHA"
+          bash "$extracted_root/install.sh" --help >/dev/null
+
+          container="$(docker run --detach --network none \
+            --env POSTGRES_HOST_AUTH_METHOD=trust "$image")"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..60}; do
+            docker exec "$container" pg_isready --username postgres \
+              --dbname postgres >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+          docker exec "$container" pg_isready --username postgres \
+            --dbname postgres >/dev/null
+          docker cp "$extracted_root/." "$container:/artifact/"
+          before="$(docker exec "$container" sha256sum \
+            /var/lib/postgresql/data/postgresql.auto.conf)"
+          docker exec "$container" /artifact/install.sh preflight \
+            --database postgres --postgres-os-user postgres \
+            --pg-config pg_config --psql psql --mode sql-only
+          docker exec "$container" /artifact/install.sh install --dry-run \
+            --database postgres --postgres-os-user postgres \
+            --pg-config pg_config --psql psql --mode sql-only
+          after="$(docker exec "$container" sha256sum \
+            /var/lib/postgresql/data/postgresql.auto.conf)"
+          test "$before" = "$after"
+          python3 scripts/release_archive.py verify-identity \
+            --archive "$archive" --identity "$identity"
+          (cd dist && sha256sum "${asset}.tar.gz" > "${asset}.tar.gz.sha256")
 
       - name: Upload binary lane
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: binary-pg${{ matrix.postgres_major }}-${{ matrix.target.libc }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
           if-no-files-found: error
           retention-days: 1
 
@@ -308,13 +351,45 @@ jobs:
         run: |
           set -Eeuo pipefail
           test "$(find dist -maxdepth 1 -name 'pg_local_cache-pg*-linux-*-amd64.tar.gz' | wc -l)" -eq 10
+          test "$(find dist -maxdepth 1 -name 'pg_local_cache-pg*-linux-*-amd64.tar.gz.sha256' | wc -l)" -eq 10
+          (
+            cd dist
+            for manifest in pg_local_cache-pg*-linux-*-amd64.tar.gz.sha256; do
+              sha256sum --check "$manifest"
+            done
+          )
+          rm dist/pg_local_cache-pg*-linux-*-amd64.tar.gz.sha256
           test -x scripts/install-existing.sh
           bash -n scripts/install-existing.sh
-          make source-test source-sanitize benchmark-test
+          make source-sanitize benchmark-test
 
           source_root="pg_local_cache-${VERSION}-source"
-          git archive --format=tar --prefix="${source_root}/" "$RELEASE_SHA" |
-            gzip -n -9 > dist/pg_local_cache-source.tar.gz
+          source_stage="$RUNNER_TEMP/pg_local_cache-source"
+          install -d "$source_stage/$source_root"
+          git archive --format=tar "$RELEASE_SHA" |
+            tar -xf - -C "$source_stage/$source_root"
+          printf '%s\n' "$RELEASE_SHA" > "$source_stage/$source_root/BUILD-ID"
+          epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
+          source_archive="$PWD/dist/pg_local_cache-source.tar.gz"
+          source_identity="$RUNNER_TEMP/source.identity.json"
+          python3 scripts/release_archive.py build \
+            --stage "$source_stage" --root "$source_root" \
+            --output "$source_archive" --epoch "$epoch"
+          python3 scripts/release_archive.py inspect \
+            --archive "$source_archive" --root "$source_root" \
+            --extract-dir "$RUNNER_TEMP/source-extracted" \
+            --identity-out "$source_identity"
+          extracted_root="$RUNNER_TEMP/source-extracted/$source_root"
+          (
+            cd "$extracted_root"
+            bash -n scripts/install-existing.sh
+            make verify-static source-test pgxn-check
+          )
+          python3 scripts/release_archive.py verify-identity \
+            --archive "$source_archive" --identity "$source_identity"
+          install -m 0755 scripts/fetch-release.sh dist/fetch-release.sh
+          bash -n dist/fetch-release.sh
+          cmp --silent scripts/fetch-release.sh dist/fetch-release.sh
 
       - name: Preserve benchmark evidence from successful CI
         shell: bash

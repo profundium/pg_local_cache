@@ -40,70 +40,40 @@ amd64 (glibc or musl), one configured database, and one writable primary.
 | Optional RESP2 | Trusted internal clients can use authenticated whole-row `GET`, bounded `MGET`, `SET`, and `DEL`. |
 | Operations | SQL metrics, health checks, Prometheus rules, and a Grafana dashboard are included. |
 
-## Docker quick start
+## Choose an install path
 
-Requirements: Docker with Compose v2 and OpenSSL.
+| Goal | Start here |
+|---|---|
+| Try the extension locally | [Local demo](#local-demo): one isolated SQL-only PostgreSQL service with seeded data. |
+| Install on a PostgreSQL host | [Verified binary release](#verified-binary-release), then follow the production [staging, restart and verification guide](docs/INSTALL_EXISTING.md). |
+| Build through PGXN or local PGXS | [PGXN/source packaging](PGXN.md#install-from-pgxn); the existing-server guide still owns preload, restart and verification. |
+
+## Local demo
+
+Requirements: Docker with Compose v2. This demo uses trust authentication only
+inside a private Compose network and publishes no host port. This demo is not a
+production configuration.
 
 ```bash
 git clone https://github.com/profundium/pg_local_cache.git
 cd pg_local_cache
-
-install -d -m 0700 secrets
-openssl rand -base64 36 | tr -d '\n' > secrets/postgres_password
-chmod 0600 secrets/postgres_password
-
-docker compose -f compose.sql-only.yaml \
-  up --detach --build --wait postgres
+docker compose --project-name pg_local_cache_demo -f compose.demo.yaml \
+  up --detach --build --wait
 ```
 
-Open `psql`:
+Inspect the seeded rows, mapping, cached plan and health:
 
 ```bash
-docker compose -f compose.sql-only.yaml \
-  exec postgres psql --username postgres --dbname app
+docker compose --project-name pg_local_cache_demo -f compose.demo.yaml \
+  exec -T postgres psql --no-psqlrc --username postgres --dbname app \
+  -c "TABLE public.pg_local_cache_demo; EXPLAIN SELECT * FROM public.pg_local_cache_demo WHERE id = 1; SELECT local_cache.health();"
 ```
 
-Create and attach a table:
+Remove only this demo's container, network and data volume:
 
-```sql
-CREATE TABLE public.items (
-    id bigint PRIMARY KEY,
-    value text NOT NULL,
-    enabled boolean NOT NULL DEFAULT true,
-    metadata jsonb
-);
-
-INSERT INTO public.items VALUES
-    (1, 'hello', true, '{"source":"postgres"}');
-
-SELECT local_cache.attach_table('public.items'::regclass);
-```
-
-Use ordinary PostgreSQL SQL. Select every column or only the columns needed by
-the caller:
-
-```sql
-SELECT * FROM public.items WHERE id = $1::bigint;
-
-SELECT value, metadata FROM public.items WHERE id = $1::bigint;
-
-SELECT * FROM public.items WHERE id IN (1, 7, 42);
-
-SELECT value, metadata
-FROM public.items
-WHERE id = ANY($1::bigint[]);
-```
-
-Supported exact-primary-key reads and bounded single-column primary-key
-batches can use `Custom Scan (pg_local_cache_sql)`; result rows and projection
-remain ordinary PostgreSQL:
-
-```sql
-EXPLAIN (ANALYZE, COSTS OFF)
-SELECT * FROM public.items WHERE id = 1;
-
-SELECT local_cache.health();
-SELECT * FROM local_cache.metrics();
+```bash
+docker compose --project-name pg_local_cache_demo -f compose.demo.yaml \
+  down --volumes
 ```
 
 ## SQL API
@@ -122,7 +92,7 @@ The canonical tuple API is an ordinary exact-primary-key query:
 
 ```sql
 SELECT * FROM public.items WHERE id = 42::bigint;
-SELECT metadata FROM public.items WHERE id = 42::bigint;
+SELECT value, metadata FROM public.items WHERE id = 42::bigint;
 ```
 
 Composite primary keys use normal SQL predicates, in any order:
@@ -214,33 +184,75 @@ SELECT local_cache.detach_table('public.items'::regclass);
 See the [technical reference](docs/TECHNICAL.md#planner-and-executor-fast-path)
 for the exact planner, snapshot, and type rules.
 
-## Install on an existing server
+## Verified binary release
 
-Choose your PostgreSQL major and Linux libc, then download the exact latest
-asset with `curl`—no GitHub CLI or tag lookup:
+This bootstrap resolves the latest stable tag once, downloads the helper and
+its checksum from that immutable tag, leaves the final package at a path you
+choose, and deletes only its private temporary directory. Review the helper
+locally before running it. It uses no GitHub API or GitHub CLI.
 
 ```bash
-PG_MAJOR=18
-LIBC=glibc # glibc or musl
-BASE=https://github.com/profundium/pg_local_cache/releases/latest/download
+destination="$(pwd -P)/pg_local_cache-package"
+[[ ! -e "$destination" ]] || { echo "destination already exists" >&2; exit 1; }
 
-curl -fLO "$BASE/pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
-curl -fLO "$BASE/SHA256SUMS"
-sha256sum --check --ignore-missing --strict SHA256SUMS
-tar -xzf "pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
-cd "pg_local_cache-"*-"pg${PG_MAJOR}-linux-${LIBC}-amd64"
-sudo ./install.sh preflight --database app --mode sql-only
-sudo ./install.sh install --database app --mode sql-only
+umask 077
+bootstrap="$(mktemp -d "${TMPDIR:-/tmp}/pg_local_cache-bootstrap.XXXXXX")"
+cleanup() { rm -rf -- "$bootstrap"; }
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+latest_url="$(curl --fail --silent --show-error --location \
+  --proto '=https' --tlsv1.2 --output /dev/null --write-out '%{url_effective}' \
+  https://github.com/profundium/pg_local_cache/releases/latest)"
+[[ "$latest_url" =~ ^https://github\.com/profundium/pg_local_cache/releases/tag/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || exit 1
+tag="${latest_url##*/}"
+base="https://github.com/profundium/pg_local_cache/releases/download/${tag}"
+
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output "$bootstrap/SHA256SUMS" "$base/SHA256SUMS"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output "$bootstrap/fetch-release.sh" "$base/fetch-release.sh"
+
+(
+  cd "$bootstrap"
+  helper_checksum="$(awk '$2 == "fetch-release.sh"' SHA256SUMS)"
+  [[ "$(printf '%s\n' "$helper_checksum" | wc -l)" -eq 1 ]]
+  printf '%s\n' "$helper_checksum" | sha256sum --check --strict
+  sed -n '1,260p' ./fetch-release.sh
+  bash ./fetch-release.sh \
+    --release-tag "$tag" \
+    --output-directory "$destination"
+)
 ```
 
-Use `glibc` for Debian, Ubuntu, RHEL-family and similar systems; use `musl` for
-Alpine. The installer rejects a PostgreSQL major, OS, architecture, or libc
-mismatch before copying files. Use `pg_local_cache-source.tar.gz` and the target
-server's PGXS when a packaged binary does not match.
+The helper detects PostgreSQL 14–18, Linux amd64 and glibc/musl, verifies the
+selected archive, and never executes its installer. If the target is not a
+published binary platform, use the [PGXN/source path](PGXN.md#install-from-pgxn).
+The [manual release-asset route](docs/INSTALL_EXISTING.md#manual-release-download)
+keeps both the archive and `SHA256SUMS` directly reachable.
+
+Run preflight, then stage files and settings online. Keep the state-directory
+path printed by `install`; staging is not activation:
+
+```bash
+sudo "$destination/install.sh" preflight --database app --mode sql-only
+sudo "$destination/install.sh" install --database app --mode sql-only
+```
+
+Have the operator restart PostgreSQL with the cluster's existing orchestration.
+Then use the exact printed state path for expectation-only activation and
+verification:
+
+```bash
+sudo "$destination/install.sh" verify \
+  --state-directory /var/lib/pg_local_cache/install-state/install-PRINTED-ID
+```
 
 The [existing-database install guide](docs/INSTALL_EXISTING.md) covers checksum
-verification, read-only preflight, online staging, restart, HA, verification,
-and rollback.
+verification, read-only preflight, online staging, restart, recovery, upgrades,
+existing Docker volumes, HA, managed services, verification and rollback.
 
 The first installation requires one restart because
 `shared_preload_libraries` is evaluated at postmaster startup. File staging and

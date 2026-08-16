@@ -11,8 +11,9 @@ permalink: /
       <h1 id="hero-title">Keep hot primary-key reads inside PostgreSQL</h1>
       <p>pg_local_cache adds a narrow, transaction-aware fast path for repeated exact-primary-key and bounded single-column IN/ANY reads. PostgreSQL stays authoritative, and unsupported or unsafe queries keep the original source plan. It is not a general query cache or a universal Redis replacement.</p>
       <div class="hero-actions">
-        <a class="button primary" href="https://github.com/profundium/pg_local_cache/releases/latest/download/pg_local_cache-pg18-linux-glibc-amd64.tar.gz">Download PG18 glibc <span aria-hidden="true">→</span></a>
-        <a class="button" href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">Install guide <span aria-hidden="true">→</span></a>
+        <a class="button primary" href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">Install guide <span aria-hidden="true">→</span></a>
+        <a class="button" href="https://github.com/profundium/pg_local_cache/releases/latest">Latest release <span aria-hidden="true">→</span></a>
+        <a class="button" href="https://github.com/profundium/pg_local_cache#local-demo">Run local demo <span aria-hidden="true">→</span></a>
       </div>
       <div class="mini-code">
         <button class="copy-button" type="button" data-copy="hero-sql">Copy</button>
@@ -81,29 +82,14 @@ COMMIT
   </div>
 
   <section id="quick-start" class="page-section quick-start" aria-labelledby="quick-start-title">
-    <h2 id="quick-start-title">Install on an existing PostgreSQL server</h2>
-    <p class="quick-start-lead">Choose PostgreSQL 14–18 and <code>glibc</code> (Debian, Ubuntu, RHEL-family) or <code>musl</code> (Alpine). Download the stable asset directly—no GitHub CLI or tag lookup. Preparation stays online; first activation needs one controlled restart.</p>
+    <h2 id="quick-start-title">Choose your start path</h2>
+    <p class="quick-start-lead">Try the isolated demo, fetch a reviewed binary for PostgreSQL 14–18 on Linux amd64, or build through PGXN/source. Production preparation stays online; first activation needs one controlled restart.</p>
     <div class="steps">
-      <div class="step"><span class="step-number">1</span><strong>Download latest</strong><p>Choose the compatible binary or source archive plus checksums.</p></div>
-      <div class="step"><span class="step-number">2</span><strong>Verify &amp; extract</strong><p>Check the published SHA-256 digest before opening the archive.</p></div>
-      <div class="step"><span class="step-number">3</span><strong>Preflight &amp; stage</strong><p>Check the cluster, then copy files and stage settings online.</p></div>
-      <div class="step"><span class="step-number">4</span><strong>Restart &amp; verify</strong><p>Use one controlled restart, verify health, then attach a table.</p></div>
+      <div class="step"><span class="step-number">1</span><strong>Local demo</strong><p>One private SQL-only service, seeded table and no host port.</p></div>
+      <div class="step"><span class="step-number">2</span><strong>Existing server</strong><p>Fetch a tag-bound verified archive, stage online, then let the operator restart and verify.</p></div>
+      <div class="step"><span class="step-number">3</span><strong>PGXN or source</strong><p>Build for the target PGXS when a published binary does not match.</p></div>
     </div>
-    <div class="install-command">
-      <div class="command-label">Example: PostgreSQL 18 · Linux glibc · amd64</div>
-      <button class="copy-button" type="button" data-copy="install-command">Copy</button>
-      <pre id="install-command"><code>PG_MAJOR=18
-LIBC=glibc
-BASE=https://github.com/profundium/pg_local_cache/releases/latest/download
-curl -fLO "$BASE/pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
-curl -fLO "$BASE/SHA256SUMS"
-sha256sum --check --ignore-missing --strict SHA256SUMS
-tar -xzf "pg_local_cache-pg${PG_MAJOR}-linux-${LIBC}-amd64.tar.gz"
-cd "pg_local_cache-"*-"pg${PG_MAJOR}-linux-${LIBC}-amd64"
-sudo ./install.sh preflight --database app --mode sql-only
-sudo ./install.sh install --database app --mode sql-only</code></pre>
-    </div>
-    <p class="quick-start-more"><a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">Continue with restart, verification, source builds, HA, and rollback →</a></p>
+    <p class="quick-start-more"><a href="https://github.com/profundium/pg_local_cache#choose-an-install-path">Start with the three short paths →</a> <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">Production staging, restart, verification, HA and rollback →</a></p>
   </section>
 
   <section class="architecture">

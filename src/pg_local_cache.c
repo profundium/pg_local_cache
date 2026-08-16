@@ -59,6 +59,8 @@ HTAB	   *pglc_relation_hash = NULL;
 static PgLocalCacheSqlCounterSlot *pglc_sql_counter_slots = NULL;
 static PgLocalCacheSqlCounterSlot *pglc_my_sql_counter_slot = NULL;
 static int	pglc_sql_counter_slot_count = 0;
+static char *pglc_binary_version = NULL;
+static char *pglc_binary_build_id = NULL;
 
 #if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type previous_shmem_request_hook = NULL;
@@ -143,6 +145,28 @@ static void pglc_read_sql_counter_snapshot(
 static void
 pglc_define_gucs(void)
 {
+	DefineCustomStringVariable("pg_local_cache.binary_version",
+							   "Version compiled into the active pg_local_cache library.",
+							   NULL,
+							   &pglc_binary_version,
+							   PGLC_VERSION,
+							   PGC_INTERNAL,
+							   GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE,
+							   NULL,
+							   NULL,
+							   NULL);
+
+	DefineCustomStringVariable("pg_local_cache.binary_build_id",
+							   "Build identifier compiled into the active pg_local_cache library.",
+							   NULL,
+							   &pglc_binary_build_id,
+							   PGLC_BUILD_ID,
+							   PGC_INTERNAL,
+							   GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE,
+							   NULL,
+							   NULL,
+							   NULL);
+
 	DefineCustomIntVariable("pg_local_cache.port",
 							"TCP port for the RESP2 listener; 0 disables it.",
 							NULL,
