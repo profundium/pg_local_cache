@@ -18,15 +18,7 @@
     <meta property="og:title" content="{% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}">
     <meta property="og:description" content="{{ page.description | default: site.description | escape }}">
     <meta property="og:url" content="{{ page.url | absolute_url }}">
-    <meta property="og:image" content="{{ '/assets/social-card.png' | absolute_url }}">
-    <meta property="og:image:width" content="1200">
-    <meta property="og:image:height" content="630">
-    <meta property="og:image:alt" content="pg_local_cache: whole-row primary-key caching for ordinary SQL">
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="{% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}">
-    <meta name="twitter:description" content="{{ page.description | default: site.description | escape }}">
-    <meta name="twitter:image" content="{{ '/assets/social-card.png' | absolute_url }}">
-    <meta name="twitter:image:alt" content="pg_local_cache: whole-row primary-key caching for ordinary SQL">
+    <meta name="twitter:card" content="summary">
     <link rel="icon" href="{{ '/assets/favicon.svg' | relative_url }}" type="image/svg+xml">
     <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
     {% if page.home %}
@@ -46,15 +38,6 @@
     </script>
     {% endif %}
   </head>
-  <!-- Google tag (gtag.js) -->
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-MHQBYKWZ7W"></script>
-  <script>
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);}
-    gtag('js', new Date());
-
-    gtag('config', 'G-MHQBYKWZ7W');
-  </script>
   <body class="{% if page.home %}home{% else %}documentation{% endif %}">
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="site-header">
@@ -64,9 +47,8 @@
         <nav id="site-nav" class="site-nav" aria-label="Primary navigation">
           <a href="{{ '/#sql-api' | relative_url }}">SQL API</a>
           <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}"{% if page.url == '/docs/INSTALL_EXISTING.html' %} aria-current="page"{% endif %}>Install</a>
-          <a href="{{ '/docs/BENCHMARKS.html' | relative_url }}"{% if page.url == '/docs/BENCHMARKS.html' %} aria-current="page"{% endif %}>Benchmarks</a>
-          <a href="{{ '/docs/MONITORING.html' | relative_url }}"{% if page.url == '/docs/MONITORING.html' %} aria-current="page"{% endif %}>Monitoring</a>
           <a href="{{ '/docs/TECHNICAL.html' | relative_url }}"{% if page.url == '/docs/TECHNICAL.html' %} aria-current="page"{% endif %}>Technical</a>
+          <a href="{{ '/docs/PGXN.html' | relative_url }}"{% if page.url == '/docs/PGXN.html' %} aria-current="page"{% endif %}>PGXN</a>
           <a class="nav-download" href="https://github.com/{{ site.repository }}/releases/latest">Download</a>
         </nav>
       </div>

@@ -1,3 +1,10 @@
+---
+layout: doc
+title: Install on an existing PostgreSQL server
+section: Install
+permalink: /docs/INSTALL_EXISTING.html
+---
+
 # Install on an existing PostgreSQL server
 
 Use a maintenance window: first activation changes
@@ -132,5 +139,4 @@ per-client PostgreSQL ACL context.
   transaction, recovery state, row size, and metrics;
 - stale mapping after DDL: run `local_cache.reconcile_table(...)`.
 
-See [technical reference](TECHNICAL.md) and
-[monitoring](../monitoring/README.md).
+See the [technical reference](TECHNICAL.md).

@@ -23,9 +23,9 @@ Replace `app` with the database name. The command selects and verifies the
 matching release, installs it, updates `shared_preload_libraries`, restarts
 through `pg_ctl`, creates the extension, and verifies health.
 
-Use [the production guide](docs/INSTALL_EXISTING.md) for systemd, Patroni,
-Kubernetes, staged changes, rollback, RESP, or a checksum-first manual install.
-Unsupported platforms can [build through PGXN/PGXS](PGXN.md).
+Use [the production guide](docs/INSTALL_EXISTING.md) for controlled restarts,
+rollback, RESP, or a checksum-first install. Unsupported platforms can
+[build through PGXN/PGXS](PGXN.md).
 
 ## Use
 
@@ -115,30 +115,11 @@ pg_local_cache.port = 0
 PostgreSQL role and an authentication token; keep it on loopback or behind TLS.
 See [technical reference](docs/TECHNICAL.md).
 
-## Try locally
-
-```bash
-docker compose --project-name pg_local_cache_demo -f compose.demo.yaml up -d --build --wait
-```
-
-Inspect:
-
-```bash
-docker compose --project-name pg_local_cache_demo -f compose.demo.yaml exec -T postgres psql -U postgres -d app -c "SELECT local_cache.mget('public.pg_local_cache_demo'::regclass, ARRAY[1,2]::bigint[]); SELECT local_cache.health();"
-```
-
-Remove:
-
-```bash
-docker compose --project-name pg_local_cache_demo -f compose.demo.yaml down -v
-```
-
 ## Develop
 
 ```bash
 make verify-static source-test
 make docker-smoke
-make benchmark-test
 ```
 
 Local PGXS builds require PostgreSQL server headers. The Docker smoke test is
@@ -148,7 +129,6 @@ More:
 
 - [production install](docs/INSTALL_EXISTING.md)
 - [technical reference](docs/TECHNICAL.md)
-- [benchmarks](docs/BENCHMARKS.md)
-- [monitoring](monitoring/README.md)
+- [PGXN](PGXN.md)
 
-License: [PostgreSQL License](LICENSE).
+License: [MIT](LICENSE).

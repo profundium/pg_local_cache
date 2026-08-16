@@ -1,55 +1,84 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Transaction-aware PostgreSQL primary-key row cache with explicit SQL mget and optional RESP2.">
-  <title>pg_local_cache</title>
-  <style>
-    :root { color-scheme: light dark; font: 17px/1.55 system-ui, sans-serif; }
-    body { max-width: 760px; margin: 0 auto; padding: 3rem 1.25rem; }
-    h1 { font-size: clamp(2.5rem, 8vw, 5rem); line-height: .95; }
-    h2 { margin-top: 2.5rem; }
-    pre { overflow: auto; padding: 1rem; border: 1px solid #8886; border-radius: .5rem; }
-    code { font-family: ui-monospace, monospace; }
-    a { color: inherit; }
-    .muted { color: #777; }
-  </style>
-</head>
-<body>
-  <header>
-    <p class="muted">PostgreSQL 14–18 · Linux amd64</p>
-    <h1>pg_local_cache</h1>
-    <p>Bounded, transaction-aware primary-key row cache. One SQL read API:
-      <code>local_cache.mget</code>. Optional RESP2. Ordinary SQL stays ordinary.</p>
-  </header>
+---
+layout: default
+title: PostgreSQL primary-key row cache
+description: Bounded, transaction-aware PostgreSQL row caching through explicit SQL mget and optional RESP2.
+home: true
+permalink: /
+---
+<main id="main-content">
+  <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
+    <div class="hero-copy">
+      <h1 id="hero-title">A local row cache inside PostgreSQL</h1>
+      <p>Read whole rows by primary key through one explicit SQL API. PostgreSQL remains authoritative and writes invalidate the cache transactionally.</p>
+      <div class="hero-actions">
+        <a class="button primary" href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">Install <span aria-hidden="true">→</span></a>
+        <a class="button" href="{{ '/docs/TECHNICAL.html' | relative_url }}">Technical reference <span aria-hidden="true">→</span></a>
+      </div>
+      <div class="mini-code">
+        <button class="copy-button" type="button" data-copy="hero-install">Copy</button>
+        <pre id="hero-install"><code>curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh | bash -s -- app</code></pre>
+      </div>
+    </div>
+    <div class="terminal" aria-label="PostgreSQL mget example">
+      <div class="terminal-bar"><strong>psql</strong> │ postgres@localhost:5432/app</div>
+      <pre><code>app=&gt; <span class="sql">SELECT</span> local_cache.attach_table(
+        'public.items'::regclass
+      );
 
-  <main>
-    <h2>Install</h2>
-    <pre><code>curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh | bash -s -- app</code></pre>
+app=&gt; <span class="sql">SELECT</span> local_cache.mget(
+        'public.items'::regclass,
+        ARRAY[42, 7, 42, NULL]::bigint[]
+      );
 
-    <h2>Use</h2>
-    <pre><code>SELECT local_cache.attach_table('public.items'::regclass);
+ <span class="hit">{"id":42,"value":"cached"}</span>
+ <span class="hit">{"id":7,"value":"cached"}</span>
+ <span class="hit">{"id":42,"value":"cached"}</span>
+ <span class="comment">NULL</span></code></pre>
+    </div>
+  </section>
 
-SELECT local_cache.mget(
-  'public.items'::regclass,
-  ARRAY[42, 7, 42, NULL]::bigint[]
-);</code></pre>
-    <p>Order, duplicates, and null positions are preserved. Writes use normal
-      PostgreSQL DML and invalidate the cache transactionally.</p>
+  <section class="proof-rail" aria-label="Core properties">
+    <div class="proof-item"><strong>Explicit SQL API</strong><p>One ordered <code>local_cache.mget</code> call.</p></div>
+    <div class="proof-item"><strong>Whole rows</strong><p>Complete JSON rows keyed by the table primary key.</p></div>
+    <div class="proof-item"><strong>Transaction-aware</strong><p>Writes fence affected entries before commit visibility.</p></div>
+    <div class="proof-item"><strong>Bounded memory</strong><p>Shared-memory capacity is fixed at PostgreSQL startup.</p></div>
+  </section>
 
-    <h2>Boundary</h2>
-    <p>Built for repeated exact-primary-key reads whose hot set fits memory.
-      It is not a join, range, aggregate, TTL, pub/sub, or distributed cache.</p>
+  <section id="quick-start" class="page-section quick-start" aria-labelledby="quick-start-title">
+    <h2 id="quick-start-title">Install on PostgreSQL 14–18</h2>
+    <p class="quick-start-lead">The bootstrap selects the matching glibc or musl binary, verifies release checksums, installs the extension, restarts through <code>pg_ctl</code>, and checks health.</p>
+    <div class="steps">
+      <div class="step"><span class="step-number">1</span><strong>Resolve latest</strong><p>Pin one immutable release tag.</p></div>
+      <div class="step"><span class="step-number">2</span><strong>Verify</strong><p>Check helper and archive SHA-256 hashes.</p></div>
+      <div class="step"><span class="step-number">3</span><strong>Install</strong><p>Stage files and PostgreSQL configuration.</p></div>
+      <div class="step"><span class="step-number">4</span><strong>Verify health</strong><p>Create the extension after restart.</p></div>
+    </div>
+    <div class="install-command">
+      <div class="command-label">SQL-only installation for database app</div>
+      <button class="copy-button" type="button" data-copy="install-command">Copy</button>
+      <pre id="install-command"><code>curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh | bash -s -- app</code></pre>
+    </div>
+    <p class="quick-start-more">Need systemd, Patroni, Kubernetes, RESP, rollback, or manual checksums? Read the <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">installation guide</a>.</p>
+  </section>
 
-    <h2>Docs</h2>
-    <p>
-      <a href="README.md">Quick start</a> ·
-      <a href="docs/INSTALL_EXISTING.md">Production install</a> ·
-      <a href="docs/TECHNICAL.md">Technical reference</a> ·
-      <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
-      <a href="https://github.com/profundium/pg_local_cache">GitHub</a>
-    </p>
-  </main>
-</body>
-</html>
+  <section class="architecture">
+    <div class="page-section architecture-inner">
+      <h2>Data path</h2>
+      <div class="architecture-flow" aria-label="Application, PostgreSQL, and shared cache">
+        <span class="node">application</span><span class="arrow">→</span>
+        <span class="node">PostgreSQL</span><span class="arrow">↔</span>
+        <span class="node">shared row cache</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="page-section docs-index" aria-labelledby="docs-title">
+    <h2 id="docs-title">Documentation</h2>
+    <div class="docs-list">
+      <a class="docs-link" href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}"><strong>Install</strong><span>Fast path, controlled restarts, verification and recovery.</span><b>→</b></a>
+      <a class="docs-link" href="{{ '/docs/TECHNICAL.html' | relative_url }}"><strong>Technical reference</strong><span>SQL API, cache semantics, memory, RESP and security.</span><b>→</b></a>
+      <a class="docs-link" href="{{ '/docs/PGXN.html' | relative_url }}"><strong>PGXN</strong><span>Source packages, semantic versions and publication.</span><b>→</b></a>
+      <a class="docs-link" href="https://github.com/profundium/pg_local_cache"><strong>GitHub</strong><span>Source, issues and immutable releases.</span><b>→</b></a>
+    </div>
+  </section>
+</main>

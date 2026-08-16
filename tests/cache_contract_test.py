@@ -35,7 +35,6 @@ INSTALL_SQL = (ROOT / "sql" / f"pg_local_cache--{CURRENT_VERSION}.sql").read_tex
 )
 ENTRYPOINT = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
 HEALTHCHECK = (ROOT / "docker" / "healthcheck.sh").read_text(encoding="utf-8")
-SQL_ONLY_COMPOSE = (ROOT / "compose.sql-only.yaml").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 
 
@@ -538,15 +537,8 @@ class SqlOnlyContainerSourceTests(unittest.TestCase):
         early_exit = HEALTHCHECK.index("if (( port == 0 )); then")
         self.assertLess(early_exit, resp_probe)
 
-    def test_sql_only_compose_has_no_resp_port_or_token_secret(self) -> None:
-        self.assertIn('PG_LOCAL_CACHE_PORT: "0"', SQL_ONLY_COMPOSE)
-        self.assertNotIn("pg_local_cache_auth_token", SQL_ONLY_COMPOSE)
-        self.assertNotIn(":6380", SQL_ONLY_COMPOSE)
-        self.assertIn("postgres_password", SQL_ONLY_COMPOSE)
-
     def test_compose_pins_pgdata_across_postgresql_14_through_18(self) -> None:
-        for compose in (COMPOSE, SQL_ONLY_COMPOSE):
-            self.assertIn("PGDATA: /var/lib/postgresql/data", compose)
+        self.assertIn("PGDATA: /var/lib/postgresql/data", COMPOSE)
 
 
 if __name__ == "__main__":

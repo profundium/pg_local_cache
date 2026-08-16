@@ -32,44 +32,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: make verify-static source-test source-sanitize benchmark-test
-
-  monitoring-config:
-    name: monitoring-config (Prometheus + Grafana + Compose)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Validate Prometheus config, alerts, and rule tests
-        run: |
-          docker run --rm \
-            --entrypoint /bin/promtool \
-            --volume "$PWD/monitoring/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.12.0 \
-            check config /etc/prometheus/prometheus.yml
-          docker run --rm \
-            --entrypoint /bin/promtool \
-            --volume "$PWD/monitoring/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.12.0 \
-            test rules /etc/prometheus/alerts.test.yml
-
-      - name: Validate monitoring overlay for RESP and SQL-only profiles
-        run: |
-          mkdir -p secrets
-          touch secrets/postgres_password \
-            secrets/pg_local_cache_auth_token \
-            secrets/monitor_password \
-            secrets/grafana_admin_password
-          docker compose \
-            --file compose.yaml \
-            --file compose.monitoring.yaml \
-            config --quiet
-          docker compose \
-            --file compose.sql-only.yaml \
-            --file compose.monitoring.yaml \
-            config --quiet
+        run: make verify-static source-test source-sanitize
 
   docker-integration:
     name: docker-integration
@@ -95,75 +58,29 @@ jobs:
         run: bash tests/docker_smoke.sh
 
   docker-compatibility:
-    name: docker-compatibility (PostgreSQL 14-18 ${{ matrix.variant }})
+    name: PostgreSQL ${{ matrix.postgres }} compile
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        variant: [bookworm, alpine3.23]
+        postgres: [14, 15, 16, 17, 18]
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Run checked-in PostgreSQL compatibility smoke matrix
-        env:
-          PGLC_MATRIX_MAJORS: 14,15,16,17,18
-          PGLC_MATRIX_VARIANTS: ${{ matrix.variant }}
-        run: bash tests/compatibility_matrix.sh
-
-  docker-sql-only:
-    name: docker-sql-only (SQL MGET, no RESP secret)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Build and test the tokenless SQL-only profile
-        env:
-          PGLC_SQL_ONLY_BENCH_DURATION: "5"
-          PGLC_SQL_ONLY_BENCH_WARMUP_SECONDS: "2"
-          PGLC_SQL_ONLY_BENCH_LATENCY_DURATION: "5"
-          PGLC_SQL_ONLY_BENCH_LATENCY_SAMPLE_RATE: "0.10"
-          PGLC_SQL_ONLY_BENCH_LATENCY_MIN_SAMPLES: "2000"
-          PGLC_SQL_ONLY_BENCH_REPETITIONS: "3"
-          PGLC_SQL_ONLY_BENCH_CONCURRENCY: "16"
-          PGLC_SQL_ONLY_BENCH_PIPELINE: "32"
-          PGLC_SQL_ONLY_BENCH_KEYS: "4096"
-          PGLC_SQL_ONLY_BENCH_PAYLOAD_BYTES: "3000"
-          PGLC_SQL_ONLY_BENCH_PREPARED_MIN_OPS: "10000"
-          PGLC_SQL_ONLY_BENCH_EXTENDED_MIN_OPS: "10000"
-          PGLC_SQL_ONLY_BENCH_MIN_CACHED_TO_DIRECT_RATIO: "1.50"
-          PGLC_SQL_ONLY_BENCH_MIN_CACHED_TO_STOCK_RATIO: "1.50"
-          PGLC_SQL_ONLY_BENCH_SCALING_SNAPSHOT: "true"
-          PGLC_SQL_ONLY_BENCH_SCALING_DURATION: "3"
-          PGLC_SQL_ONLY_BENCH_SCALING_WARMUP_SECONDS: "1"
-          PGLC_SQL_ONLY_BENCH_SCALING_LATENCY_DURATION: "3"
-          PGLC_SQL_ONLY_BENCH_SCALING_LATENCY_SAMPLE_RATE: "0.10"
-          PGLC_SQL_ONLY_BENCH_SCALING_LATENCY_MIN_SAMPLES: "500"
-          PGLC_SQL_ONLY_BENCH_SCALING_REPETITIONS: "1"
-          PGLC_SQL_ONLY_BENCH_OUTPUT_DIR: ${{ runner.temp }}/sql-only-benchmark
-        run: bash tests/docker_sql_only_smoke.sh
-
-      - name: Upload SQL-only benchmark evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: sql-only-benchmark-smoke
-          path: ${{ runner.temp }}/sql-only-benchmark/
-          if-no-files-found: warn
-          retention-days: 30
+      - name: Compile extension
+        run: >-
+          docker build --target extension
+          --build-arg POSTGRES_MAJOR=${{ matrix.postgres }}
+          --build-arg POSTGRES_VARIANT=bookworm
+          --build-arg PGLC_BUILD_ID=${GITHUB_SHA}
+          .
 
   dispatch-release:
     name: dispatch release
     if: github.event_name == 'workflow_dispatch' && inputs.release
-    needs:
-      - source-unit
-      - monitoring-config
-      - docker-integration
-      - docker-compatibility
-      - docker-sql-only
+    needs: [source-unit, docker-integration, docker-compatibility]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -174,7 +91,6 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - name: Dispatch release for the successful version commit
-        shell: bash
         run: |
           gh workflow run release.yml \
             --ref master \

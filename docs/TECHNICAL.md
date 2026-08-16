@@ -1,3 +1,10 @@
+---
+layout: doc
+title: Technical reference
+section: Technical
+permalink: /docs/TECHNICAL.html
+---
+
 # Technical reference
 
 ## Boundary
@@ -143,6 +150,3 @@ SQL cache counters now describe only explicit `mget` calls:
 
 Database reads, invalidations, admission rejection, dirty-key fallback,
 singleflight, worker, and RESP counters remain separate.
-
-See [monitoring assets](../monitoring/README.md) and
-[benchmark method](BENCHMARKS.md).

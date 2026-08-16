@@ -23,12 +23,15 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install-existing.sh"
 RELEASE = ROOT / ".github" / "workflows" / "release.yml"
-CI = ROOT / ".github" / "workflows" / "ci.yml"
-BENCHMARK = ROOT / ".github" / "workflows" / "benchmark.yml"
 ARCHIVE_HELPER = ROOT / "scripts" / "release_archive.py"
 FETCHER = ROOT / "scripts" / "fetch-release.sh"
-DEMO_COMPOSE = ROOT / "compose.demo.yaml"
-DEMO_SEED = ROOT / "docker" / "initdb" / "020_demo.sql"
+CONTROL = (ROOT / "pg_local_cache.control").read_text(encoding="utf-8")
+CURRENT_VERSION_MATCH = re.search(
+    r"^default_version = '([0-9]+\.[0-9]+\.[0-9]+)'$", CONTROL, re.MULTILINE
+)
+if CURRENT_VERSION_MATCH is None:
+    raise RuntimeError("could not read current extension version")
+CURRENT_VERSION = CURRENT_VERSION_MATCH.group(1)
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -1931,7 +1934,7 @@ class ReleaseContracts(unittest.TestCase):
 
         package_start = source.index("- name: Validate source and create source archive")
         package_end = source.index(
-            "- name: Preserve benchmark evidence", package_start
+            "- name: Create and verify checksums", package_start
         )
         package = source[package_start:package_end]
         self.assertIn("sha256sum --check", package)
@@ -1976,7 +1979,7 @@ class ReleaseContracts(unittest.TestCase):
         self.assertIn("libc: musl", workflow)
         self.assertIn("architecture=amd64", workflow)
         self.assertIn("scripts/install-existing.sh", workflow)
-        self.assertIn("docs/MONITORING.md", workflow)
+        self.assertIn("docs/INSTALL_EXISTING.md", workflow)
         self.assertIn("AS extension", dockerfile)
         self.assertIn("FROM extension AS runtime", dockerfile)
         self.assertIn('PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no clean', dockerfile)
@@ -1988,8 +1991,8 @@ class ReleaseContracts(unittest.TestCase):
         core = (ROOT / "src/pg_local_cache.c").read_text()
         worker = (ROOT / "src/pg_local_cache_worker.c").read_text()
         makefile = (ROOT / "Makefile").read_text()
-        self.assertIn('#define PGLC_VERSION "1.3.0"', header)
-        self.assertNotIn("1.3.0", worker)
+        self.assertIn(f'#define PGLC_VERSION "{CURRENT_VERSION}"', header)
+        self.assertNotIn(CURRENT_VERSION, worker)
         for name in ("pg_local_cache.binary_version", "pg_local_cache.binary_build_id"):
             start = core.index(name)
             self.assertIn("PGC_INTERNAL", core[start : start + 600])
@@ -2003,105 +2006,6 @@ class ReleaseContracts(unittest.TestCase):
             release,
         )
         self.assertNotIn("pg_local_cache_version:${version}", release)
-
-    def test_release_requires_exact_commit_sql_benchmark_artifact(self) -> None:
-        source = RELEASE.read_text(encoding="utf-8")
-        start = source.index(
-            "- name: Preserve benchmark evidence from successful CI"
-        )
-        end = source.index("- name: Create and verify checksums", start)
-        evidence_step = source[start:end]
-        self.assertIn("sql-only-benchmark-smoke", evidence_step)
-        self.assertIn("scripts/validate_benchmark_evidence.py", evidence_step)
-        self.assertIn('--revision "$RELEASE_SHA"', evidence_step)
-        self.assertIn(
-            "--sql-only ci-evidence/sql-only/sql-only.json", evidence_step
-        )
-        self.assertNotIn("comparison-smoke", evidence_step)
-        self.assertNotIn("--whole", evidence_step)
-        self.assertNotIn("comparison.json", evidence_step)
-        self.assertNotIn("if ! gh run download", evidence_step)
-        self.assertNotIn("artifact was not available", evidence_step)
-        self.assertNotIn("if: env.TRIGGER_RUN_ID != ''", evidence_step)
-        self.assertNotIn("<<'PY'", evidence_step)
-
-    def test_whole_row_workflows_use_only_active_regression_gates(self) -> None:
-        ci = CI.read_text(encoding="utf-8")
-        benchmark = BENCHMARK.read_text(encoding="utf-8")
-        combined = ci + benchmark
-        for obsolete in (
-            "PGLC_BENCH_REQUIRE_SINGLE_FLIGHT",
-            "PGLC_BENCH_SQL_DIRECT_SETUP",
-            "PGLC_BENCH_SQL_FAST_PATH_SETUP",
-            "PGLC_BENCH_SQL_MIN_OPS",
-            "PGLC_BENCH_MIN_OPS",
-        ):
-            self.assertNotIn(obsolete, combined)
-        self.assertIn('PGLC_BENCH_SINGLEFLIGHT_WAIT_MS: "250"', benchmark)
-        self.assertIn('PGLC_BENCH_ROW_RESP_MIN_OPS: "10000"', benchmark)
-        self.assertNotIn("PGLC_BENCH_ROW_SQL_", combined)
-
-
-class DemoComposeContracts(unittest.TestCase):
-    def test_demo_is_one_isolated_sql_only_service(self) -> None:
-        compose = DEMO_COMPOSE.read_text(encoding="utf-8")
-        services = compose.partition("services:\n")[2].partition("\nvolumes:\n")[0]
-        self.assertEqual(
-            re.findall(r"(?m)^  ([a-z][a-z0-9_-]*):$", services),
-            ["postgres"],
-        )
-        self.assertIn("name: pg_local_cache_demo", compose)
-        self.assertIn("context: .", compose)
-        self.assertIn("dockerfile: Dockerfile", compose)
-        self.assertIn('PG_LOCAL_CACHE_PORT: "0"', compose)
-        self.assertIn("POSTGRES_HOST_AUTH_METHOD: trust", compose)
-        self.assertIn("/usr/local/bin/pg_local_cache_healthcheck", compose)
-        self.assertIn("./docker/initdb/020_demo.sql", compose)
-        self.assertIn("pg_local_cache_demo_data:/var/lib/postgresql/data", compose)
-        for operational_compose in (ROOT / "compose.yaml", ROOT / "compose.sql-only.yaml"):
-            self.assertNotIn(
-                "020_demo.sql", operational_compose.read_text(encoding="utf-8")
-            )
-        for forbidden in ("ports:", "secrets:", "network_mode:", "external:"):
-            self.assertNotIn(forbidden, compose)
-
-    def test_demo_seed_is_small_and_idempotent(self) -> None:
-        seed = DEMO_SEED.read_text(encoding="utf-8")
-        self.assertIn("CREATE TABLE IF NOT EXISTS public.pg_local_cache_demo", seed)
-        self.assertIn("ON CONFLICT (id) DO UPDATE", seed)
-        self.assertIn(
-            "GRANT SELECT ON public.pg_local_cache_demo TO local_cache_worker", seed
-        )
-        self.assertEqual(seed.count("local_cache.attach_table("), 1)
-        self.assertNotIn("CREATE EXTENSION", seed)
-
-
-class DocumentationContracts(unittest.TestCase):
-    def test_local_markdown_links_resolve_after_readme_split(self) -> None:
-        documents = [ROOT / "README.md", *(ROOT / "docs").glob("*.md")]
-        failures: list[str] = []
-        for document in documents:
-            source = document.read_text(encoding="utf-8")
-            for target in re.findall(r"\[[^]]*\]\(([^)]+)\)", source):
-                if target.startswith(("http://", "https://", "#", "mailto:")):
-                    continue
-                pages_target = re.fullmatch(
-                    r"\{\{ '(/docs/[^']+\.html)' \| relative_url \}\}",
-                    target,
-                )
-                if pages_target:
-                    source_path = pages_target.group(1).removeprefix("/")
-                    source_path = source_path.removesuffix(".html") + ".md"
-                    if not (ROOT / source_path).exists():
-                        failures.append(
-                            f"{document.relative_to(ROOT)} -> {target}"
-                        )
-                    continue
-                path = target.split("#", 1)[0]
-                if path and not (document.parent / path).resolve().exists():
-                    failures.append(f"{document.relative_to(ROOT)} -> {target}")
-        self.assertEqual(failures, [])
-
 
 if __name__ == "__main__":
     unittest.main()

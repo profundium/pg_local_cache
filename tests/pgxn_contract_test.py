@@ -76,9 +76,7 @@ class PgxnMetadataContracts(unittest.TestCase):
             for directory in (
                 ".github",
                 "assets",
-                "benchmarks",
                 "docker",
-                "monitoring",
                 "scripts",
                 "sql",
                 "src",
@@ -254,16 +252,15 @@ class PgxnArchiveContracts(unittest.TestCase):
         source = (
             ROOT / ".github" / "workflows" / "pgxn.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn(
-            'workflows: ["Release PostgreSQL 14-18 Linux artifacts"]',
-            source,
-        )
         self.assertIn("github.event_name == 'workflow_dispatch'", source)
         self.assertIn("inputs.publish", source)
+        self.assertNotIn("workflow_run:", source)
         self.assertIn("make pgxn-check dist", source)
         self.assertIn('commit_tag="master-${sha:0:12}"', source)
         self.assertIn('stable_tag="v${version}"', source)
         self.assertIn('[[ "$stable_sha" == "$sha" ]]', source)
+        self.assertIn("--json isDraft,isPrerelease", source)
+        self.assertIn("[.isDraft, .isPrerelease] | any", source)
         self.assertIn("already exists with different bytes", source)
         self.assertIn("Qualify the exact stable GitHub release", source)
         self.assertIn("publish=false", source)

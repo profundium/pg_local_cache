@@ -52,9 +52,7 @@
     "directory": [
       ".github",
       "assets",
-      "benchmarks",
       "docker",
-      "monitoring",
       "scripts",
       "tests"
     ]

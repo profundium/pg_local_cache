@@ -207,7 +207,9 @@ def build_distribution(
 
     with tempfile.TemporaryDirectory(prefix="pg_local_cache_pgxn_") as raw:
         temporary = Path(raw) / destination.name
-        if (root / ".git").exists():
+        if (root / ".git").exists() and not (
+            revision == "HEAD" and allow_dirty
+        ):
             _run(
                 [
                     "git",
@@ -220,6 +222,11 @@ def build_distribution(
                 cwd=root,
             )
             epoch = int(_run(["git", "show", "-s", "--format=%ct", resolved], cwd=root))
+        elif (root / ".git").exists():
+            epoch = int(_run(["git", "show", "-s", "--format=%ct", resolved], cwd=root))
+            _build_without_git(
+                root, temporary, f"{distribution}-{version}/", epoch
+            )
         else:
             epoch = int((root / "BUILD-ID").stat().st_mtime)
             _build_without_git(

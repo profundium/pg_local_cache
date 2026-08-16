@@ -10,7 +10,6 @@ must expose typed, least-privilege metrics.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import re
 import unittest
@@ -36,14 +35,6 @@ ENTRYPOINT = (ROOT / "docker" / "entrypoint.sh").read_text(
     encoding="utf-8"
 )
 COMPOSE = (ROOT / "compose.yaml").read_text(encoding="utf-8")
-SQL_ONLY_COMPOSE = (ROOT / "compose.sql-only.yaml").read_text(
-    encoding="utf-8"
-)
-EXPORTER_QUERIES = (
-    ROOT / "monitoring" / "postgres-exporter" / "queries.yaml"
-).read_text(encoding="utf-8")
-
-
 def c_function(source: str, name: str) -> str:
     """Return a PostgreSQL-style C function definition, including its body."""
 
@@ -356,16 +347,6 @@ class RespConnectionBudgetSourceTests(unittest.TestCase):
 
 
 class MonitoringInterfaceSourceTests(unittest.TestCase):
-    def test_runtime_monitoring_uses_the_active_integration_support(self) -> None:
-        integration = (
-            ROOT / "tests" / "oom_monitoring_integration.py"
-        ).read_text()
-        self.assertIn("from pipeline_integration import", integration)
-        self.assertIn("sql_commands", integration)
-        self.assertNotIn("from integration import", integration)
-        self.assertIn("wait_for_mapping_ready()", integration)
-        self.assertIn("transactional ACL reload", integration)
-
     def test_sql_mget_test_restores_application_acl(self) -> None:
         integration = (
             ROOT / "tests" / "sql_mget_integration.py"
@@ -449,13 +430,6 @@ class MonitoringInterfaceSourceTests(unittest.TestCase):
         self.assertIn("workers_with_incomplete_mappings", health.group(0))
         self.assertIn("= 0", health.group(0))
 
-    def test_exporter_reads_the_complete_typed_metrics_row(self) -> None:
-        self.assertIn("local_cache.metrics()", EXPORTER_QUERIES)
-        self.assertIn("workers_with_incomplete_mappings", EXPORTER_QUERIES)
-        self.assertIn(
-            "mapping_reload_incomplete_retries_total", EXPORTER_QUERIES
-        )
-
     def test_entrypoint_validates_and_writes_every_memory_guard(self) -> None:
         variables = (
             ("PG_LOCAL_CACHE_MEMORY_BUDGET_MB", "memory_budget_mb"),
@@ -482,129 +456,14 @@ class MonitoringInterfaceSourceTests(unittest.TestCase):
             r"\s+128\s+16384",
         )
 
-    def test_both_compose_profiles_set_extension_and_container_budgets(self) -> None:
-        for filename, compose in (
-            ("compose.yaml", COMPOSE),
-            ("compose.sql-only.yaml", SQL_ONLY_COMPOSE),
+    def test_compose_sets_extension_and_container_budgets(self) -> None:
+        for variable in (
+            "PG_LOCAL_CACHE_MEMORY_BUDGET_MB",
+            "PG_LOCAL_CACHE_MAX_CLIENTS",
+            "PG_LOCAL_CACHE_MAX_CLIENTS_PER_WORKER",
         ):
-            with self.subTest(compose=filename):
-                for variable in (
-                    "PG_LOCAL_CACHE_MEMORY_BUDGET_MB",
-                    "PG_LOCAL_CACHE_MAX_CLIENTS",
-                    "PG_LOCAL_CACHE_MAX_CLIENTS_PER_WORKER",
-                ):
-                    self.assertRegex(compose, rf"(?m)^\s+{variable}:\s*[^\s#]+")
-                assert_has_container_memory_limit(self, compose, filename)
-
-
-class OptionalMonitoringAssetsTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.monitoring = ROOT / "monitoring"
-        self.assets = (
-            sorted(path for path in self.monitoring.rglob("*") if path.is_file())
-            if self.monitoring.is_dir()
-            else []
-        )
-        if not self.assets:
-            self.skipTest("optional monitoring assets are not present")
-        self.machine_assets = [
-            path
-            for path in self.assets
-            if path.suffix in {".json", ".yaml", ".yml"}
-        ]
-
-    def test_assets_are_parseable_and_use_one_metric_namespace(self) -> None:
-        for path in self.assets:
-            with self.subTest(asset=path.relative_to(ROOT)):
-                text = path.read_text(encoding="utf-8")
-                self.assertTrue(text.strip())
-                if path.suffix == ".json":
-                    json.loads(text)
-                elif path.suffix in {".yaml", ".yml"}:
-                    self.assertNotIn("\t", text)
-                    self.assertIn(":", text)
-
-        if not self.machine_assets:
-            self.skipTest("no machine-readable monitoring assets are present")
-        prometheus_assets = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in self.machine_assets
-        )
-        foreign = re.findall(r"\bpg[_-]local[_-]cache_[A-Za-z0-9_:]+", prometheus_assets)
-        self.assertTrue(foreign, "monitoring assets do not reference cache metrics")
-        self.assertFalse(
-            any(name.startswith("pg-local-cache_") for name in foreign),
-            "Prometheus metrics must consistently use pg_local_cache_",
-        )
-
-    def test_alert_and_dashboard_metrics_exist_in_stats_or_exporter_queries(self) -> None:
-        metric_sources = c_function(CORE, "pglc_stats_json")
-        if "pglc_metrics_json" in c_functions(CORE):
-            metric_sources += c_function(CORE, "pglc_metrics_json")
-        stats_fields = set(
-            re.findall(r'\\"([a-z][a-z0-9_]*)\\"', metric_sources)
-        )
-        query_text = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in self.assets
-            if re.search(r"query|export", path.name, flags=re.IGNORECASE)
-        )
-        consumer_text = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in self.assets
-            if re.search(r"alert|rule|dashboard", path.name, flags=re.IGNORECASE)
-        )
-        referenced = set(
-            re.findall(r"\bpg_local_cache_[a-z][a-z0-9_]*\b", consumer_text)
-        )
-        recorded = set(
-            re.findall(
-                r"(?m)^\s*record:\s*['\"]?"
-                r"(pg_local_cache_[a-z][a-z0-9_]*)",
-                consumer_text,
-            )
-        )
-        for metric in referenced:
-            metric_without_counter_suffix = (
-                metric[:-6] if metric.endswith("_total") else metric
-            )
-            suffix_matches_stats = any(
-                metric_without_counter_suffix == f"pg_local_cache_{field}"
-                or metric_without_counter_suffix.endswith(f"_{field}")
-                for field in stats_fields
-            )
-            declared_by_exporter = metric in query_text or any(
-                re.search(
-                    rf"(?m)^\s*(?:-\s*)?{re.escape(field)}(?:_total)?\s*:",
-                    query_text,
-                )
-                for field in stats_fields
-                if metric_without_counter_suffix.endswith(f"_{field}")
-            )
-            self.assertTrue(
-                suffix_matches_stats or declared_by_exporter or metric in recorded,
-                f"monitoring references unknown metric {metric}",
-            )
-
-    def test_local_rule_file_references_resolve(self) -> None:
-        known_names = {path.name for path in self.assets}
-        prometheus_configs = [
-            path
-            for path in self.assets
-            if "prometheus" in path.name.lower()
-            and path.suffix in {".yaml", ".yml"}
-        ]
-        for config in prometheus_configs:
-            text = config.read_text(encoding="utf-8")
-            rule_section = re.search(
-                r"(?ms)^rule_files:\s*\n(?P<rules>(?:\s+-\s*[^\n]+\n?)+)",
-                text,
-            )
-            if rule_section is None:
-                continue
-            for reference in re.findall(r"-\s*['\"]?([^'\"\s]+)", rule_section.group("rules")):
-                self.assertIn(Path(reference).name, known_names)
-
+            self.assertRegex(COMPOSE, rf"(?m)^\s+{variable}:\s*[^\s#]+")
+        assert_has_container_memory_limit(self, COMPOSE, "compose.yaml")
 
 if __name__ == "__main__":
     unittest.main()

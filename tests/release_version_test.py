@@ -50,9 +50,7 @@ def copy_fixture(destination: Path) -> Path:
     for directory in (
         ".github",
         "assets",
-        "benchmarks",
         "docker",
-        "monitoring",
         "scripts",
         "sql",
         "src",
@@ -66,7 +64,6 @@ def copy_fixture(destination: Path) -> Path:
         "README.md",
         "LICENSE",
         "compose.yaml",
-        "compose.sql-only.yaml",
         "pg_local_cache.control",
         "src/pg_local_cache.h",
         "src/pg_local_cache_worker.c",
@@ -157,11 +154,10 @@ class VersionWorkflowTests(unittest.TestCase):
             self.assertIn(
                 f'#define PGLC_VERSION_LENGTH "{len(str(MINOR_VERSION))}"', header
             )
-            for compose in ("compose.yaml", "compose.sql-only.yaml"):
-                self.assertIn(
-                    f"image: pg_local_cache:{MINOR_VERSION}",
-                    (root / compose).read_text(),
-                )
+            self.assertIn(
+                f"image: pg_local_cache:{MINOR_VERSION}",
+                (root / "compose.yaml").read_text(),
+            )
             self.assertTrue(
                 (root / f"sql/pg_local_cache--{MINOR_VERSION}.sql").is_file()
             )
@@ -267,6 +263,20 @@ class VersionWorkflowTests(unittest.TestCase):
             old_upgrade.write_text(old_upgrade.read_text() + "\n-- rewritten\n")
             run(root, "git", "add", str(old_upgrade.relative_to(root)))
             run(root, "git", "commit", "-m", "fix: rewrite old migration")
+            plan = auto_version.plan_version(root)
+            with self.assertRaisesRegex(
+                auto_version.VersionError,
+                "released/versioned SQL files changed",
+            ):
+                auto_version.apply_version(root, plan)
+
+    def test_released_sql_history_cannot_be_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = copy_fixture(Path(raw_directory))
+            old_upgrade = root / "sql/pg_local_cache--1.0.0--1.1.0.sql"
+            old_upgrade.unlink()
+            run(root, "git", "add", str(old_upgrade.relative_to(root)))
+            run(root, "git", "commit", "-m", "fix: delete old migration")
             plan = auto_version.plan_version(root)
             with self.assertRaisesRegex(
                 auto_version.VersionError,

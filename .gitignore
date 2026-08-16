@@ -12,9 +12,9 @@ results/
 tmp_check/
 tmp_check_iso/
 secrets/
+dist/
+_site/
 docs/superpowers
 .supergoal
 .codegraph
-benchmark-results/
-dist/
 *.dSYM/

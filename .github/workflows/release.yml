@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       ci_run_id:
-        description: CI run containing benchmark evidence
+        description: Successful CI run for the exact release commit
         required: false
         type: string
       publish_pgxn:
@@ -249,8 +249,7 @@ jobs:
           install -m 0644 README.md LICENSE "$root/"
           printf '%s\n' "$RELEASE_SHA" > "$root/BUILD-ID"
           install -m 0644 \
-            docs/INSTALL_EXISTING.md docs/BENCHMARKS.md \
-            docs/MONITORING.md docs/TECHNICAL.md "$root/docs/"
+            docs/INSTALL_EXISTING.md docs/TECHNICAL.md "$root/docs/"
           {
             printf 'format=1\n'
             printf 'version=%s\n' "$VERSION"
@@ -362,7 +361,7 @@ jobs:
           rm dist/pg_local_cache-pg*-linux-*-amd64.tar.gz.sha256
           test -x scripts/install-existing.sh
           bash -n scripts/install-existing.sh
-          make source-sanitize benchmark-test
+          make source-sanitize
 
           source_root="pg_local_cache-${VERSION}-source"
           source_stage="$RUNNER_TEMP/pg_local_cache-source"
@@ -394,26 +393,6 @@ jobs:
           bash -n dist/install-latest.sh
           cmp --silent scripts/fetch-release.sh dist/fetch-release.sh
           cmp --silent scripts/install-latest.sh dist/install-latest.sh
-
-      - name: Preserve benchmark evidence from successful CI
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          install -d ci-evidence/sql-only
-          gh run download "$TRIGGER_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name sql-only-benchmark-smoke --dir ci-evidence/sql-only
-          python3 scripts/validate_benchmark_evidence.py \
-            --revision "$RELEASE_SHA" \
-            --sql-only ci-evidence/sql-only/sql-only.json
-
-          epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
-          find ci-evidence -exec touch -h -d "@${epoch}" {} +
-          tar \
-            --sort=name --format=posix \
-            --pax-option=delete=atime,delete=ctime \
-            --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
-            -C ci-evidence -cf - . |
-            gzip -n -9 > dist/pg_local_cache-ci-benchmarks.tar.gz
 
       - name: Create and verify checksums
         shell: bash
@@ -504,7 +483,7 @@ jobs:
             gh release create "$COMMIT_TAG" \
               --target "$RELEASE_SHA" --draft --prerelease \
               --title "pg_local_cache ${VERSION} — master ${RELEASE_SHA:0:12}" \
-              --notes "Successful master build ${RELEASE_SHA}. Includes PostgreSQL 14–18 Linux glibc/musl binaries, checksums, installer and CI benchmark evidence."
+              --notes "Successful master build ${RELEASE_SHA}. Includes PostgreSQL 14–18 Linux glibc/musl binaries, checksums and installer."
           fi
           upload_missing_assets "$COMMIT_TAG"
           gh release edit "$COMMIT_TAG" --draft=false --prerelease

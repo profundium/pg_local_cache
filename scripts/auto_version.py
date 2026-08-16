@@ -470,7 +470,7 @@ def _update_worker_version(root: Path, old: Version, new: Version) -> None:
 def _update_compose_images(root: Path, old: Version, new: Version) -> None:
     old_tag = f"image: pg_local_cache:{old}"
     new_tag = f"image: pg_local_cache:{new}"
-    for name in ("compose.yaml", "compose.sql-only.yaml"):
+    for name in ("compose.yaml",):
         path = root / name
         source = path.read_text(encoding="utf-8")
         source = _replace_once(source, old_tag, new_tag, f"{name} image tag")
@@ -497,7 +497,7 @@ def _changed_sql_paths(root: Path, base_tag: str) -> set[Path]:
         root,
         "diff",
         "--name-only",
-        "--diff-filter=ACMRT",
+        "--diff-filter=ACMRTD",
         f"{base_tag}..HEAD",
         "--",
         "sql",

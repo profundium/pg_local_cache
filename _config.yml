@@ -5,15 +5,18 @@ baseurl: /pg_local_cache
 repository: profundium/pg_local_cache
 lang: en
 markdown: kramdown
+plugins:
+  - jekyll-relative-links
+relative_links:
+  enabled: true
+  collections: true
 kramdown:
   input: GFM
   syntax_highlighter: rouge
 permalink: pretty
 exclude:
   - README.md
-  - benchmarks
   - docker
-  - monitoring
   - scripts
   - sql
   - src
@@ -21,9 +24,6 @@ exclude:
   - tests
   - Dockerfile
   - Makefile
-  - compose.monitoring.yaml
-  - compose.demo.yaml
-  - compose.sql-only.yaml
   - compose.yaml
   - pg_local_cache.control
   - vendor

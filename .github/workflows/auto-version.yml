@@ -82,7 +82,7 @@ jobs:
             -m "chore(release): v${RELEASE_VERSION}" \
             -m "[skip version]"
 
-          make verify-static source-test source-sanitize benchmark-test
+          make verify-static source-test source-sanitize
           make dist
 
           git fetch --no-tags origin master
