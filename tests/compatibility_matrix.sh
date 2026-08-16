@@ -50,11 +50,13 @@ temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/pg_local_cache_matrix.XXXXXX")
 install -d -m 0700 "$results_directory"
 pgxn_build_container=""
 pgxn_runtime_container=""
+pgxn_release_volume=""
 artifact_smoke_container=""
 
 cleanup() {
     [[ -z "$pgxn_build_container" ]] || docker rm -fv "$pgxn_build_container" >/dev/null 2>&1 || true
     [[ -z "$pgxn_runtime_container" ]] || docker rm -fv "$pgxn_runtime_container" >/dev/null 2>&1 || true
+    [[ -z "$pgxn_release_volume" ]] || docker volume rm "$pgxn_release_volume" >/dev/null 2>&1 || true
     [[ -z "$artifact_smoke_container" ]] || docker rm -fv "$artifact_smoke_container" >/dev/null 2>&1 || true
     rm -rf -- "$temporary_directory"
 }
@@ -242,13 +244,13 @@ if [[ " ${majors[*]} " == *" 16 "* && " ${variants[*]} " == *" bookworm "* ]]; t
         "$pgxn_extract"
     pgxn_root="$pgxn_extract/pg_local_cache-${version}"
     [[ -d "$pgxn_root" && ! -e "$pgxn_root/.git" ]]
-    pgxn_release_root="$temporary_directory/pgxn-release"
-    install -d "$pgxn_release_root"
+    pgxn_release_volume="pg_local_cache_pgxn_release_$$"
+    docker volume create "$pgxn_release_volume" >/dev/null
     pgxn_build_container="pg_local_cache_pgxn_build_$$"
     docker create --name "$pgxn_build_container" --platform linux/amd64 \
         --network none --env "PGLC_BUILD_ID=$build_id" \
         --volume "$pgxn_root:/src:ro" \
-        --volume "$pgxn_release_root:/release" \
+        --volume "$pgxn_release_volume:/release" \
         pg_local_cache-contracts:pg16-bookworm sh -ec '
             cp -a /src /tmp/pgxn
             mv /usr/bin/python3 /usr/bin/python3.disabled
@@ -283,7 +285,7 @@ if [[ " ${majors[*]} " == *" 16 "* && " ${variants[*]} " == *" bookworm "* ]]; t
     docker run --detach --name "$pgxn_runtime_container" --platform linux/amd64 \
         --network none --env POSTGRES_PASSWORD=pgxn-test \
         --env POSTGRES_DB=pgxn_cache \
-        --volume "$pgxn_release_root:/artifact:ro" \
+        --volume "$pgxn_release_volume:/artifact:ro" \
         postgres:16-bookworm >/dev/null
     for _attempt in {1..60}; do
         if [[ "$(docker logs "$pgxn_runtime_container" 2>&1)" == \
@@ -342,6 +344,8 @@ SQL
         "$build_id" | tee "$results_directory/pg16-bookworm-pgxn-lifecycle.txt"
     docker rm -fv "$pgxn_runtime_container" >/dev/null
     pgxn_runtime_container=""
+    docker volume rm "$pgxn_release_volume" >/dev/null
+    pgxn_release_volume=""
 
     docker run --rm --platform linux/amd64 --network none \
         --volume "${repository_directory}:/workspace:ro" --workdir /workspace \
