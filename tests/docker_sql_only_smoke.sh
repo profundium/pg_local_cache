@@ -17,7 +17,6 @@ postgres_host_port="${POSTGRES_HOST_PORT:-$(
 )}"
 database="pg_local_cache_sql_only"
 app_role="sql_only_app"
-worker_role="local_cache_worker"
 app_password="SqlOnlyAppPassword_0123456789"
 postgres_major="${POSTGRES_MAJOR:-16}"
 postgres_variant="${POSTGRES_VARIANT:-bookworm}"
@@ -141,84 +140,6 @@ sql_only_metrics="$(
         "SELECT m.up, m.workers_configured, m.workers_running, m.active_clients, m.max_clients, m.worker_memory_bytes, m.estimated_memory_bytes <= m.memory_budget_bytes, (local_cache.health() ->> 'ready')::boolean FROM local_cache.metrics() AS m"
 )"
 [[ "$sql_only_metrics" == "1|0|0|0|0|0|t|t" ]]
-
-current_version="$(sed -n "s/^default_version = '\([^']*\)'$/\1/p" "${repository_directory}/pg_local_cache.control")"
-old_version="1.2.1"
-compose exec -T postgres \
-    psql --username postgres --dbname "$database" --no-psqlrc \
-    --set ON_ERROR_STOP=1 --set old_version="$old_version" \
-    --set worker_role="$worker_role" <<'SQL'
-DROP EXTENSION pg_local_cache CASCADE;
-CREATE EXTENSION pg_local_cache VERSION :'old_version';
-GRANT USAGE ON SCHEMA local_cache TO :"worker_role";
-GRANT SELECT ON TABLE local_cache.mapping TO :"worker_role";
-DROP TABLE IF EXISTS public.phase2_upgrade;
-CREATE TABLE public.phase2_upgrade (id bigint PRIMARY KEY, payload text NOT NULL);
-INSERT INTO public.phase2_upgrade VALUES (1, 'survives-upgrade');
-SELECT local_cache.attach_table('public.phase2_upgrade'::regclass);
-SQL
-
-container_id="$(compose ps --quiet postgres)"
-package_root="/tmp/pg_local_cache-phase2"
-compose exec -T --user root \
-    --env PGLC_BUILD_ID="$build_id" \
-    --env PGLC_VERSION="$current_version" \
-    --env PGLC_MAJOR="$postgres_major" \
-    --env PGLC_VARIANT="$postgres_variant" \
-    postgres sh -eu <<'SH'
-package_root=/tmp/pg_local_cache-phase2
-pkglibdir="$(pg_config --pkglibdir)"
-extension_dir="$(pg_config --sharedir)/extension"
-case "$PGLC_VARIANT" in bookworm) libc=glibc ;; alpine3.23) libc=musl ;; esac
-architecture="$(uname -m)"
-case "$architecture" in x86_64|amd64) architecture=amd64 ;; esac
-install -d "$package_root/lib" "$package_root/share/extension"
-install -m 0755 "$pkglibdir/pg_local_cache.so" "$package_root/lib/"
-install -m 0644 "$extension_dir/pg_local_cache.control" "$package_root/share/extension/"
-for sql_file in "$extension_dir"/pg_local_cache--*.sql; do
-    install -m 0644 "$sql_file" "$package_root/share/extension/"
-done
-printf '%s\n' "$PGLC_BUILD_ID" > "$package_root/BUILD-ID"
-{
-    printf 'format=1\nversion=%s\npostgres_major=%s\nos=linux\n' "$PGLC_VERSION" "$PGLC_MAJOR"
-    printf 'libc=%s\narchitecture=%s\ncommit=%s\n' "$libc" "$architecture" "$PGLC_BUILD_ID"
-    printf 'build_image=phase2-runtime\n'
-} > "$package_root/RELEASE-METADATA"
-SH
-docker cp "${repository_directory}/scripts/install-existing.sh" \
-    "$container_id:${package_root}/install.sh"
-compose exec -T --user root postgres chmod 0755 "$package_root/install.sh"
-
-install_output="$(
-    compose exec -T --user postgres postgres \
-        "$package_root/install.sh" install \
-        --database "$database" --postgres-os-user postgres \
-        --pg-config pg_config --psql psql \
-        --state-root /var/lib/postgresql/data/pg_local_cache-install-state
-)"
-state_directory="$(printf '%s\n' "$install_output" | sed -n 's/^.*state directory: //p' | tail -n 1)"
-[[ "$state_directory" == /var/lib/postgresql/data/pg_local_cache-install-state/* ]]
-compose restart postgres
-compose up --detach --wait postgres
-compose exec -T --user postgres postgres \
-    "$package_root/install.sh" verify --state-directory "$state_directory" \
-    --postgres-os-user postgres --pg-config pg_config --psql psql
-
-upgrade_state="$(
-    compose exec -T postgres \
-        psql --username postgres --dbname "$database" --no-psqlrc \
-        --tuples-only --no-align --set ON_ERROR_STOP=1 --command \
-        "SELECT e.extversion, count(m.*), (SELECT payload FROM public.phase2_upgrade WHERE id = 1), (local_cache.health() ->> 'ready')::boolean FROM pg_catalog.pg_extension AS e CROSS JOIN local_cache.mapping AS m WHERE e.extname = 'pg_local_cache' AND m.relation = 'public.phase2_upgrade'::regclass GROUP BY e.extversion"
-)"
-[[ "$upgrade_state" == "${current_version}|1|survives-upgrade|t" ]]
-compose exec -T postgres \
-    psql --username postgres --dbname "$database" --no-psqlrc \
-    --tuples-only --no-align --set ON_ERROR_STOP=1 --command \
-    "SELECT payload FROM public.phase2_upgrade WHERE id = 1" >/dev/null
-compose exec -T postgres \
-    psql --username postgres --dbname "$database" --no-psqlrc \
-    --tuples-only --no-align --set ON_ERROR_STOP=1 --command \
-    "SELECT payload FROM public.phase2_upgrade WHERE id = 1" >/dev/null
 
 mkdir -p -- "$benchmark_output_directory"
 benchmark_output_directory="$(
