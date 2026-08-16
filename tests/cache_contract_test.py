@@ -76,7 +76,7 @@ class CacheOwnershipSourceTests(unittest.TestCase):
             "PG_FUNCTION_INFO_V1(pg_local_cache_lock_relation)", CORE
         )
 
-    def test_sql_fast_path_requires_the_current_key_columns_catalog(self) -> None:
+    def test_mget_requires_the_current_key_columns_catalog(self) -> None:
         mapping = c_function(SQL_FASTPATH, "pglc_sql_read_mapping_once")
         self.assertIn('get_attnum(mapping_oid, "key_columns")', mapping)
         self.assertNotIn('get_attnum(mapping_oid, "key_column")', mapping)
@@ -140,111 +140,6 @@ class CacheOwnershipSourceTests(unittest.TestCase):
         self.assertIn(
             "make_cache_key(&cache_key, database_oid, nspace, key, create)",
             entry_lookup,
-        )
-
-    def test_sql_meta_cache_slot_collisions_fail_closed(self) -> None:
-        slot = c_function(SQL_FASTPATH, "pglc_sql_meta_cache_entry")
-        self.assertIn("PGLC_SQL_META_CACHE_SLOTS - 1", slot)
-
-        # OIDs with identical low slot bits deliberately collide.  Every read
-        # must compare the full OID before trusting the direct-mapped slot.
-        self.assertEqual(1 & (32 - 1), 33 & (32 - 1))
-        for reader_name in (
-            "pglc_sql_cached_mapping",
-            "pglc_sql_cached_relation_meta",
-        ):
-            reader = c_function(SQL_FASTPATH, reader_name)
-            oid_check = reader.index("entry->relation_oid !=")
-            success = reader.index("return true")
-            self.assertLess(oid_check, success)
-
-        invalidation = c_function(
-            SQL_FASTPATH, "pglc_sql_relcache_invalidation"
-        )
-        self.assertIn("entry->relation_oid == relation_oid", invalidation)
-        remember = c_function(SQL_FASTPATH, "pglc_sql_remember_mapping")
-        self.assertLess(
-            remember.index("MemSet(entry, 0, sizeof(*entry))"),
-            remember.index("entry->relation_oid = relation_oid"),
-        )
-
-    def test_sql_metadata_cache_is_generation_and_relcache_fenced(self) -> None:
-        init = c_function(SQL_FASTPATH, "pglc_sql_init")
-        self.assertIn("CacheRegisterRelcacheCallback", init)
-
-        invalidation = c_function(
-            SQL_FASTPATH, "pglc_sql_relcache_invalidation"
-        )
-        self.assertIn("!OidIsValid(relation_oid)", invalidation)
-        self.assertGreaterEqual(
-            invalidation.count("relation_validated = false"), 2
-        )
-
-        cached_mapping = c_function(
-            SQL_FASTPATH, "pglc_sql_cached_mapping"
-        )
-        self.assertIn("entry->relation_oid != relation_oid", cached_mapping)
-        self.assertIn(
-            "entry->config_generation != generation", cached_mapping
-        )
-        read_mapping = c_function(SQL_FASTPATH, "pglc_sql_read_mapping")
-        self.assertLess(
-            read_mapping.index("pglc_sql_cached_mapping"),
-            read_mapping.index("pglc_sql_read_mapping_once"),
-        )
-        self.assertLess(
-            read_mapping.index("before == after"),
-            read_mapping.index("pglc_sql_remember_mapping"),
-        )
-
-        planner = c_function(SQL_FASTPATH, "pglc_sql_set_rel_pathlist")
-        cached_at = planner.index("pglc_sql_cached_relation_meta")
-        full_at = planner.index("pglc_sql_relation_meta", cached_at)
-        remember_at = planner.index("pglc_sql_remember_relation_meta", full_at)
-        self.assertLess(cached_at, full_at)
-        self.assertLess(full_at, remember_at)
-
-        runtime = c_function(SQL_FASTPATH, "pglc_sql_validate_runtime")
-        cached_at = runtime.index("pglc_sql_cached_relation_meta")
-        full_at = runtime.index("pglc_sql_relation_meta", cached_at)
-        self.assertLess(cached_at, full_at)
-        self.assertIn("pglc_sql_meta_matches_state", runtime[cached_at:full_at])
-        for guard in (
-            "relkind != RELKIND_RELATION",
-            "relpersistence != RELPERSISTENCE_PERMANENT",
-            "relam != HEAP_TABLE_AM_OID",
-            "relispartition",
-            "relrowsecurity",
-            "relforcerowsecurity",
-        ):
-            self.assertIn(guard, runtime[:cached_at])
-
-    def test_sql_integer_keys_avoid_fmgr_allocation(self) -> None:
-        codec = (ROOT / "src" / "key_codec.c").read_text(encoding="utf-8")
-        typed = c_function(codec, "pglc_canonical_key_typed")
-        self.assertIn("key_types[component] == INT2OID", typed)
-        self.assertIn("key_types[component] == INT4OID", typed)
-        self.assertIn("key_types[component] == INT8OID", typed)
-        self.assertIn("pg_ltoa", typed)
-        self.assertIn("pg_lltoa", typed)
-        self.assertIn("free_rendered", typed)
-        access = c_function(SQL_FASTPATH, "pglc_sql_access")
-        self.assertIn("pglc_canonical_key_typed", access)
-        self.assertIn("state->key_types", access)
-
-        begin = c_function(SQL_FASTPATH, "pglc_sql_begin")
-        output_setup = begin.index("getTypeOutputInfo(")
-        integer_guard = begin.index(
-            "state->key_types[key_index] != INT2OID"
-        )
-        self.assertLess(integer_guard, output_setup)
-        self.assertIn(
-            "state->key_types[key_index] != INT4OID",
-            begin[integer_guard:output_setup],
-        )
-        self.assertIn(
-            "state->key_types[key_index] != INT8OID",
-            begin[integer_guard:output_setup],
         )
 
     def test_store_requires_the_active_loader_id_and_fences_late_fill(self) -> None:
@@ -394,52 +289,18 @@ class CacheOwnershipSourceTests(unittest.TestCase):
         self.assertIn("entry->loading = false", retire)
         self.assertIn("entry->version = next_entry_generation()", retire)
 
-        access = c_function(SQL_FASTPATH, "pglc_sql_access")
-        self.assertIn("lookup_attempt < 2", access)
-        age_at = access.index("PGLC_SOURCE_AGE_EXPIRED")
-        retire_at = access.index("pglc_cache_retire_positive")
-        second_lookup_at = access.index("pglc_cache_lookup_quiet")
-        claim_at = access.index("pglc_cache_claim_load")
-        self.assertLess(age_at, retire_at)
-        self.assertLess(second_lookup_at, claim_at)
-
-    def test_cross_type_integer_keys_are_coerced_not_reinterpreted(self) -> None:
-        supported = c_function(SQL_FASTPATH, "pglc_sql_key_input_supported")
-        self.assertIn("key_type == INT8OID", supported)
-        self.assertIn("expression_type == INT4OID", supported)
-        coercion = c_function(SQL_FASTPATH, "pglc_sql_coerce_key_expr")
-        self.assertIn("coerce_to_target_type", coercion)
-        self.assertIn("COERCION_IMPLICIT", coercion)
-        matcher = c_function(SQL_FASTPATH, "pglc_sql_match_clauses")
-        self.assertIn(
-            "pglc_sql_coerce_key_expr(\n"
-            "\t\t\tother, meta->key_types[key_index], "
-            "meta->key_typmods[key_index])",
-            matcher,
+        access = c_function(SQL_FASTPATH, "pglc_sql_mget_canonical")
+        self.assertGreaterEqual(access.count("pglc_cache_lookup_quiet"), 2)
+        self.assertLess(
+            access.index("PGLC_SOURCE_AGE_EXPIRED"),
+            access.index("pglc_cache_retire_positive"),
         )
-        self.assertIn("restrict_infos[key_index] = rinfo", matcher)
-        self.assertIn("ordered_exprs[key_index] = coerced_other", matcher)
-        self.assertIn("restrict_infos[key_index] != NULL", matcher)
-        self.assertNotIn("operator->opno != type_cache->eq_opr", matcher)
-
-    def test_sql_cache_rejects_aliasing_custom_btree_families(self) -> None:
-        relation_meta = c_function(
-            SQL_FASTPATH, "pglc_sql_relation_base_meta"
+        self.assertLess(
+            access.rindex("pglc_cache_lookup_quiet"),
+            access.index("pglc_cache_claim_load"),
         )
-        index_path = c_function(SQL_FASTPATH, "pglc_sql_primary_index_path")
-        self.assertIn("TYPECACHE_BTREE_OPFAMILY", relation_meta)
-        self.assertIn(
-            "index_info->opfamily[key_index] !=\n"
-            "\t\t\t\t\tmeta->key_btree_opfamilies[key_index]",
-            index_path,
-        )
-        self.assertIn("index_info->indexkeys[key_index]", index_path)
-        self.assertIn("match_index_to_operand(left, key_index", index_path)
-        self.assertIn("match_index_to_operand(right, key_index", index_path)
-        self.assertIn("get_op_opfamily_strategy(index_operator", index_path)
-        self.assertIn("meta->key_btree_opfamilies[key_index]", index_path)
 
-    def test_sql_fast_path_requires_source_and_trigger_provenance(self) -> None:
+    def test_mget_requires_source_and_trigger_provenance(self) -> None:
         source = c_function(
             SQL_FASTPATH, "pglc_sql_source_relation_allowed"
         )
@@ -456,14 +317,8 @@ class CacheOwnershipSourceTests(unittest.TestCase):
         )
 
         base_meta = c_function(SQL_FASTPATH, "pglc_sql_relation_base_meta")
-        normalizer = c_function(
-            SQL_FASTPATH, "pglc_sql_normalize_query_inheritance"
-        )
         self.assertIn("check_catalog_provenance", base_meta)
         self.assertIn("pglc_sql_source_relation_allowed(relation)", base_meta)
-        self.assertIn(
-            "pglc_sql_source_relation_allowed(relation)", normalizer
-        )
 
         ownership = c_function(
             SQL_FASTPATH, "pglc_sql_trigger_owned_by_extension"
@@ -479,21 +334,12 @@ class CacheOwnershipSourceTests(unittest.TestCase):
             triggers.count("pglc_sql_trigger_owned_by_extension"), 3
         )
 
-        runtime = c_function(SQL_FASTPATH, "pglc_sql_validate_runtime")
-        generation_at = runtime.index(
-            "current_generation = pglc_config_generation()"
-        )
-        validation_at = runtime.index("pglc_sql_relation_meta")
-        self.assertLess(generation_at, validation_at)
-        self.assertIn(
-            "pglc_sql_relation_meta(relation, &planned_meta, true)",
-            runtime,
-        )
-        self.assertIn(
-            "pglc_sql_relation_meta(relation, &current_meta, true)", runtime
-        )
+        state = c_function(SQL_FASTPATH, "pglc_sql_mget_state")
+        self.assertIn("pglc_sql_read_mapping(relation_oid, &meta)", state)
+        self.assertIn("pglc_sql_relation_meta(relation, &validated_meta, true)", state)
+        self.assertIn("pglc_sql_same_mapping(&meta, &validated_meta)", state)
 
-    def test_sql_fast_path_uses_only_the_primary_index(self) -> None:
+    def test_mget_requires_a_valid_primary_index(self) -> None:
         relation_meta = c_function(
             SQL_FASTPATH, "pglc_sql_relation_base_meta"
         )
@@ -501,12 +347,6 @@ class CacheOwnershipSourceTests(unittest.TestCase):
         self.assertIn("SearchSysCache1(INDEXRELID", relation_meta)
         self.assertIn("index->indisprimary", relation_meta)
         self.assertIn("ReleaseSysCache(index_tuple)", relation_meta)
-
-        index_path = c_function(SQL_FASTPATH, "pglc_sql_primary_index_path")
-        self.assertIn(
-            "index_info->indexoid != meta->primary_index_oid", index_path
-        )
-        self.assertNotIn("SearchSysCache1", index_path)
 
     def test_worker_trigger_query_uses_real_pg16_catalog_columns(self) -> None:
         # tgisclone/tgnattr exist only in the relcache Trigger C struct; the
@@ -558,38 +398,6 @@ class CacheOwnershipSourceTests(unittest.TestCase):
         )
         self.assertIn(
             "REVOKE ALL ON FUNCTION _statement_guard() FROM PUBLIC", INSTALL_SQL
-        )
-
-    def test_runtime_refreshes_only_an_identical_mapping_generation(self) -> None:
-        runtime = c_function(SQL_FASTPATH, "pglc_sql_validate_runtime")
-        self.assertIn("pglc_sql_read_mapping", runtime)
-        self.assertIn("pglc_sql_relation_meta", runtime)
-        generation_at = runtime.index(
-            "state->mapping.config_generation == current_generation"
-        )
-        mapping_scan_at = runtime.index("pglc_sql_read_mapping")
-        self.assertLess(generation_at, mapping_scan_at)
-        for field in (
-            "relation_oid",
-            "nspace",
-            "key_count",
-            "row_type_oid",
-            "row_natts",
-            "row_fingerprint",
-            "key_attnos",
-            "key_types",
-            "key_typmods",
-            "key_columns",
-        ):
-            self.assertIn(f"current_meta.{field}", runtime)
-        self.assertIn(
-            "state->mapping.config_generation = current_meta.config_generation",
-            runtime,
-        )
-        can_use = c_function(SQL_FASTPATH, "pglc_sql_can_use_cache")
-        self.assertIn(
-            "state->mapping.config_generation == pglc_config_generation()",
-            can_use,
         )
 
     def test_mapping_reload_backoff_is_scoped_to_one_generation(self) -> None:
@@ -657,7 +465,7 @@ class CacheOwnershipSourceTests(unittest.TestCase):
 
     def test_inheritance_checks_do_not_trust_sticky_relhassubclass(self) -> None:
         # PostgreSQL may retain relhassubclass after the last child is dropped.
-        # Registration, worker reload, and both fast-path validation stages
+        # Registration, worker reload, and mget validation
         # must all consult the actual pg_inherits rows so recovery is automatic.
         self.assertNotIn("c.relhassubclass", INSTALL_SQL)
         self.assertGreaterEqual(INSTALL_SQL.count("inh.inhparent = p_relation"), 2)
@@ -682,35 +490,9 @@ class CacheOwnershipSourceTests(unittest.TestCase):
         self.assertIn("relation->rd_rel->relispartition", parent_check)
         self.assertIn("has_superclass", parent_check)
         relation_meta = c_function(SQL_FASTPATH, "pglc_sql_relation_meta")
-        simple_query = c_function(SQL_FASTPATH, "pglc_sql_simple_query")
-        runtime = c_function(SQL_FASTPATH, "pglc_sql_validate_runtime")
         self.assertIn("pglc_sql_relation_has_children", relation_meta)
         self.assertIn("pglc_sql_relation_has_parent", relation_meta)
-        self.assertIn("rte->inh", simple_query)
-        self.assertNotIn("pglc_sql_relation_has_children", simple_query)
-        self.assertIn("pglc_sql_relation_meta", runtime)
         self.assertNotIn("relhassubclass", relation_meta)
-        self.assertNotIn("has_subclass", simple_query)
-        self.assertNotIn("relhassubclass", runtime)
-
-        normalizer = c_function(
-            SQL_FASTPATH, "pglc_sql_normalize_query_inheritance"
-        )
-        self.assertIn("AccessShareLock", normalizer)
-        self.assertIn("pglc_sql_read_mapping", normalizer)
-        self.assertIn("pglc_sql_relation_has_children", normalizer)
-        self.assertIn("rte->inh = false", normalizer)
-        self.assertLess(
-            normalizer.index("try_table_open"),
-            normalizer.index("relation->rd_rel->relhassubclass"),
-        )
-        self.assertLess(
-            normalizer.index("relation->rd_rel->relhassubclass"),
-            normalizer.index("pglc_sql_read_mapping"),
-        )
-        planner = c_function(SQL_FASTPATH, "pglc_sql_planner")
-        self.assertIn("pglc_sql_normalize_query_inheritance", planner)
-        self.assertIn("previous_planner_hook", planner)
         self.assertIn("worker_mappings_incomplete", WORKER)
         retry = c_function(WORKER, "maybe_reload_mappings")
         self.assertIn("!worker_mappings_incomplete", retry)

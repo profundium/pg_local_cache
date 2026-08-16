@@ -1906,6 +1906,11 @@ class ReleaseContracts(unittest.TestCase):
         helper = source.index("install -m 0755 scripts/fetch-release.sh")
         self.assertLess(helper, checksums)
         self.assertIn("dist/fetch-release.sh", source)
+        self.assertIn("dist/install-latest.sh", source)
+        bootstrap = (ROOT / "scripts" / "install-latest.sh").read_text()
+        self.assertIn("releases/latest", bootstrap)
+        self.assertIn("sha256sum --check --strict", bootstrap)
+        self.assertIn('"$temporary_directory/package/install.sh" install', bootstrap)
 
     def test_archives_are_inspected_and_smoked_before_upload(self) -> None:
         source = RELEASE.read_text(encoding="utf-8")
@@ -1999,14 +2004,6 @@ class ReleaseContracts(unittest.TestCase):
         )
         self.assertNotIn("pg_local_cache_version:${version}", release)
 
-    def test_existing_volume_docker_build_uses_supported_arguments(self) -> None:
-        guide = (ROOT / "docs/INSTALL_EXISTING.md").read_text(encoding="utf-8")
-        section = guide[guide.index("## Existing Docker volume") :]
-        self.assertIn("--build-arg POSTGRES_MAJOR=16", section)
-        self.assertIn("--build-arg POSTGRES_VARIANT=bookworm", section)
-        self.assertIn('--build-arg "PGLC_BUILD_ID=$build_id"', section)
-        self.assertNotIn("POSTGRES_IMAGE", section)
-
     def test_release_requires_both_exact_commit_benchmark_artifacts(self) -> None:
         source = RELEASE.read_text(encoding="utf-8")
         start = source.index(
@@ -2044,8 +2041,8 @@ class ReleaseContracts(unittest.TestCase):
             self.assertNotIn(obsolete, combined)
         self.assertIn('PGLC_BENCH_SINGLEFLIGHT_WAIT_MS: "250"', ci)
         self.assertIn('PGLC_BENCH_ROW_RESP_MIN_OPS: "10000"', ci)
-        self.assertIn('PGLC_BENCH_ROW_SQL_MIN_OPS: "10000"', ci)
         self.assertIn('PGLC_BENCH_ROW_WIDTH_MIN_OPS: "0"', ci)
+        self.assertNotIn("PGLC_BENCH_ROW_SQL_", combined)
 
 
 class DemoComposeContracts(unittest.TestCase):

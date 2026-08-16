@@ -104,9 +104,6 @@ jobs:
           PGLC_BENCH_CLIENT_CPUS: "2"
           PGLC_BENCH_SERVER_MEMORY: "1g"
           PGLC_BENCH_ROW_RESP_MIN_OPS: "10000"
-          PGLC_BENCH_ROW_SQL_MIN_OPS: "10000"
-          PGLC_BENCH_ROW_SQL_IN_KEYS: "32"
-          PGLC_BENCH_ROW_SQL_IN_MIN_OPS: "10000"
           PGLC_BENCH_ROW_WIDTH_MIN_OPS: "0"
           PGLC_BENCH_OUTPUT_DIR: ${{ runner.temp }}/comparison-smoke
         run: bash benchmarks/run.sh
@@ -176,7 +173,7 @@ jobs:
             tests/whole_row_benchmark_test.py \
             tests/oom_monitoring_integration.py \
             tests/pipeline_integration.py \
-            tests/sql_fastpath_integration.py \
+            tests/sql_mget_integration.py \
             tests/sql_api_test.py \
             tests/sql_only_benchmark_test.py
 

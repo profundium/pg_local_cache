@@ -327,8 +327,8 @@ if [[ " ${majors[*]} " == *" 16 "* && " ${variants[*]} " == *" bookworm "* ]]; t
 CREATE TABLE public.pgxn_smoke (id bigint PRIMARY KEY, payload text NOT NULL);
 INSERT INTO public.pgxn_smoke VALUES (1, 'fresh-pgxn-cache');
 SELECT local_cache.attach_table('public.pgxn_smoke'::regclass);
-SELECT local_cache.get('public.pgxn_smoke'::regclass, 1::bigint);
-SELECT local_cache.get('public.pgxn_smoke'::regclass, 1::bigint);
+SELECT local_cache.mget('public.pgxn_smoke'::regclass, ARRAY[1]::bigint[]);
+SELECT local_cache.mget('public.pgxn_smoke'::regclass, ARRAY[1]::bigint[]);
 SQL
     pgxn_cache_hit="$(
         docker exec "$pgxn_runtime_container" psql --username postgres \

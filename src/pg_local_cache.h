@@ -109,8 +109,6 @@ typedef struct PgLocalCacheSharedState
 	/* Next dynahash bucket for the bounded eviction sample. */
 	uint32		eviction_bucket_cursor;
 	pg_atomic_uint64 config_generation;
-	/* Fences backend-local SQL row copies across committed invalidations. */
-	pg_atomic_uint64 data_epoch;
 	pg_atomic_uint64 cache_hits;
 	pg_atomic_uint64 cache_misses;
 	pg_atomic_uint64 negative_hits;
@@ -167,7 +165,6 @@ typedef struct PgLocalCacheReadToken
 	uint64		relation_version;
 	uint64		key_version;
 	uint64		source_observed_full_xid;
-	uint64		data_epoch;
 	bool		cacheable;
 	bool		has_entry;
 } PgLocalCacheReadToken;
@@ -225,7 +222,6 @@ extern char *pglc_role;
 extern char *pglc_auth_token;
 extern char *pglc_auth_token_file;
 extern bool pglc_allow_superuser;
-extern bool pglc_sql_cache;
 
 extern PgLocalCacheSharedState *pglc_shared;
 extern HTAB *pglc_cache_hash;
@@ -233,7 +229,6 @@ extern HTAB *pglc_relation_hash;
 
 extern void pglc_require_preload(void);
 extern uint64 pglc_config_generation(void);
-extern uint64 pglc_data_epoch(void);
 extern bool pglc_cache_lookup(const PgLocalCacheMapping *mapping,
 							 const char *canonical_key,
 							 char *value,
@@ -297,7 +292,6 @@ extern Size pglc_sql_counter_memory_bytes(void);
 extern Size pglc_worker_memory_bytes(void);
 extern Size pglc_worker_memory_bytes_per_worker(void);
 extern Size pglc_estimated_memory_bytes(void);
-extern void pglc_sql_init(void);
 extern void pg_local_cache_worker_main(Datum main_arg);
 
 #endif

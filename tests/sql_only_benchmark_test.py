@@ -260,7 +260,7 @@ def valid_report() -> dict[str, object]:
             "superuser": False,
             "local_cache_schema_usage": False,
         },
-        "ordinary_select_proof": {
+        "read_equivalence_proof": {
             "query": cfg.lookup_query,
             "cached_plan": "Result",
             "direct_plan": "Index Scan using rows_pkey on rows",
@@ -534,11 +534,11 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "boolean"):
                 sql_only.Config.from_environment()
 
-    def test_generated_names_and_query_use_scalar_sql_get(self) -> None:
+    def test_generated_names_and_query_use_sql_mget(self) -> None:
         cfg = config()
         self.assertEqual(cfg.schema, "pglc_sql_bench_abc12345")
         self.assertEqual(cfg.namespace, "sqlbench_abc12345")
-        self.assertIn("local_cache.get", cfg.lookup_query)
+        self.assertIn("local_cache.mget", cfg.lookup_query)
         self.assertIn("(:key)::bigint", cfg.lookup_query)
         self.assertIn("row_to_json", cfg.direct_lookup_query)
 
@@ -589,7 +589,7 @@ class ParserAndWorkloadTests(unittest.TestCase):
         self.assertNotIn("\\endpipeline", script)
 
         latency_script = sql_only.latency_lookup_script(cfg)
-        self.assertEqual(latency_script.count("local_cache.get"), 1)
+        self.assertEqual(latency_script.count("local_cache.mget"), 1)
         self.assertNotIn("\\startpipeline", latency_script)
 
     def test_scaling_snapshot_reuses_primary_evidence_and_measures_only_c4(self) -> None:
@@ -610,7 +610,7 @@ class ParserAndWorkloadTests(unittest.TestCase):
             self.assertEqual((profile.concurrency, profile.pipeline), (4, 8))
             self.assertIn("local_cache.mget", throughput_paths["cached"].read_text())
             self.assertIn("array_agg", throughput_paths["stock"].read_text())
-            self.assertIn("local_cache.get", latency_paths["cached"].read_text())
+            self.assertIn("local_cache.mget", latency_paths["cached"].read_text())
             self.assertIsNone(minimum_ops)
             return {"query_protocol": protocol}
 
@@ -741,7 +741,7 @@ class ParserAndWorkloadTests(unittest.TestCase):
         self.assertEqual(summary["maximum_operations_per_second"], 30.0)
         self.assertGreater(summary["coefficient_of_variation_percent"], 0)
 
-    def test_runner_selects_prepared_or_unnamed_extended_and_guc_mode(self) -> None:
+    def test_runner_selects_prepared_or_unnamed_extended_protocol(self) -> None:
         cfg = config()
         with tempfile.NamedTemporaryFile() as stream, mock.patch.object(
             sql_only, "run_checked", return_value=PGBENCH_OUTPUT
@@ -759,7 +759,7 @@ class ParserAndWorkloadTests(unittest.TestCase):
         self.assertEqual(arguments[arguments.index("-M") + 1], "prepared")
         self.assertEqual(arguments[arguments.index("-T") + 1], "2")
         self.assertEqual(arguments[arguments.index("-h") + 1], cfg.host)
-        self.assertIn("pg_local_cache.sql_cache=on", environment["PGOPTIONS"])
+        self.assertNotIn("pg_local_cache.sql_cache", environment["PGOPTIONS"])
         self.assertEqual(prepared["query_protocol"], "prepared")
         self.assertEqual(prepared["requested_duration_seconds"], 1.25)
         self.assertEqual(prepared["effective_duration_seconds"], 2)
@@ -778,7 +778,7 @@ class ParserAndWorkloadTests(unittest.TestCase):
         arguments = run.call_args.args[0]
         environment = run.call_args.kwargs["environment"]
         self.assertEqual(arguments[arguments.index("-M") + 1], "extended")
-        self.assertIn("pg_local_cache.sql_cache=off", environment["PGOPTIONS"])
+        self.assertNotIn("pg_local_cache.sql_cache", environment["PGOPTIONS"])
 
         with tempfile.NamedTemporaryFile() as stream, mock.patch.object(
             sql_only, "run_checked", return_value=PGBENCH_OUTPUT
@@ -934,7 +934,7 @@ class DatabaseContractTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "NOSUPERUSER"):
                 sql_only.validate_application_role(cfg)
 
-    def test_plan_proof_compares_identical_rows_and_customscan_presence(self) -> None:
+    def test_read_proof_compares_identical_rows(self) -> None:
         cfg = config()
         replies = [
             "Index Scan using rows_pkey on rows",
@@ -948,7 +948,7 @@ class DatabaseContractTests(unittest.TestCase):
             proof = sql_only.explain_and_sample(cfg)
         self.assertTrue(proof["direct_and_cached_rows_equal"])
         self.assertTrue(proof["stock_mapped_and_cached_rows_equal"])
-        self.assertIn("local_cache.get", proof["query"])
+        self.assertIn("local_cache.mget", proof["query"])
 
     def test_cold_probe_requires_exact_one_miss_fill_then_hit(self) -> None:
         cfg = config()
@@ -1029,8 +1029,8 @@ class DatabaseContractTests(unittest.TestCase):
         self.assertTrue(proof["stock_mapped_and_cached_rows_equal"])
         direct_script = psql.call_args_list[2].args[1]
         cached_script = psql.call_args_list[3].args[1]
-        self.assertIn("pg_local_cache.sql_cache = off", direct_script)
-        self.assertIn("pg_local_cache.sql_cache = on", cached_script)
+        self.assertNotIn("pg_local_cache.sql_cache", direct_script)
+        self.assertNotIn("pg_local_cache.sql_cache", cached_script)
         self.assertIn("EXECUTE pglc_integrity(4)", cached_script)
 
     def test_sentinel_integrity_rejects_wrong_rows(self) -> None:

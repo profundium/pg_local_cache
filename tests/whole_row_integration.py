@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Black-box whole-row RESP and transparent-SQL coverage.
-
-The test intentionally uses the public RESP/SQL APIs only.  Administrative
-DDL is executed by the smoke-test connection, while every cacheable SELECT is
-issued by a real LOGIN NOSUPERUSER role so a passing result proves that no
-driver or privileged SQL wrapper is required by applications.
-"""
+"""Black-box whole-row RESP coverage."""
 
 from __future__ import annotations
 
@@ -255,10 +249,6 @@ def assert_resp_error(
     raise AssertionError(f"RESP command unexpectedly succeeded: {arguments!r}")
 
 
-def assert_custom_scan(plan: str) -> None:
-    assert "Custom Scan (pg_local_cache_sql)" in plan, plan
-
-
 def assert_row_one(row: dict[str, object], payload: str = "row-one") -> None:
     assert row == {
         "tenant_id": 7,
@@ -333,29 +323,13 @@ def main() -> None:
         assert_row_one(wait_for_json(client, key_one))
         assert_row_one(wait_for_json(client, key_one))
 
-        # A negative entry suppresses duplicate PostgreSQL reads for RESP but
-        # remains non-authoritative to the SQL fast path.
+        # A negative entry suppresses duplicate PostgreSQL reads for RESP.
         before_missing = stat(client)
         assert client.command("GET", missing_key) is None
         assert client.command("GET", missing_key) is None
         after_missing = stat(client)
         assert after_missing["database_reads"] - before_missing["database_reads"] == 1
         assert after_missing["negative_hits"] - before_missing["negative_hits"] >= 1
-        before_negative_sql = stat(client)
-        assert app_sql(
-            f"SELECT payload FROM {relation} WHERE tenant_id = 7 "
-            f"AND id = {9_000_000_000 + os.getpid()}"
-        ) == ""
-        after_negative_sql = stat(client)
-        assert (
-            after_negative_sql["sql_cache_misses"]
-            - before_negative_sql["sql_cache_misses"]
-            == 1
-        )
-        assert (
-            after_negative_sql["sql_cache_hits"]
-            == before_negative_sql["sql_cache_hits"]
-        )
         # A committed insert invalidates the negative entry before the new row
         # is visible, so GET cannot remain falsely empty.
         missing_id = 9_000_000_000 + os.getpid()
@@ -464,78 +438,6 @@ def main() -> None:
         assert_invalidation_refills(client, f"CRUD:{PGDATABASE}", key_one, "row-one")
         assert_invalidation_refills(client, "CRUD", key_one, "row-one")
 
-        # SELECT *, multiple/reordered projections, reversed predicate order,
-        # and generic prepared parameters all use ordinary SQL and native
-        # PostgreSQL values through the CustomScan.
-        client.command("INVALIDATE", table_scope)
-        star_query = (
-            f"SELECT * FROM {relation} WHERE tenant_id = 7 AND id = 1"
-        )
-        assert_custom_scan(app_sql(f"EXPLAIN (COSTS OFF) {star_query}"))
-        before_sql = stat(client)
-        first_star = app_sql(star_query).split("|")
-        second_star = app_sql(star_query).split("|")
-        assert first_star == second_star, (first_star, second_star)
-        assert first_star[:5] == ["7", "1", "row-one", "12.50", "t"], first_star
-        assert json.loads(first_star[5]) == {
-            "kind": "alpha",
-            "nested": {"ok": True},
-        }
-        assert first_star[6] == ""
-        after_sql = stat(client)
-        assert after_sql["sql_cache_hits"] - before_sql["sql_cache_hits"] == 1
-        assert after_sql["sql_cache_misses"] - before_sql["sql_cache_misses"] == 1
-        assert after_sql["sql_cache_fills"] - before_sql["sql_cache_fills"] == 1
-
-        projection = (
-            f"SELECT payload, enabled, amount, note, id, tenant_id FROM {relation} "
-            "WHERE id = 1 AND tenant_id = 7"
-        )
-        assert_custom_scan(app_sql(f"EXPLAIN (COSTS OFF) {projection}"))
-        assert app_sql(projection) == "row-one|t|12.50||1|7"
-
-        prepared_name = f"pglc_whole_prepared_{suffix}"
-        prepared_plan = app_script(
-            "SET plan_cache_mode = force_generic_plan;\n"
-            f"PREPARE {prepared_name}(bigint, bigint) AS "
-            f"SELECT note, metadata, payload, id FROM {relation} "
-            "WHERE id = $2 AND tenant_id = $1;\n"
-            f"EXPLAIN (COSTS OFF) EXECUTE {prepared_name}(7, 1);\n"
-            f"DEALLOCATE {prepared_name};\n"
-        )
-        assert_custom_scan(prepared_plan)
-        prepared_value = app_script(
-            "SET plan_cache_mode = force_generic_plan;\n"
-            f"PREPARE {prepared_name}(bigint, bigint) AS "
-            f"SELECT note, metadata, payload, id FROM {relation} "
-            "WHERE id = $2 AND tenant_id = $1;\n"
-            f"EXECUTE {prepared_name}(7, 1);\n"
-            f"DEALLOCATE {prepared_name};\n"
-        ).split("|")
-        assert prepared_value[0] == "" and prepared_value[2:] == ["row-one", "1"]
-        assert json.loads(prepared_value[1]) == {
-            "kind": "alpha",
-            "nested": {"ok": True},
-        }
-
-        # A plan prepared while clean must bypass after a local write.  Rollback
-        # leaves the old shared entry valid; commit fences it before visibility.
-        transaction_name = f"pglc_whole_tx_{suffix}"
-        rollback_values = app_script(
-            "SET plan_cache_mode = force_generic_plan;\n"
-            f"PREPARE {transaction_name}(bigint, bigint) AS "
-            f"SELECT payload FROM {relation} WHERE tenant_id = $1 AND id = $2;\n"
-            f"EXECUTE {transaction_name}(7, 1);\n"
-            "BEGIN;\n"
-            f"UPDATE {relation} SET payload = 'rolled-back' "
-            "WHERE tenant_id = 7 AND id = 1;\n"
-            f"EXECUTE {transaction_name}(7, 1);\n"
-            "ROLLBACK;\n"
-            f"EXECUTE {transaction_name}(7, 1);\n"
-            f"DEALLOCATE {transaction_name};\n"
-        ).splitlines()
-        assert rollback_values == ["row-one", "rolled-back", "row-one"], rollback_values
-
         app_script(
             "BEGIN;\n"
             f"UPDATE {relation} SET payload = 'committed' "
@@ -543,10 +445,6 @@ def main() -> None:
             "COMMIT;\n"
         )
         assert wait_for_json(client, key_one)["payload"] == "committed"
-        assert app_sql(
-            f"SELECT payload FROM {relation} WHERE tenant_id = 7 AND id = 1"
-        ) == "committed"
-
         # PK moves invalidate both OLD and NEW canonical composite keys.  A
         # rollback does not leak either tentative key; a commit publishes both
         # invalidations before the moved tuple becomes visible.
@@ -569,25 +467,11 @@ def main() -> None:
         assert moved["tenant_id"] == 8 and moved["id"] == 11, moved
         assert moved["payload"] == "committed", moved
 
-        # Oversized cache entries remain correct SQL/RESP results and are
-        # simply not admitted.  A source value beyond the bounded RESP render
-        # budget fails before row_to_json can detoast it into worker memory.
+        # Oversized cache entries remain correct RESP results and are not admitted.
         admin_sql(
             f"INSERT INTO {relation} VALUES (99, 99, repeat('z', 12000), "
             "99.99, false, '{\"wide\":true}', NULL)"
         )
-        wide_query = (
-            f"SELECT payload FROM {relation} WHERE tenant_id = 99 AND id = 99"
-        )
-        assert_custom_scan(app_sql(f"EXPLAIN (COSTS OFF) {wide_query}"))
-        before_wide = stat(client)
-        assert app_sql(wide_query) == "z" * 12000
-        assert app_sql(wide_query) == "z" * 12000
-        after_wide = stat(client)
-        assert after_wide["sql_cache_fills"] == before_wide["sql_cache_fills"], {
-            "before": before_wide,
-            "after": after_wide,
-        }
         wide_key = crud_key(table, 99, 99)
         before_wide_resp = stat(client)
         wide_row = wait_for_json(client, wide_key)
@@ -599,31 +483,24 @@ def main() -> None:
             == 1
         )
 
-        # SQL can cache a tuple whose tuple+escaped-JSON representation does
-        # not fit one slot.  RESP must treat that tuple-only entry as a miss,
-        # refill from PostgreSQL, and keep hit-ratio metrics truthful.
+        # Escaped JSON refills from PostgreSQL and keeps metrics truthful.
         admin_sql(
             f"INSERT INTO {relation} VALUES (98, 98, repeat(chr(92), 4000), "
             "98.00, false, '{\"escaped\":true}', NULL)"
         )
-        escaped_query = (
-            f"SELECT payload FROM {relation} WHERE tenant_id = 98 AND id = 98"
-        )
-        assert_custom_scan(app_sql(f"EXPLAIN (COSTS OFF) {escaped_query}"))
-        assert app_sql(escaped_query) == "\\" * 4000
-        before_tuple_only = stat(client)
+        before_escaped = stat(client)
         escaped_row = wait_for_json(client, crud_key(table, 98, 98))
         assert escaped_row["payload"] == "\\" * 4000
-        after_tuple_only = stat(client)
-        assert after_tuple_only["cache_hits"] == before_tuple_only["cache_hits"]
+        after_escaped = stat(client)
+        assert after_escaped["cache_hits"] == before_escaped["cache_hits"]
         assert (
-            after_tuple_only["cache_misses"]
-            - before_tuple_only["cache_misses"]
+            after_escaped["cache_misses"]
+            - before_escaped["cache_misses"]
             == 1
         )
         assert (
-            after_tuple_only["database_reads"]
-            - before_tuple_only["database_reads"]
+            after_escaped["database_reads"]
+            - before_escaped["database_reads"]
             == 1
         )
 

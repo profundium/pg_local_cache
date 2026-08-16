@@ -66,16 +66,16 @@ pg_local_cache:
         description: Negative-cache hits since PostgreSQL startup.
     - sql_cache_hits_total:
         usage: COUNTER
-        description: SQL fast-path cache hits since PostgreSQL startup.
+        description: SQL mget cache hits since PostgreSQL startup.
     - sql_cache_misses_total:
         usage: COUNTER
-        description: SQL fast-path cache misses since PostgreSQL startup.
+        description: SQL mget cache misses since PostgreSQL startup.
     - sql_cache_fills_total:
         usage: COUNTER
-        description: SQL fast-path cache fills since PostgreSQL startup.
+        description: SQL mget cache fills since PostgreSQL startup.
     - sql_cache_bypasses_total:
         usage: COUNTER
-        description: SQL fast-path bypasses since PostgreSQL startup.
+        description: SQL mget bypasses since PostgreSQL startup.
     - database_reads_total:
         usage: COUNTER
         description: Database reads performed by cache workers since PostgreSQL startup.

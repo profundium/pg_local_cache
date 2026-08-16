@@ -132,7 +132,7 @@ PG_LOCAL_CACHE_TEST_APP_ROLE="$app_role" \
 PG_LOCAL_CACHE_TEST_APP_PASSWORD="$app_password" \
 PG_LOCAL_CACHE_TEST_APP_HOST="127.0.0.1" \
 POSTGRES_MAJOR="$postgres_major" \
-    python3 -B "${repository_directory}/tests/sql_fastpath_integration.py"
+    python3 -B "${repository_directory}/tests/sql_mget_integration.py"
 
 sql_only_metrics="$(
     compose exec -T postgres \

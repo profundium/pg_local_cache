@@ -269,18 +269,6 @@ RETURNS bigint
 AS 'MODULE_PATHNAME', 'pg_local_cache_invalidate'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION get(relation regclass, key_values text[])
-RETURNS text
-AS 'MODULE_PATHNAME', 'pg_local_cache_sql_get'
-LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE
-SECURITY INVOKER;
-
-CREATE FUNCTION get(relation regclass, key_value anyelement)
-RETURNS text
-AS 'MODULE_PATHNAME', 'pg_local_cache_sql_get_scalar'
-LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE
-SECURITY INVOKER;
-
 CREATE FUNCTION mget(relation regclass, key_values anyarray)
 RETURNS text[]
 AS 'MODULE_PATHNAME', 'pg_local_cache_sql_mget'

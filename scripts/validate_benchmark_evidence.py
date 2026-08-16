@@ -20,7 +20,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from benchmarks import sql_only as sql_only_benchmark
 
 
-WHOLE_ROW_SCHEMA_VERSION = 3
+WHOLE_ROW_SCHEMA_VERSION = 4
 SQL_ONLY_SCHEMA_VERSION = 3
 MINIMUM_OPERATIONS_PER_SECOND = 10_000
 MINIMUM_RELATIVE_THROUGHPUT = 1.50
@@ -268,108 +268,6 @@ def validate_whole_row(path: Path, expected_revision: str) -> None:
                 MINIMUM_OPERATIONS_PER_SECOND,
                 f"{path}: RESP measured throughput",
             )
-
-    sql_gate = require_mapping(
-        report.get("ordinary_sql_gate"), f"{path}: ordinary SQL gate"
-    )
-    require(sql_gate.get("status") == "PASS", f"{path}: ordinary SQL gate is not PASS")
-    require_minimum(
-        sql_gate.get("minimum_mapped_ops_per_second"),
-        MINIMUM_OPERATIONS_PER_SECOND,
-        f"{path}: ordinary SQL gate",
-    )
-    sql_lanes = require_mapping(report.get("ordinary_sql"), f"{path}: ordinary SQL lanes")
-    for name in (
-        "select_star",
-        "reordered_projection",
-        "composite_predicate_reordered",
-    ):
-        lane = require_mapping(sql_lanes.get(name), f"{path}: SQL lane {name}")
-        for server in ("mapped_postgres", "stock_postgres"):
-            median = validate_throughput_result(
-                lane.get(server),
-                f"{path}: SQL lane {name}/{server}",
-                expected_runs=repetitions,
-            )
-            if server == "mapped_postgres":
-                require_minimum(
-                    median,
-                    MINIMUM_OPERATIONS_PER_SECOND,
-                    f"{path}: SQL lane {name} measured throughput",
-                )
-
-    sql_in_gate = require_mapping(
-        report.get("ordinary_sql_in_gate"), f"{path}: ordinary SELECT IN gate"
-    )
-    require(
-        sql_in_gate.get("status") == "PASS",
-        f"{path}: ordinary SELECT IN gate is not PASS",
-    )
-    require_minimum(
-        sql_in_gate.get("minimum_mapped_key_ops_per_second"),
-        MINIMUM_OPERATIONS_PER_SECOND,
-        f"{path}: ordinary SELECT IN gate",
-    )
-    keys_per_statement = require_positive_integer(
-        sql_in_gate.get("keys_per_statement"),
-        f"{path}: ordinary SELECT IN keys per statement",
-    )
-    require(
-        workload.get("ordinary_sql_in_keys_per_statement") == keys_per_statement,
-        f"{path}: ordinary SELECT IN workload width does not match its gate",
-    )
-    sql_in = require_mapping(
-        report.get("ordinary_sql_in"), f"{path}: ordinary SELECT IN lane"
-    )
-    require(
-        sql_in.get("keys_per_statement") == keys_per_statement,
-        f"{path}: ordinary SELECT IN lane width does not match its gate",
-    )
-    for server in ("mapped_postgres", "stock_postgres"):
-        result = require_mapping(
-            sql_in.get(server), f"{path}: ordinary SELECT IN/{server}"
-        )
-        median = validate_throughput_result(
-            result,
-            f"{path}: ordinary SELECT IN/{server}",
-            expected_runs=repetitions,
-        )
-        for run_index, run in enumerate(
-            require_runs(result.get("runs"), f"{path}: ordinary SELECT IN/{server}"),
-            start=1,
-        ):
-            require(
-                run.get("operations_per_statement") == keys_per_statement,
-                f"{path}: ordinary SELECT IN/{server} run {run_index} "
-                "has incorrect key accounting",
-            )
-        if server == "mapped_postgres":
-            require_minimum(
-                median,
-                MINIMUM_OPERATIONS_PER_SECOND,
-                f"{path}: ordinary SELECT IN measured key throughput",
-            )
-            measured_operations = sum(
-                int(run.get("successful_operations", 0))
-                for run in require_runs(
-                    result.get("runs"),
-                    f"{path}: ordinary SELECT IN mapped runs",
-                )
-            )
-            require(
-                result.get("sql_cache_hits_during_measurement")
-                == measured_operations,
-                f"{path}: ordinary SELECT IN cache-hit accounting mismatch",
-            )
-            for counter in (
-                "sql_cache_misses_during_measurement",
-                "sql_cache_fills_during_measurement",
-                "sql_cache_bypasses_during_measurement",
-            ):
-                require(
-                    result.get(counter) == 0,
-                    f"{path}: ordinary SELECT IN {counter} is not zero",
-                )
 
     width_gate = require_mapping(report.get("width_gate"), f"{path}: width gate")
     require(width_gate.get("status") == "PASS", f"{path}: width gate is not PASS")

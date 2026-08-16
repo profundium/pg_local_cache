@@ -366,14 +366,12 @@ class MonitoringInterfaceSourceTests(unittest.TestCase):
         self.assertIn("wait_for_mapping_ready()", integration)
         self.assertIn("transactional ACL reload", integration)
 
-    def test_sql_fastpath_test_restores_application_acl(self) -> None:
+    def test_sql_mget_test_restores_application_acl(self) -> None:
         integration = (
-            ROOT / "tests" / "sql_fastpath_integration.py"
+            ROOT / "tests" / "sql_mget_integration.py"
         ).read_text(encoding="utf-8")
         cleanup = integration[integration.index("    finally:\n") :]
         for statement in (
-            "local_cache.get(regclass, text[])",
-            "local_cache.get(regclass, anyelement)",
             "local_cache.mget(regclass, anyarray)",
             "REVOKE USAGE ON SCHEMA local_cache",
         ):

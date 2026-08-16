@@ -415,7 +415,6 @@ _PG_init(void)
 	BackgroundWorker worker;
 	int			i;
 
-	pglc_sql_init();
 	pglc_define_gucs();
 	RegisterXactCallback(pglc_xact_callback, NULL);
 	before_shmem_exit(pglc_backend_exit, (Datum) 0);
@@ -580,7 +579,6 @@ pglc_shmem_startup(void)
 		pg_atomic_init_u64(&pglc_shared->clock, 0);
 		pg_atomic_init_u64(&pglc_shared->entry_generation, 0);
 		pg_atomic_init_u64(&pglc_shared->config_generation, 1);
-		pg_atomic_init_u64(&pglc_shared->data_epoch, 1);
 		pg_atomic_init_u64(&pglc_shared->cache_hits, 0);
 		pg_atomic_init_u64(&pglc_shared->cache_misses, 0);
 		pg_atomic_init_u64(&pglc_shared->negative_hits, 0);
@@ -786,13 +784,6 @@ pglc_config_generation(void)
 	return pg_atomic_read_u64(&pglc_shared->config_generation);
 }
 
-uint64
-pglc_data_epoch(void)
-{
-	pglc_require_preload();
-	return pg_atomic_read_u64(&pglc_shared->data_epoch);
-}
-
 /*
  * Cache keys reserve room for the largest supported namespace and encoded
  * primary key.  Hashing the entire fixed-size struct would process more than
@@ -935,7 +926,6 @@ static void
 advance_global_version_locked(void)
 {
 	pglc_shared->global_version++;
-	pg_atomic_fetch_add_u64(&pglc_shared->data_epoch, 1);
 }
 
 static uint64
@@ -1185,7 +1175,6 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 	token->key_version = entry ? entry->version : 0;
 	token->source_observed_full_xid =
 		entry ? entry->source_observed_full_xid : 0;
-	token->data_epoch = pg_atomic_read_u64(&pglc_shared->data_epoch);
 	token->has_entry = entry != NULL;
 	token->cacheable = mapping_matches && mapping_current &&
 		pglc_shared->global_dirty_writers == 0 &&

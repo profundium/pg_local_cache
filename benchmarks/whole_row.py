@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Whole-row RESP and ordinary-SQL comparative benchmark.
-
-The RESP comparison sends identical GET frames and validates the exact,
-per-key row JSON on pg_local_cache, Valkey, and Redis. Ordinary SQL lanes use
-the same SELECT text against mapped and stock PostgreSQL.
-"""
+"""Whole-row RESP comparison for pg_local_cache, Valkey, and Redis."""
 
 from __future__ import annotations
 
 from array import array
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import math
@@ -34,34 +29,11 @@ import scenarios
 ROW_NAMESPACE = "whole_row_comparison"
 ROW_TABLE = "pg_local_cache_whole_row_comparison"
 ROW_TENANT = 7
-SQL_IN_NAMESPACE = "whole_row_select_in_comparison"
-SQL_IN_TABLE = "pg_local_cache_whole_row_select_in_comparison"
 ROW_VALUE_SIZE_ENV = "PGLC_BENCH_ROW_VALUE_SIZE"
 ROW_PAYLOAD_SIZES_ENV = "PGLC_BENCH_ROW_PAYLOAD_SIZES"
 ROW_RESP_MIN_OPS_ENV = "PGLC_BENCH_ROW_RESP_MIN_OPS"
-ROW_SQL_MIN_OPS_ENV = "PGLC_BENCH_ROW_SQL_MIN_OPS"
-ROW_SQL_IN_KEYS_ENV = "PGLC_BENCH_ROW_SQL_IN_KEYS"
-ROW_SQL_IN_MIN_OPS_ENV = "PGLC_BENCH_ROW_SQL_IN_MIN_OPS"
 ROW_WIDTH_MIN_OPS_ENV = "PGLC_BENCH_ROW_WIDTH_MIN_OPS"
 MAX_CACHEABLE_TEXT_SIZE = 3000
-MAX_TRANSPARENT_SQL_ARRAY_KEYS = 1024
-
-SQL_LANES = {
-    "select_star": (
-        f"SELECT * FROM public.{ROW_TABLE} "
-        "WHERE tenant_id = 7 AND id = :key;"
-    ),
-    "reordered_projection": (
-        "SELECT metadata, payload, enabled, amount, note, id, tenant_id "
-        f"FROM public.{ROW_TABLE} "
-        "WHERE tenant_id = 7 AND id = :key;"
-    ),
-    "composite_predicate_reordered": (
-        "SELECT payload, metadata, id, tenant_id "
-        f"FROM public.{ROW_TABLE} "
-        "WHERE id = :key AND tenant_id = 7;"
-    ),
-}
 
 
 @dataclass(frozen=True)
@@ -70,9 +42,6 @@ class WholeRowConfig:
     value_size: int
     payload_sizes: tuple[int, ...]
     resp_min_ops: float
-    sql_min_ops: float
-    sql_in_keys: int
-    sql_in_min_ops: float
     width_min_ops: float
 
     @classmethod
@@ -93,18 +62,6 @@ class WholeRowConfig:
             payload_sizes=payload_sizes,
             resp_min_ops=compare.env_float(
                 ROW_RESP_MIN_OPS_ENV, 10_000, 0, 1e12
-            ),
-            sql_min_ops=compare.env_float(
-                ROW_SQL_MIN_OPS_ENV, 10_000, 0, 1e12
-            ),
-            sql_in_keys=compare.env_int(
-                ROW_SQL_IN_KEYS_ENV,
-                min(32, base.keys),
-                1,
-                min(MAX_TRANSPARENT_SQL_ARRAY_KEYS, base.keys),
-            ),
-            sql_in_min_ops=compare.env_float(
-                ROW_SQL_IN_MIN_OPS_ENV, 10_000, 0, 1e12
             ),
             width_min_ops=compare.env_float(
                 ROW_WIDTH_MIN_OPS_ENV, 0, 0, 1e12
@@ -177,25 +134,6 @@ def row_table_sql(keys: int, payload_size: int) -> str:
     )
 
 
-def sql_in_table_sql(keys: int, payload_size: int) -> str:
-    return (
-        f"DROP TABLE IF EXISTS public.{SQL_IN_TABLE};"
-        f"CREATE TABLE public.{SQL_IN_TABLE} ("
-        "id bigint PRIMARY KEY, tenant_id bigint NOT NULL, "
-        "payload text NOT NULL, amount numeric(18,2), "
-        "enabled boolean NOT NULL, metadata jsonb NOT NULL, note text);"
-        f"INSERT INTO public.{SQL_IN_TABLE} "
-        "SELECT g, 7, repeat('x', "
-        f"{payload_size}), (g % 10000)::numeric / 100, (g % 2 = 0), "
-        "pg_catalog.jsonb_build_object('bucket', g % 16, 'active', g % 2 = 0), "
-        "CASE WHEN g % 3 = 0 THEN NULL ELSE 'note-' || g::text END "
-        f"FROM pg_catalog.generate_series(1, {keys}) AS g;"
-        f"GRANT SELECT, INSERT, UPDATE, DELETE ON public.{SQL_IN_TABLE} "
-        f"TO {compare.PG_APP_USER};"
-        f"ANALYZE public.{SQL_IN_TABLE};"
-    )
-
-
 def setup_mapped_postgres(
     config: compare.Config, payload_size: int
 ) -> int:
@@ -203,31 +141,17 @@ def setup_mapped_postgres(
     compare.psql(
         config,
         row_table_sql(config.keys, payload_size)
-        + sql_in_table_sql(config.keys, payload_size)
         + f"SELECT local_cache.attach_table("
-        f"'public.{ROW_TABLE}'::regclass, false, '{ROW_NAMESPACE}');"
-        + f"SELECT local_cache.attach_table("
-        f"'public.{SQL_IN_TABLE}'::regclass, false, '{SQL_IN_NAMESPACE}');",
+        f"'public.{ROW_TABLE}'::regclass, false, '{ROW_NAMESPACE}');",
     )
     capacity = int(compare.psql(config, "SHOW pg_local_cache.cache_entries"))
-    required_capacity = config.keys * 2
-    if required_capacity > capacity:
+    if config.keys > capacity:
         raise ValueError(
-            "whole-row comparison needs room for both attached benchmark "
-            f"keyspaces ({required_capacity} entries), but cache capacity is "
+            "whole-row comparison needs room for its attached keyspace "
+            f"({config.keys} entries), but cache capacity is "
             f"{capacity}"
         )
     return capacity
-
-
-def setup_plain_postgres(config: compare.Config, payload_size: int) -> None:
-    setup_role(config, compare.PLAIN_PG_HOST)
-    compare.psql(
-        config,
-        row_table_sql(config.keys, payload_size)
-        + sql_in_table_sql(config.keys, payload_size),
-        host=compare.PLAIN_PG_HOST,
-    )
 
 
 def fetch_expected_rows(config: compare.Config) -> list[bytes]:
@@ -702,303 +626,6 @@ def resp_comparison(
     )
 
 
-def sql_lookup_script(query: str, config: compare.Config) -> str:
-    return scenarios.lookup_script(query, config.keys, config.pipeline)
-
-
-def validate_sql_value(
-    config: compare.Config, host: str, query: str, key: int = 1
-) -> str:
-    return compare.psql(config, query.replace(":key", str(key)), host=host)
-
-
-def sql_lanes(
-    config: compare.Config, minimum_ops: float
-) -> tuple[dict[str, Any], list[str]]:
-    lanes: dict[str, Any] = {}
-    failures: list[str] = []
-    for index, (name, query) in enumerate(SQL_LANES.items()):
-        mapped_value = validate_sql_value(config, compare.PG_HOST, query)
-        plain_value = validate_sql_value(config, compare.PLAIN_PG_HOST, query)
-        if mapped_value != plain_value:
-            raise RuntimeError(
-                f"SQL lane {name} returned different mapped/plain values"
-            )
-        script = sql_lookup_script(query, config)
-        before = compare.read_pglc_stats(compare.TARGETS[0], config)
-        mapped = scenarios.run_pgbench_repetitions(
-            config,
-            compare.PG_HOST,
-            script,
-            31000 + index * 100,
-        )
-        after = compare.read_pglc_stats(compare.TARGETS[0], config)
-        stock = scenarios.run_pgbench_repetitions(
-            config,
-            compare.PLAIN_PG_HOST,
-            script,
-            41000 + index * 100,
-        )
-        mapped.update(
-            scenarios.counter_delta(
-                before,
-                after,
-                "sql_cache_hits",
-                "sql_cache_misses",
-                "sql_cache_fills",
-                "sql_cache_bypasses",
-            )
-        )
-        lanes[name] = {
-            "query": query,
-            "validated_sample": mapped_value,
-            "mapped_postgres": mapped,
-            "stock_postgres": stock,
-        }
-        if any(int(run["failed_batches"]) for run in mapped["runs"]):
-            failures.append(f"mapped SQL lane {name} had failed batches")
-        if any(int(run["failed_batches"]) for run in stock["runs"]):
-            failures.append(f"stock SQL lane {name} had failed batches")
-        measured_operations = sum(
-            int(run["successful_operations"]) for run in mapped["runs"]
-        )
-        if mapped["sql_cache_hits_during_measurement"] < measured_operations:
-            failures.append(
-                f"mapped SQL lane {name} did not hit for every measured lookup"
-            )
-        for counter in (
-            "sql_cache_misses_during_measurement",
-            "sql_cache_fills_during_measurement",
-            "sql_cache_bypasses_during_measurement",
-        ):
-            if mapped[counter] != 0:
-                failures.append(
-                    f"mapped SQL lane {name} reported {counter}={mapped[counter]}"
-                )
-        median = mapped["summary"]["median_operations_per_second"]
-        if median < minimum_ops:
-            failures.append(
-                f"mapped SQL lane {name} median {median:.0f} ops/s is below "
-                f"independent gate {minimum_ops:.0f}"
-            )
-    return lanes, failures
-
-
-def sql_in_query(values: list[str]) -> str:
-    if not values:
-        raise ValueError("ordinary SELECT IN requires at least one key")
-    keys = ", ".join(f"({value})::bigint" for value in values)
-    return f"SELECT * FROM public.{SQL_IN_TABLE} WHERE id IN ({keys});"
-
-
-def sql_in_lookup_script(config: compare.Config, keys_per_statement: int) -> str:
-    if not 1 <= keys_per_statement <= config.keys:
-        raise ValueError("SELECT IN width must be between one and the key count")
-    lines = ["\\startpipeline"]
-    maximum_start = config.keys - keys_per_statement + 1
-    for statement_index in range(config.pipeline):
-        base = f"in_base_{statement_index}"
-        lines.append(f"\\set {base} random(1, {maximum_start})")
-        variables: list[str] = []
-        for offset in range(keys_per_statement):
-            variable = f"in_key_{statement_index}_{offset}"
-            expression = f":{base}" if offset == 0 else f":{base} + {offset}"
-            lines.append(f"\\set {variable} {expression}")
-            variables.append(f":{variable}")
-        lines.append(sql_in_query(variables))
-    lines.append("\\endpipeline")
-    return "\n".join(lines) + "\n"
-
-
-def validate_sql_in_value(
-    config: compare.Config, host: str, keys_per_statement: int
-) -> list[str]:
-    values = [str(index) for index in range(1, keys_per_statement + 1)]
-    rows = compare.psql(config, sql_in_query(values), host=host).splitlines()
-    return sorted(rows)
-
-
-def sql_in_full_keyspace_pass(
-    config: compare.Config,
-    chunk_size: int = MAX_TRANSPARENT_SQL_ARRAY_KEYS,
-) -> None:
-    if chunk_size < 1 or chunk_size > MAX_TRANSPARENT_SQL_ARRAY_KEYS:
-        raise ValueError("invalid SELECT IN stabilization chunk size")
-    for start in range(1, config.keys + 1, chunk_size):
-        stop = min(start + chunk_size, config.keys + 1)
-        values = [str(value) for value in range(start, stop)]
-        query = (
-            f"SELECT id FROM public.{SQL_IN_TABLE} WHERE id IN ("
-            + ", ".join(f"({value})::bigint" for value in values)
-            + ");"
-        )
-        returned = compare.psql(config, query).splitlines()
-        expected = [str(value) for value in range(start, stop)]
-        if sorted(returned, key=int) != expected:
-            raise RuntimeError(
-                "ordinary SELECT IN stabilization returned incomplete rows"
-            )
-
-
-def stabilize_sql_in_cache(
-    config: compare.Config, max_passes: int = 4
-) -> dict[str, int]:
-    if max_passes < 1:
-        raise ValueError("max_passes must be positive")
-    compare.psql(
-        config, f"SELECT local_cache.invalidate('{SQL_IN_NAMESPACE}')"
-    )
-    totals = {
-        "sql_cache_hits_before_stable": 0,
-        "sql_cache_misses_before_stable": 0,
-        "sql_cache_fills_before_stable": 0,
-        "sql_cache_bypasses_before_stable": 0,
-    }
-    last: dict[str, int] = {}
-    for pass_number in range(1, max_passes + 1):
-        before = compare.read_pglc_stats(compare.TARGETS[0], config)
-        sql_in_full_keyspace_pass(config)
-        after = compare.read_pglc_stats(compare.TARGETS[0], config)
-        last = scenarios.counter_delta(
-            before,
-            after,
-            "sql_cache_hits",
-            "sql_cache_misses",
-            "sql_cache_fills",
-            "sql_cache_bypasses",
-        )
-        for name, value in last.items():
-            totals[name.replace("_during_measurement", "_before_stable")] += value
-        if (
-            last["sql_cache_hits_during_measurement"] == config.keys
-            and last["sql_cache_misses_during_measurement"] == 0
-            and last["sql_cache_fills_during_measurement"] == 0
-            and last["sql_cache_bypasses_during_measurement"] == 0
-        ):
-            return {"passes": pass_number, **totals}
-    raise RuntimeError(
-        "ordinary SELECT IN did not reach a fully warm pass: "
-        + ", ".join(f"{name}={value}" for name, value in sorted(last.items()))
-    )
-
-
-def sql_in_lane(
-    whole: WholeRowConfig, config: compare.Config
-) -> tuple[dict[str, Any], list[str]]:
-    keys_per_statement = whole.sql_in_keys
-    mapped_value = validate_sql_in_value(
-        config, compare.PG_HOST, keys_per_statement
-    )
-    stock_value = validate_sql_in_value(
-        config, compare.PLAIN_PG_HOST, keys_per_statement
-    )
-    if mapped_value != stock_value or len(mapped_value) != keys_per_statement:
-        raise RuntimeError(
-            "ordinary SELECT IN returned different mapped/plain row sets"
-        )
-
-    stabilization = stabilize_sql_in_cache(config)
-    variables = [f":key_{index}" for index in range(keys_per_statement)]
-    query = sql_in_query(variables)
-    script = sql_in_lookup_script(config, keys_per_statement)
-    timed_config = replace(config, warmup_seconds=0)
-    if config.warmup_seconds > 0:
-        warm_config = replace(
-            config,
-            duration=config.warmup_seconds,
-            warmup_seconds=0,
-            repetitions=1,
-        )
-        scenarios.run_pgbench_repetitions(
-            warm_config,
-            compare.PG_HOST,
-            script,
-            50900,
-            operations_per_statement=keys_per_statement,
-        )
-        scenarios.run_pgbench_repetitions(
-            warm_config,
-            compare.PLAIN_PG_HOST,
-            script,
-            60900,
-            operations_per_statement=keys_per_statement,
-        )
-    before = compare.read_pglc_stats(compare.TARGETS[0], config)
-    mapped = scenarios.run_pgbench_repetitions(
-        timed_config,
-        compare.PG_HOST,
-        script,
-        51000,
-        operations_per_statement=keys_per_statement,
-    )
-    after = compare.read_pglc_stats(compare.TARGETS[0], config)
-    stock = scenarios.run_pgbench_repetitions(
-        timed_config,
-        compare.PLAIN_PG_HOST,
-        script,
-        61000,
-        operations_per_statement=keys_per_statement,
-    )
-    mapped.update(
-        scenarios.counter_delta(
-            before,
-            after,
-            "sql_cache_hits",
-            "sql_cache_misses",
-            "sql_cache_fills",
-            "sql_cache_bypasses",
-        )
-    )
-    for result in (mapped, stock):
-        result["summary"]["median_statements_per_second"] = (
-            result["summary"]["median_operations_per_second"]
-            / keys_per_statement
-        )
-
-    failures: list[str] = []
-    if any(int(run["failed_batches"]) for run in mapped["runs"]):
-        failures.append("mapped ordinary SELECT IN had failed batches")
-    if any(int(run["failed_batches"]) for run in stock["runs"]):
-        failures.append("stock ordinary SELECT IN had failed batches")
-    measured_operations = sum(
-        int(run["successful_operations"]) for run in mapped["runs"]
-    )
-    if mapped["sql_cache_hits_during_measurement"] != measured_operations:
-        failures.append(
-            "ordinary SELECT IN cache hits did not equal resolved key rows"
-        )
-    for counter in (
-        "sql_cache_misses_during_measurement",
-        "sql_cache_fills_during_measurement",
-        "sql_cache_bypasses_during_measurement",
-    ):
-        if mapped[counter] != 0:
-            failures.append(
-                f"ordinary SELECT IN reported {counter}={mapped[counter]}"
-            )
-    median = mapped["summary"]["median_operations_per_second"]
-    if median < whole.sql_in_min_ops:
-        failures.append(
-            f"ordinary SELECT IN median {median:.0f} key ops/s is below "
-            f"independent gate {whole.sql_in_min_ops:.0f}"
-        )
-    stock_median = stock["summary"]["median_operations_per_second"]
-    return (
-        {
-            "query": query,
-            "keys_per_statement": keys_per_statement,
-            "validated_row_count": len(mapped_value),
-            "warm_stabilization": stabilization,
-            "mapped_postgres": mapped,
-            "stock_postgres": stock,
-            "mapped_to_stock_throughput_ratio": (
-                median / stock_median if stock_median > 0 else None
-            ),
-        },
-        failures,
-    )
-
-
 def width_sweep(
     whole: WholeRowConfig, config: compare.Config
 ) -> tuple[dict[str, Any], list[str]]:
@@ -1072,104 +699,35 @@ def fmt(value: object, digits: int = 0) -> str:
 
 def render_markdown(report: dict[str, Any]) -> str:
     resp = report["resp_full_row"]
-    environment = report.get("environment", {})
-    workload = report.get("workload", {})
-    source_revision = environment.get("source_revision", "unknown")
+    workload = report["workload"]
     redis_rate = float(
         resp["targets"]["redis"]["summary"]["median_operations_per_second"]
     )
-
     lines = [
-        "# pg_local_cache comparative benchmark",
+        "# pg_local_cache RESP benchmark",
         "",
         f"Generated: `{report['generated_at_utc']}`",
-        f"Source revision: `{source_revision}`",
+        f"Source revision: `{report['environment']['source_revision']}`",
         "",
-        "This is a warm-cache regression smoke, not a production capacity "
-        "claim. Ratios compare only identical operations inside this run.",
-        "",
-        "## Profile",
-        "",
-        "| Setting | Value |",
-        "|---|---:|",
-        f"| Duration / repetitions | {workload.get('duration_seconds', 'unknown')} s / {workload.get('repetitions', 'unknown')} |",
-        f"| Clients / pgbench jobs | {workload.get('concurrency', 'unknown')} / {workload.get('pgbench_jobs', 'unknown')} |",
-        f"| Pipeline depth | {workload.get('pipeline', 'unknown')} statements |",
-        f"| Keys per attached table / cache entries | {workload.get('keys', 'unknown')} / {workload.get('cache_capacity', 'unknown')} |",
-        f"| Client / server CPU quotas | {workload.get('client_cpus', 'unknown')} / {workload.get('server_cpus_per_target', 'unknown')} cores |",
-        f"| Row text payload | {workload.get('row_text_bytes', 'unknown')} bytes |",
-        "",
-        "## Full-row RESP GET",
-        "",
-        "| Target | Median ops/s | Min-max ops/s | p99 | Relative to Redis | Errors |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Target | Median ops/s | p99 | Relative to Redis | Errors |",
+        "|---|---:|---:|---:|---:|",
     ]
     for name in ("pg_local_cache", "valkey", "redis"):
         target = resp["targets"][name]
         summary = target["summary"]
         rate = float(summary["median_operations_per_second"])
-        relative = rate / redis_rate if redis_rate > 0 else math.nan
         errors = sum(int(run["errors"]) for run in target["runs"])
         lines.append(
             f"| {name} | {fmt(rate)} | "
-            f"{fmt(summary['minimum_operations_per_second'])}-"
-            f"{fmt(summary['maximum_operations_per_second'])} | "
             f"{fmt(summary['median_p99_ms'], 3)} ms | "
-            f"{relative:.2f}x | {errors} |"
+            f"{rate / redis_rate:.2f}x | {errors} |"
         )
-    pglc_resp_rate = float(
-        resp["targets"]["pg_local_cache"]["summary"][
-            "median_operations_per_second"
-        ]
-    )
-    redis_advantage = redis_rate / pglc_resp_rate if pglc_resp_rate > 0 else math.nan
     lines.extend(
         (
             "",
-            "Dedicated Redis and Valkey are included as the raw RESP throughput "
-            "baseline. A result below 1.00x is reported rather than hidden; in "
-            f"this run Redis was {redis_advantage:.2f}x faster than pg_local_cache.",
+            "## Response-width sweep",
             "",
-            "## Ordinary SQL whole-row/projection lanes",
-            "",
-            "| Lane | Mapped PostgreSQL median statements/s | Stock PostgreSQL median statements/s | Mapped/stock |",
-            "|---|---:|---:|---:|",
-        )
-    )
-    for name, lane in report["ordinary_sql"].items():
-        mapped = float(
-            lane["mapped_postgres"]["summary"]["median_operations_per_second"]
-        )
-        stock = float(
-            lane["stock_postgres"]["summary"]["median_operations_per_second"]
-        )
-        ratio = mapped / stock if stock > 0 else math.nan
-        lines.append(
-            f"| {name} | {fmt(mapped)} | {fmt(stock)} | {ratio:.2f}x |"
-        )
-    sql_in = report["ordinary_sql_in"]
-    lines.extend(
-        (
-            "",
-            "## Ordinary SQL SELECT IN",
-            "",
-            "| Keys / statement | Mapped key ops/s | Stock key ops/s | "
-            "Mapped statements/s | Stock statements/s | Mapped/stock |",
-            "|---:|---:|---:|---:|---:|---:|",
-            f"| {sql_in['keys_per_statement']} | "
-            f"{fmt(sql_in['mapped_postgres']['summary']['median_operations_per_second'])} | "
-            f"{fmt(sql_in['stock_postgres']['summary']['median_operations_per_second'])} | "
-            f"{fmt(sql_in['mapped_postgres']['summary']['median_statements_per_second'])} | "
-            f"{fmt(sql_in['stock_postgres']['summary']['median_statements_per_second'])} | "
-            f"{float(sql_in['mapped_to_stock_throughput_ratio']):.2f}x |",
-            "",
-            "Key throughput counts returned unique primary-key rows, not SQL "
-            "statements. Every timed mapped key must produce one transparent "
-            "SQL cache hit with zero misses, fills, or bypasses.",
-            "",
-            "## pg_local_cache full-row response-width sweep",
-            "",
-            "| Text payload bytes | JSON response bytes | Median ops/s | p99 |",
+            "| Text bytes | JSON bytes | Median ops/s | p99 |",
             "|---:|---:|---:|---:|",
         )
     )
@@ -1184,19 +742,12 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         (
             "",
-            f"Overall gate: **{report['gate']['status']}** — "
-            f"{report['gate']['message']}",
+            f"Gate: **{report['gate']['status']}** — {report['gate']['message']}",
             "",
-            "## Interpretation limits",
-            "",
-            "- Warm positive hits are measured after explicit stabilization.",
-            "- SQL key ops/s, SQL statements/s, and RESP requests/s are separate units.",
-            "- This run does not establish write, miss, failover, storage, or end-to-end application capacity.",
-            "- RESP values are PostgreSQL `row_to_json` bytes. Valkey and Redis "
-            "store exactly those bytes; pg_local_cache derives them from the "
-            "authoritative table and maintains transactional invalidation.",
-            "- SQL values are validated before timing. Prepared/pipelined pgbench "
-            "uses identical SELECT text against mapped and stock PostgreSQL.",
+            f"Profile: {workload['duration_seconds']} s × "
+            f"{workload['repetitions']} repetitions, "
+            f"{workload['concurrency']} clients, "
+            f"{workload['keys']} keys.",
             "",
         )
     )
@@ -1222,7 +773,7 @@ def write_failure_report(error: BaseException, output: Path) -> None:
     (output / "whole-row.json").unlink(missing_ok=True)
     (output / "whole-row.md").unlink(missing_ok=True)
     payload = {
-        "schema_version": 3,
+        "schema_version": 4,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "status": "FAIL",
         "error_type": type(error).__name__,
@@ -1292,7 +843,6 @@ def report_workload(
         "keys": config.keys,
         "row_text_bytes": whole.value_size,
         "payload_widths_bytes": list(whole.payload_sizes),
-        "ordinary_sql_in_keys_per_statement": whole.sql_in_keys,
         "max_latency_samples": config.max_latency_samples,
         "cache_capacity": capacity,
         "client_cpus": config.client_cpus,
@@ -1311,19 +861,14 @@ def main() -> int:
         raise RuntimeError("whole-row benchmark requires Linux/fork")
 
     capacity = setup_mapped_postgres(config, whole.value_size)
-    setup_plain_postgres(config, whole.value_size)
     expected = fetch_expected_rows(config)
     wait_for_mapping(compare.TARGETS[0], config, expected)
 
     resp, resp_failures = resp_comparison(whole, config, expected)
-    sql, sql_failures = sql_lanes(config, whole.sql_min_ops)
-    sql_in, sql_in_failures = sql_in_lane(whole, config)
     widths, width_failures = width_sweep(whole, config)
-    failures = (
-        resp_failures + sql_failures + sql_in_failures + width_failures
-    )
+    failures = resp_failures + width_failures
     report: dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "workload": report_workload(whole, config, capacity),
         "environment": report_environment(),
@@ -1335,29 +880,8 @@ def main() -> int:
                 "global invalidation followed by counter-verified full-keyspace "
                 "passes until one pass has zero misses and database reads"
             ),
-            "ordinary_sql_protocol": "pgbench prepared extended protocol + pipeline",
-            "ordinary_sql_comparison": "identical SELECT text, mapped vs stock PostgreSQL",
-            "ordinary_sql_in_accounting": (
-                "batch TPS multiplied by pipeline depth and unique primary-key "
-                "rows per IN statement"
-            ),
-            "ordinary_sql_in_fallback": (
-                "full-statement PostgreSQL fallback on any miss; no partial "
-                "cached/source result merge"
-            ),
         },
         "resp_full_row": resp,
-        "ordinary_sql": sql,
-        "ordinary_sql_gate": {
-            "minimum_mapped_ops_per_second": whole.sql_min_ops,
-            "status": "PASS" if not sql_failures else "FAIL",
-        },
-        "ordinary_sql_in": sql_in,
-        "ordinary_sql_in_gate": {
-            "minimum_mapped_key_ops_per_second": whole.sql_in_min_ops,
-            "keys_per_statement": whole.sql_in_keys,
-            "status": "PASS" if not sql_in_failures else "FAIL",
-        },
         "resp_payload_width_sweep": widths,
         "width_gate": {
             "minimum_ops_per_second": whole.width_min_ops,
@@ -1365,7 +889,7 @@ def main() -> int:
         },
         "gate": {
             "status": "PASS" if not failures else "FAIL",
-            "message": "all independent whole-row gates and integrity checks passed"
+            "message": "RESP gates and integrity checks passed"
             if not failures
             else "; ".join(failures),
         },

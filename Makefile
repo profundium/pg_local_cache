@@ -63,7 +63,6 @@ verify-static:
 		tests/pgxn_contract_test.py \
 		tests/release_version_test.py \
 		tests/sql_counter_contract_test.py \
-		tests/sql_executor_fastpath_contract_test.py \
 		tests/row_payload_contract_test.py \
 		tests/whole_row_benchmark_test.py \
 		tests/sql_api_test.py tests/sql_only_benchmark_test.py \
@@ -72,13 +71,14 @@ verify-static:
 		tests/worker_kvik_contract_test.py \
 		tests/whole_row_integration.py tests/pipeline_integration.py \
 		tests/oom_monitoring_integration.py \
-		tests/sql_fastpath_integration.py
+		tests/sql_mget_integration.py
 	bash -n docker/entrypoint.sh docker/healthcheck.sh docker/attach-table.sh \
 		docker/initdb/010_pg_local_cache.sh tests/docker_smoke.sh \
 		tests/docker_sql_only_smoke.sh \
 		tests/compatibility_matrix.sh \
 		monitoring/postgres/provision-monitor.sh \
-		benchmarks/run.sh scripts/install-existing.sh scripts/fetch-release.sh
+		benchmarks/run.sh scripts/install-existing.sh scripts/fetch-release.sh \
+		scripts/install-latest.sh
 	python3 -m json.tool \
 		monitoring/grafana/dashboards/pg-local-cache.json >/dev/null
 	python3 scripts/validate_pgxn_meta.py
@@ -89,7 +89,6 @@ source-test:
 		tests/monitoring_contract_test.py tests/pgxn_contract_test.py \
 		tests/release_version_test.py \
 		tests/sql_counter_contract_test.py \
-		tests/sql_executor_fastpath_contract_test.py \
 		tests/row_payload_contract_test.py \
 		tests/sql_api_test.py tests/worker_kvik_contract_test.py \
 		tests/installer_release_contract_test.py tests/pages_contract_test.py \

@@ -1050,15 +1050,6 @@ compose exec -T postgres \
     "ALTER EXTENSION plpgsql ADD TABLE public.pglc_worker_drift_smoke"
 wait_for_mapping_incomplete
 
-extension_member_plan="$(
-    compose exec -T postgres \
-        psql --username postgres --dbname "$database" --no-psqlrc \
-        --tuples-only --no-align --set ON_ERROR_STOP=1 \
-        --command \
-        "EXPLAIN (COSTS OFF) SELECT * FROM public.pglc_worker_drift_smoke WHERE id = 1"
-)"
-[[ "$extension_member_plan" != *"Custom Scan (pg_local_cache_sql)"* ]]
-
 extension_member_drift_state="$(
     compose exec -T postgres \
         psql --username postgres --dbname "$database" --no-psqlrc \
@@ -1073,16 +1064,6 @@ compose exec -T postgres \
     --set ON_ERROR_STOP=1 --command \
     "ALTER EXTENSION plpgsql DROP TABLE public.pglc_worker_drift_smoke"
 wait_for_mapping_health
-
-
-extension_member_recovered_plan="$(
-    compose exec -T postgres \
-        psql --username postgres --dbname "$database" --no-psqlrc \
-        --tuples-only --no-align --set ON_ERROR_STOP=1 \
-        --command \
-        "EXPLAIN (COSTS OFF) SELECT * FROM public.pglc_worker_drift_smoke WHERE id = 1"
-)"
-[[ "$extension_member_recovered_plan" == *"Custom Scan (pg_local_cache_sql)"* ]]
 
 compose exec -T postgres \
     psql --username postgres --dbname "$database" --no-psqlrc \
@@ -1221,7 +1202,7 @@ PG_LOCAL_CACHE_TEST_APP_ROLE="$app_role" \
 PG_LOCAL_CACHE_TEST_APP_PASSWORD="$app_password" \
 PG_LOCAL_CACHE_TEST_APP_HOST="127.0.0.1" \
 POSTGRES_MAJOR="$postgres_major" \
-    python3 -B "${repository_directory}/tests/sql_fastpath_integration.py"
+    python3 -B "${repository_directory}/tests/sql_mget_integration.py"
 
 PG_LOCAL_CACHE_PSQL="$psql_wrapper" \
 PGHOST="/var/run/postgresql" \

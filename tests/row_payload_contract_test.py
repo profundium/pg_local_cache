@@ -166,7 +166,7 @@ class RowPayloadSourceContractTests(unittest.TestCase):
             decode,
         )
         self.assertIn(
-            "state->row_fingerprint",
+            "state->mapping.row_descriptor_fingerprint",
             (ROOT / "src" / "pg_local_cache_sql.c").read_text(
                 encoding="utf-8"
             ),

@@ -4,8 +4,7 @@
 The harness talks only to PostgreSQL.  It deliberately requires
 ``pg_local_cache.port = 0`` and never opens a RESP connection.  A disposable
 whole-row table is attached with ``local_cache.attach_table`` and queried by
-a real LOGIN NOSUPERUSER role through ``local_cache.get`` and
-``local_cache.mget``.
+a real LOGIN NOSUPERUSER role through ``local_cache.mget``.
 
 Two protocol lanes are reported independently:
 
@@ -52,7 +51,6 @@ SQL_COUNTERS = (
 PROTOCOLS = ("prepared", "extended")
 BENCHMARK_MODES = ("stock", "direct", "cached")
 CACHE_ENABLED_BY_MODE = {"stock": None, "direct": False, "cached": True}
-CUSTOM_SCAN_NAME = "Custom Scan (pg_local_cache_sql)"
 DEFAULT_MINIMUM_OPS = 10_000.0
 SUPPORTED_POSTGRES_MAJORS = frozenset(range(14, 19))
 SCALING_PRIMARY_CONCURRENCY = 16
@@ -403,9 +401,9 @@ class Config:
     @property
     def lookup_query(self) -> str:
         return (
-            "SELECT local_cache.get("
+            "SELECT (local_cache.mget("
             f"{sql_literal(self.schema + '.' + self.table)}::regclass, "
-            "(:key)::bigint);"
+            "ARRAY[(:key)::bigint]))[1];"
         )
 
     @property
@@ -1008,10 +1006,6 @@ def setup_sql(config: Config, *, database: str, attach: bool) -> str:
             f"{sql_literal(config.schema + '.' + config.table)}::regclass, false, "
             f"{sql_literal(config.namespace)})::text;"
             f"GRANT USAGE ON SCHEMA local_cache TO {role};"
-            "GRANT EXECUTE ON FUNCTION local_cache.get(regclass, text[]) TO "
-            f"{role};"
-            "GRANT EXECUTE ON FUNCTION local_cache.get(regclass, anyelement) TO "
-            f"{role};"
             "GRANT EXECUTE ON FUNCTION local_cache.mget(regclass, anyarray) TO "
             f"{role};"
         )
@@ -1147,24 +1141,22 @@ def explain_and_sample(config: Config) -> dict[str, Any]:
     ).replace(":key", "1")
     direct_plan = psql(
         config,
-        "SET pg_local_cache.sql_cache = off;"
         f"EXPLAIN (COSTS OFF) {direct_query}",
         application=True,
     )
     direct_value = psql(
         config,
-        "SET pg_local_cache.sql_cache = off;" + direct_query,
+        direct_query,
         application=True,
     )
     cached_plan = psql(
         config,
-        "SET pg_local_cache.sql_cache = on;"
         f"EXPLAIN (COSTS OFF) {cached_query}",
         application=True,
     )
     cached_value = psql(
         config,
-        "SET pg_local_cache.sql_cache = on;" + cached_query,
+        cached_query,
         application=True,
     )
     stock_plan = psql(
@@ -1179,12 +1171,6 @@ def explain_and_sample(config: Config) -> dict[str, Any]:
         application=True,
         target="stock",
     )
-    if CUSTOM_SCAN_NAME in direct_plan:
-        raise RuntimeError("cache-off plan unexpectedly contains pg_local_cache CustomScan")
-    if CUSTOM_SCAN_NAME in cached_plan:
-        raise RuntimeError("SQL KV lookup unexpectedly contains pg_local_cache CustomScan")
-    if CUSTOM_SCAN_NAME in stock_plan:
-        raise RuntimeError("stock PostgreSQL plan unexpectedly contains CustomScan")
     if not direct_value or cached_value != direct_value or stock_value != direct_value:
         raise RuntimeError(
             "stock, cached, and direct SQL KV reads returned different rows"
@@ -1237,7 +1223,6 @@ def cold_miss_fill_hit_proof(config: Config) -> dict[str, Any]:
     statement = config.lookup_query.replace(":key", "$1")
     output = psql(
         config,
-        "SET pg_local_cache.sql_cache = on;\n"
         "SET plan_cache_mode = force_generic_plan;\n"
         f"PREPARE pglc_cold(bigint) AS {statement}\n"
         "EXECUTE pglc_cold(1);\n"
@@ -1269,7 +1254,6 @@ def warm_all_keys(config: Config) -> dict[str, Any]:
     invalidated = invalidate_namespace(config)
     statement = config.lookup_query.replace(":key", "$1")
     lines = [
-        "SET pg_local_cache.sql_cache = on;",
         "SET plan_cache_mode = force_generic_plan;",
         f"PREPARE pglc_warm(bigint) AS {statement}",
     ]
@@ -1310,7 +1294,7 @@ def sentinel_row_integrity_check(config: Config) -> dict[str, Any]:
     )
     aggregate = psql(
         config,
-        "SET pg_local_cache.sql_cache = off;" + aggregate_query,
+        aggregate_query,
         application=True,
     )
     stock_aggregate = psql(
@@ -1329,11 +1313,9 @@ def sentinel_row_integrity_check(config: Config) -> dict[str, Any]:
 
     sentinel_keys = sorted({1, (config.keys + 1) // 2, config.keys})
     def execute(cache_enabled: bool) -> tuple[list[str], dict[str, int]]:
-        mode = "on" if cache_enabled else "off"
         query = config.lookup_query if cache_enabled else config.direct_lookup_query
         statement = query.replace(":key", "$1")
         lines = [
-            f"SET pg_local_cache.sql_cache = {mode};",
             "SET plan_cache_mode = force_generic_plan;",
             f"PREPARE pglc_integrity(bigint) AS {statement}",
         ]
@@ -1453,11 +1435,7 @@ def run_pgbench_once(
         cache_enabled: bool | None = None
     else:
         cache_enabled = benchmark_mode == "cached"
-        mode = "on" if cache_enabled else "off"
-        environment["PGOPTIONS"] = (
-            f"-c pg_local_cache.sql_cache={mode} "
-            "-c plan_cache_mode=force_generic_plan"
-        )
+        environment["PGOPTIONS"] = "-c plan_cache_mode=force_generic_plan"
         host = config.host
         port = config.port
         database = config.database
@@ -2638,16 +2616,10 @@ def validate_report(report: Mapping[str, Any]) -> list[str]:
         digest = integrity.get("sentinel_rows_sha256")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             failures.append("sentinel-row digest is invalid")
-    plan = report.get("ordinary_select_proof", {})
+    plan = report.get("read_equivalence_proof", {})
     if not isinstance(plan, Mapping):
         failures.append("ordinary SELECT plan proof is missing")
     else:
-        if CUSTOM_SCAN_NAME in str(plan.get("cached_plan", "")):
-            failures.append("SQL KV function unexpectedly used CustomScan")
-        if CUSTOM_SCAN_NAME in str(plan.get("direct_plan", "")):
-            failures.append("direct ordinary SELECT unexpectedly used CustomScan")
-        if CUSTOM_SCAN_NAME in str(plan.get("stock_plan", "")):
-            failures.append("stock ordinary SELECT unexpectedly used CustomScan")
         if plan.get("stock_mapped_and_cached_rows_equal") is not True:
             failures.append("stock, mapped, and cached ordinary SELECT rows differ")
         if plan.get("direct_and_cached_rows_equal") is not True:
@@ -3124,8 +3096,8 @@ def build_report(config: Config) -> dict[str, Any]:
                     "separate PostgreSQL server with no pg_local_cache "
                     "extension or preload"
                 ),
-                "direct_mode": "SET pg_local_cache.sql_cache=off",
-                "cached_mode": "SET pg_local_cache.sql_cache=on",
+                "direct_mode": "ordinary indexed SELECT",
+                "cached_mode": "local_cache.mget",
                 "prepared_protocol": "pgbench -M prepared",
                 "unnamed_extended_protocol": "pgbench -M extended",
                 "counter_isolation": (
@@ -3158,7 +3130,7 @@ def build_report(config: Config) -> dict[str, Any]:
             "mapping": mapping,
             "ordinary_application_role": role,
             "stock_application_role": stock_role,
-            "ordinary_select_proof": select_proof,
+            "read_equivalence_proof": select_proof,
             "cold_miss_fill_hit_proof": cold_proof,
             "complete_keyspace_warm": warm_proof,
             "sentinel_row_integrity_check": integrity_check,

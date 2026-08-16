@@ -76,7 +76,6 @@ jobs:
           PGLC_BENCH_KEYS: ${{ inputs.keys || '16384' }}
           PGLC_BENCH_SINGLEFLIGHT_WAIT_MS: "250"
           PGLC_BENCH_ROW_RESP_MIN_OPS: "10000"
-          PGLC_BENCH_ROW_SQL_MIN_OPS: "10000"
           PGLC_BENCH_SERVER_CPUS: "2"
           PGLC_BENCH_CLIENT_CPUS: "2"
           PGLC_BENCH_OUTPUT_DIR: ${{ github.workspace }}/benchmark-results

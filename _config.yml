@@ -1,5 +1,5 @@
 title: pg_local_cache
-description: PostgreSQL 14–18 shared-memory row cache for repeated primary-key SELECTs, with transaction-aware invalidation and source-plan fallback.
+description: Transaction-aware PostgreSQL row cache with SQL mget and optional RESP2.
 url: https://profundium.github.io
 baseurl: /pg_local_cache
 repository: profundium/pg_local_cache

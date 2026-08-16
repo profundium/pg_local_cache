@@ -388,8 +388,11 @@ jobs:
           python3 scripts/release_archive.py verify-identity \
             --archive "$source_archive" --identity "$source_identity"
           install -m 0755 scripts/fetch-release.sh dist/fetch-release.sh
+          install -m 0755 scripts/install-latest.sh dist/install-latest.sh
           bash -n dist/fetch-release.sh
+          bash -n dist/install-latest.sh
           cmp --silent scripts/fetch-release.sh dist/fetch-release.sh
+          cmp --silent scripts/install-latest.sh dist/install-latest.sh
 
       - name: Preserve benchmark evidence from successful CI
         shell: bash

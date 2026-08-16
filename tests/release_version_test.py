@@ -75,6 +75,8 @@ def copy_fixture(destination: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, target)
     for source in (ROOT / "sql").glob("pg_local_cache--*.sql"):
+        if source.name == "pg_local_cache--unreleased.sql":
+            continue
         shutil.copy2(source, root / "sql" / source.name)
 
     run(root, "git", "init", "--initial-branch=master")
