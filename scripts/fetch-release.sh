@@ -33,7 +33,7 @@ fail() {
 
 unsupported() {
     printf '%s: %s\n' "$program_name" "$1" >&2
-    printf 'Use the PGXN/source install path and verify its checksum manually.\n' >&2
+    printf 'Build from source with PGXS: https://profundium.github.io/pg_local_cache/docs/INSTALL_EXISTING.html#build-from-source\n' >&2
     exit 1
 }
 

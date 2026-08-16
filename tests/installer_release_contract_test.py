@@ -1663,7 +1663,7 @@ class FetchReleaseContracts(unittest.TestCase):
                     **environment,
                 )
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("PGXN/source", result.stderr)
+                self.assertIn("Build from source with PGXS", result.stderr)
                 self.assertNotIn("releases/download", trace.read_text())
 
         with tempfile.TemporaryDirectory() as raw:

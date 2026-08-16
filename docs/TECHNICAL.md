@@ -1,39 +1,51 @@
 ---
 layout: doc
-title: Technical reference
+title: pg_local_cache technical reference
+seo_title: pg_local_cache SQL API, consistency, memory, and RESP2
+description: Technical reference for pg_local_cache SQL mget, transaction-aware invalidation, bounded PostgreSQL shared memory, monitoring, and optional RESP2.
 section: Technical
 permalink: /docs/TECHNICAL.html
 ---
 
-# Technical reference
+# pg_local_cache technical reference
 
-## Boundary
+`pg_local_cache` caches whole rows by complete primary key in bounded PostgreSQL
+shared memory. It exposes an explicit SQL `local_cache.mget` function and an
+optional RESP2 endpoint.
 
-`pg_local_cache` caches whole rows by complete primary key. It exposes one SQL
-read function, `local_cache.mget`, plus an optional RESP2 endpoint.
+> **Ordinary SQL stays ordinary:** the extension installs no planner or executor
+> hooks. A normal `SELECT` always uses PostgreSQL and never reads this cache.
 
-It does not install planner or executor hooks. Ordinary SQL is normal
-PostgreSQL and never reads this cache.
+## Supported tables and keys
 
-Supported source tables are permanent heap tables with a valid primary key and
-without RLS, partitioning, inheritance, or extension ownership. Supported key
-types are `smallint`, `integer`, `bigint`, `text`, `varchar`,
-`char`, and `uuid`; collations must be deterministic.
+Source tables must be permanent heap tables with a valid primary key and
+without RLS, partitioning, inheritance, or extension ownership.
 
-## Mapping lifecycle
+Supported key types:
 
-`local_cache.attach_table(regclass)`:
+- `smallint`, `integer`, and `bigint`;
+- `text`, `varchar`, and `char` with deterministic collations;
+- `uuid`;
+- composite primary keys made only from those types.
 
-1. locks and validates the relation;
-2. records namespace, relation OID, and ordered primary-key columns;
-3. installs extension-owned statement, row, and truncate triggers;
-4. reloads worker mappings.
+Unsupported relations are rejected during attachment instead of producing an
+unsafe partial mapping.
 
-DDL event triggers invalidate cached mapping metadata. Use
-`reconcile_table` or `reconcile_all` after intentional schema changes.
-`detach_table` removes the mapping and its triggers.
+## Attach, reconcile, and detach tables
 
-## SQL mget
+`local_cache.attach_table(regclass)` performs one guarded setup sequence:
+
+1. lock and validate the relation;
+2. record its namespace, relation OID, and ordered primary-key columns;
+3. install extension-owned statement, row, and truncate triggers;
+4. reload worker mappings.
+
+DDL event triggers invalidate cached mapping metadata. Run
+`local_cache.reconcile_table(...)` or `local_cache.reconcile_all()` after
+intentional schema changes. `local_cache.detach_table(...)` removes the mapping
+and its triggers.
+
+## SQL mget API
 
 Signature:
 
@@ -41,59 +53,58 @@ Signature:
 local_cache.mget(relation regclass, key_values anyarray) RETURNS text[]
 ```
 
-Single-column keys use their native array type. Composite keys use a rectangular
-`text[][]`, one key per row and one component per primary-key column.
+Single-column keys use their native array type. Composite keys use rectangular
+`text[][]`, with one key per row and one component per primary-key column.
 
 Contract:
 
-- maximum 1,024 keys;
-- order and duplicates are preserved;
-- input `NULL` and missing rows produce aligned `NULL`;
-- composite components cannot be `NULL`;
+- maximum 1,024 keys per call;
+- input order and duplicates are preserved;
+- input `NULL` and missing rows produce aligned `NULL` results;
+- composite key components cannot be `NULL`;
 - every component is parsed by its PostgreSQL type input function;
 - the complete composite batch is validated before the first lookup;
-- callers need source-table `SELECT`;
+- callers need `SELECT` on the source table;
 - the function is `SECURITY INVOKER`.
 
 A prepared source query is cached per function instance, user, relation, and
-mapping generation. Each key follows the same path:
+mapping generation.
+
+## Read path and safe fallback
+
+Each requested key follows the same path:
 
 1. canonicalize the complete primary key;
-2. use shared cache only in a clean `READ COMMITTED` transaction on the
-   writable primary;
-3. validate cached payload checksum, row descriptor, source `xmin`, and
-   snapshot visibility;
+2. use shared cache only in a clean `READ COMMITTED` transaction on the writable
+   primary;
+3. validate payload checksum, row descriptor, source `xmin`, and snapshot
+   visibility;
 4. otherwise execute the indexed source-table query through SPI;
 5. publish a positive or negative entry only after a latest-snapshot proof.
 
 `REPEATABLE READ`, `SERIALIZABLE`, recovery, parallel execution, and a
-transaction that has written mapped data bypass the cache and read PostgreSQL.
+transaction that wrote mapped data bypass the cache. Rows larger than the cache
+payload limit still return from PostgreSQL but are not cached.
 
-Rows larger than the cache payload limit still return from PostgreSQL but are
-not cached.
-
-## Consistency
+## Transaction consistency
 
 Before a mapped write can commit, triggers fence the affected key or relation.
 A cache fill carries mapping, global, relation, key, and loader generations, so
 a stale loader cannot publish after invalidation or eviction.
 
 Positive entries record the source tuple's `xmin` and a FullXID observation
-horizon. Old or snapshot-ineligible entries fall back to PostgreSQL. Negative
-entries are never treated as authoritative for an older active snapshot.
+horizon. Snapshot-ineligible entries fall back to PostgreSQL. Negative entries
+are never authoritative for an older active snapshot.
 
 Rollback removes transaction-local dirty state without publishing new data.
-Read-your-writes therefore comes from PostgreSQL, not from speculative cache
-contents.
+Read-your-writes therefore comes from PostgreSQL, not speculative cache content.
 
-## Shared memory
+## Shared memory and configuration
 
-The cache, relation states, counters, worker generations, and RESP client slots
-are allocated at postmaster startup. Capacity is bounded; eviction samples a
-bounded rotating set and prefers stale entries. Admission failure returns to
-the source database instead of allocating unbounded memory.
-
-Important settings:
+Cache entries, relation states, counters, worker generations, and RESP client
+slots are allocated at postmaster startup. Capacity is bounded. Eviction samples
+a bounded rotating set and prefers stale entries; admission failure returns to
+the source table instead of allocating unbounded memory.
 
 | Setting | Default | Meaning |
 |---|---:|---|
@@ -107,41 +118,41 @@ Important settings:
 | `pg_local_cache.role` | `local_cache_worker` | RESP PostgreSQL role |
 | `pg_local_cache.max_clients` | `256` | global RESP client limit |
 | `pg_local_cache.max_clients_per_worker` | `64` | slots per worker |
-| `pg_local_cache.idle_timeout_ms` | `300000` | idle/slow client deadline |
+| `pg_local_cache.idle_timeout_ms` | `300000` | idle and slow-client deadline |
 | `pg_local_cache.statement_timeout_ms` | `2000` | worker statement deadline |
 | `pg_local_cache.lock_timeout_ms` | `250` | worker lock deadline |
 | `pg_local_cache.singleflight_wait_ms` | `25` | same-key follower wait |
 | `pg_local_cache.max_pipeline_commands` | `256` | commands per event-loop turn |
-| `pg_local_cache.max_dirty_keys` | `4096` | transaction key fence bound |
+| `pg_local_cache.max_dirty_keys` | `4096` | transaction key-fence bound |
 | `pg_local_cache.auth_token_file` | empty | preferred RESP credential |
 | `pg_local_cache.auth_token` | empty | development-only inline token |
 | `pg_local_cache.allow_superuser` | `off` | development-only role override |
 
-These are postmaster settings. Size them before restart; the installer preflight
-checks the total plan.
+These are postmaster settings. Size them before restart; binary installer
+preflight checks the combined plan.
 
-## RESP2
+## Optional RESP2 endpoint
 
-RESP uses the same mappings and shared cache. The wire key is:
+RESP2 uses the same mappings and shared cache. Wire keys use this shape:
 
 ```text
 CRUD:database.schema.table:{"pk_column":<json-scalar>,...}
 ```
 
-Supported commands are authenticated bounded `MGET`, `SET`, `DEL`, and scoped
-invalidation. RESP workers use one configured PostgreSQL
-role; they do not inherit each network client's database ACLs.
+Supported commands are authenticated, bounded `MGET`, `SET`, `DEL`, and scoped
+invalidation. RESP workers use one configured PostgreSQL role; they do not
+inherit each network client's database ACLs.
 
-The endpoint has no TLS. Bind to loopback or place it behind an authenticated
-TLS proxy.
+The endpoint has no TLS. Bind it to loopback or place it behind an authenticated
+TLS proxy. Prefer a mode-restricted token file over an inline token.
 
-## Monitoring
+## Health and monitoring
 
 `local_cache.health()` reports readiness and mapping convergence.
-`local_cache.stats()` returns JSON counters. `local_cache.metrics()` exposes
-the typed metrics row used by the exporter.
+`local_cache.stats()` returns JSON counters. `local_cache.metrics()` exposes the
+typed metrics row used by the exporter.
 
-SQL cache counters now describe only explicit `mget` calls:
+SQL cache counters describe explicit `mget` calls only:
 
 - `sql_cache_hits`
 - `sql_cache_misses`
@@ -150,3 +161,6 @@ SQL cache counters now describe only explicit `mget` calls:
 
 Database reads, invalidations, admission rejection, dirty-key fallback,
 singleflight, worker, and RESP counters remain separate.
+
+Next: use the [installation guide](INSTALL_EXISTING.md) for verified binaries,
+PGXS source builds, controlled restarts, verification, and recovery.

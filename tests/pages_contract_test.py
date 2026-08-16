@@ -22,7 +22,6 @@ class PagesContracts(unittest.TestCase):
             "index.html",
             "docs/INSTALL_EXISTING.md",
             "docs/TECHNICAL.md",
-            "PGXN.md",
         ):
             self.assertTrue((ROOT / path).is_file())
 
@@ -35,7 +34,7 @@ class PagesContracts(unittest.TestCase):
 
     def test_local_markdown_links_resolve(self) -> None:
         failures: list[str] = []
-        for document in (ROOT / "README.md", ROOT / "PGXN.md", *(ROOT / "docs").glob("*.md")):
+        for document in (ROOT / "README.md", *(ROOT / "docs").glob("*.md")):
             for target in re.findall(r"\[[^]]*\]\(([^)]+)\)", document.read_text()):
                 if target.startswith(("http://", "https://", "#", "mailto:")):
                     continue
@@ -43,6 +42,26 @@ class PagesContracts(unittest.TestCase):
                 if path and not (document.parent / path).resolve().exists():
                     failures.append(f"{document.relative_to(ROOT)} -> {target}")
         self.assertEqual(failures, [])
+
+    def test_public_docs_have_search_metadata_and_no_pgxn_content(self) -> None:
+        layout = (ROOT / "_layouts/default.html").read_text()
+        homepage = (ROOT / "index.html").read_text()
+        public_docs = (
+            ROOT / "README.md",
+            ROOT / "index.html",
+            ROOT / "sitemap.xml",
+            ROOT / "_layouts/default.html",
+            ROOT / "_layouts/doc.html",
+            *(ROOT / "docs").glob("*.md"),
+        )
+
+        self.assertIn('rel="canonical"', layout)
+        self.assertIn('property="og:image"', layout)
+        self.assertIn('name="twitter:card" content="summary_large_image"', layout)
+        self.assertIn('"@type": "SoftwareSourceCode"', layout)
+        self.assertIn("PostgreSQL row cache", homepage)
+        for document in public_docs:
+            self.assertNotIn("pgxn", document.read_text().lower(), document)
 
 
 if __name__ == "__main__":

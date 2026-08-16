@@ -147,7 +147,6 @@ def _verify_archive(
         f"{prefix}BUILD-ID",
         f"{prefix}META.json",
         f"{prefix}Makefile",
-        f"{prefix}PGXN.md",
         f"{prefix}README.md",
         f"{prefix}pg_local_cache.control",
         f"{prefix}sql/pg_local_cache--{version}.sql",

@@ -1,25 +1,27 @@
 ---
 layout: default
-title: PostgreSQL primary-key row cache
-description: Bounded, transaction-aware PostgreSQL row caching through explicit SQL mget and optional RESP2.
+title: pg_local_cache: PostgreSQL row cache
+seo_title: pg_local_cache - Transaction-aware PostgreSQL row cache
+description: Open-source PostgreSQL extension for bounded shared-memory caching of primary-key rows through SQL mget, with transaction-aware invalidation and RESP2.
+image: /assets/social-card.png
 home: true
 permalink: /
 ---
 <main id="main-content">
   <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
     <div class="hero-copy">
-      <h1 id="hero-title">A local row cache inside PostgreSQL</h1>
-      <p>Read whole rows by primary key through one explicit SQL API. PostgreSQL remains authoritative and writes invalidate the cache transactionally.</p>
+      <h1 id="hero-title">Primary-key cache for PostgreSQL.</h1>
+      <p>Bounded shared-memory caching for whole-row SQL mget lookups, with transaction-aware invalidation and PostgreSQL fallbacks.</p>
       <div class="hero-actions">
         <a class="button primary" href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">Install <span aria-hidden="true">→</span></a>
-        <a class="button" href="{{ '/docs/TECHNICAL.html' | relative_url }}">Technical reference <span aria-hidden="true">→</span></a>
+        <a class="button" href="{{ '/docs/TECHNICAL.html' | relative_url }}">API reference <span aria-hidden="true">→</span></a>
       </div>
       <div class="mini-code">
-        <button class="copy-button" type="button" data-copy="hero-install">Copy</button>
+        <button class="copy-button" type="button" data-copy="hero-install" aria-live="polite">Copy</button>
         <pre id="hero-install"><code>curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh | bash -s -- app</code></pre>
       </div>
     </div>
-    <div class="terminal" aria-label="PostgreSQL mget example">
+    <div class="terminal" aria-label="Working PostgreSQL mget example">
       <div class="terminal-bar"><strong>psql</strong> │ postgres@localhost:5432/app</div>
       <pre><code>app=&gt; <span class="sql">SELECT</span> local_cache.attach_table(
         'public.items'::regclass
@@ -38,35 +40,65 @@ app=&gt; <span class="sql">SELECT</span> local_cache.mget(
   </section>
 
   <section class="proof-rail" aria-label="Core properties">
-    <div class="proof-item"><strong>Explicit SQL API</strong><p>One ordered <code>local_cache.mget</code> call.</p></div>
-    <div class="proof-item"><strong>Whole rows</strong><p>Complete JSON rows keyed by the table primary key.</p></div>
-    <div class="proof-item"><strong>Transaction-aware</strong><p>Writes fence affected entries before commit visibility.</p></div>
-    <div class="proof-item"><strong>Bounded memory</strong><p>Shared-memory capacity is fixed at PostgreSQL startup.</p></div>
+    <div class="proof-item"><strong>Explicit SQL API</strong><p>Only <code>local_cache.mget</code> reads the cache.</p></div>
+    <div class="proof-item"><strong>Transaction-aware</strong><p>Writes fence affected entries before commit.</p></div>
+    <div class="proof-item"><strong>Bounded memory</strong><p>Capacity is fixed at PostgreSQL startup.</p></div>
+    <div class="proof-item"><strong>Safe fallback</strong><p>Ineligible reads use the source table.</p></div>
+  </section>
+
+  <section id="fit" class="band" aria-labelledby="fit-title">
+    <div class="page-section section-grid">
+      <div class="section-intro">
+        <div class="section-rule" aria-hidden="true"></div>
+        <h2 id="fit-title">Built for exact row lookups</h2>
+        <p>One narrow cache contract keeps behavior predictable.</p>
+      </div>
+      <div class="fit-columns">
+        <section class="fit-group" aria-labelledby="use-title">
+          <h3 id="use-title">Use it for</h3>
+          <ul>
+            <li>Repeated reads by complete primary key</li>
+            <li>Hot whole rows that fit bounded shared memory</li>
+            <li>One writable PostgreSQL primary</li>
+            <li>Ordered JSON rows or limited RESP2 access</li>
+          </ul>
+        </section>
+        <section class="fit-group" aria-labelledby="avoid-title">
+          <h3 id="avoid-title">Keep PostgreSQL direct for</h3>
+          <ul>
+            <li>Joins, ranges, aggregates, and full scans</li>
+            <li>Arbitrary query-result caching</li>
+            <li>RLS, partitioned, or inherited tables</li>
+            <li>TTL, pub/sub, or distributed coordination</li>
+          </ul>
+        </section>
+      </div>
+    </div>
   </section>
 
   <section id="quick-start" class="page-section quick-start" aria-labelledby="quick-start-title">
-    <h2 id="quick-start-title">Install on PostgreSQL 14–18</h2>
-    <p class="quick-start-lead">The bootstrap selects the matching glibc or musl binary, verifies release checksums, installs the extension, restarts through <code>pg_ctl</code>, and checks health.</p>
+    <h2 id="quick-start-title">Install on PostgreSQL 14-18</h2>
+    <p class="quick-start-lead">Verified Linux amd64 packages support glibc and musl. First activation requires one PostgreSQL restart.</p>
     <div class="steps">
-      <div class="step"><span class="step-number">1</span><strong>Resolve latest</strong><p>Pin one immutable release tag.</p></div>
-      <div class="step"><span class="step-number">2</span><strong>Verify</strong><p>Check helper and archive SHA-256 hashes.</p></div>
-      <div class="step"><span class="step-number">3</span><strong>Install</strong><p>Stage files and PostgreSQL configuration.</p></div>
-      <div class="step"><span class="step-number">4</span><strong>Verify health</strong><p>Create the extension after restart.</p></div>
+      <div class="step"><span class="step-number">1</span><strong>Resolve release</strong><p>Pin one immutable version.</p></div>
+      <div class="step"><span class="step-number">2</span><strong>Verify</strong><p>Check helper and archive SHA-256.</p></div>
+      <div class="step"><span class="step-number">3</span><strong>Install</strong><p>Stage files and preload settings.</p></div>
+      <div class="step"><span class="step-number">4</span><strong>Check health</strong><p>Create and verify after restart.</p></div>
     </div>
     <div class="install-command">
       <div class="command-label">SQL-only installation for database app</div>
-      <button class="copy-button" type="button" data-copy="install-command">Copy</button>
+      <button class="copy-button" type="button" data-copy="install-command" aria-live="polite">Copy</button>
       <pre id="install-command"><code>curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh | bash -s -- app</code></pre>
     </div>
-    <p class="quick-start-more">Need systemd, Patroni, Kubernetes, RESP, rollback, or manual checksums? Read the <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">installation guide</a>.</p>
+    <p class="quick-start-more">Need systemd, Patroni, Kubernetes, PGXS, RESP, rollback, or manual checksums? Read the <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">installation guide</a>.</p>
   </section>
 
-  <section class="architecture">
+  <section class="architecture" aria-labelledby="data-path-title">
     <div class="page-section architecture-inner">
-      <h2>Data path</h2>
-      <div class="architecture-flow" aria-label="Application, PostgreSQL, and shared cache">
-        <span class="node">application</span><span class="arrow">→</span>
-        <span class="node">PostgreSQL</span><span class="arrow">↔</span>
+      <h2 id="data-path-title">Read path</h2>
+      <div class="architecture-flow" aria-label="Application requests PostgreSQL, which checks the bounded shared row cache">
+        <span class="node">application</span><span class="arrow" aria-hidden="true">→</span>
+        <span class="node">PostgreSQL</span><span class="arrow" aria-hidden="true">↔</span>
         <span class="node">shared row cache</span>
       </div>
     </div>
@@ -75,10 +107,33 @@ app=&gt; <span class="sql">SELECT</span> local_cache.mget(
   <section class="page-section docs-index" aria-labelledby="docs-title">
     <h2 id="docs-title">Documentation</h2>
     <div class="docs-list">
-      <a class="docs-link" href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}"><strong>Install</strong><span>Fast path, controlled restarts, verification and recovery.</span><b>→</b></a>
-      <a class="docs-link" href="{{ '/docs/TECHNICAL.html' | relative_url }}"><strong>Technical reference</strong><span>SQL API, cache semantics, memory, RESP and security.</span><b>→</b></a>
-      <a class="docs-link" href="{{ '/docs/PGXN.html' | relative_url }}"><strong>PGXN</strong><span>Source packages, semantic versions and publication.</span><b>→</b></a>
-      <a class="docs-link" href="https://github.com/profundium/pg_local_cache"><strong>GitHub</strong><span>Source, issues and immutable releases.</span><b>→</b></a>
+      <a class="docs-link" href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}"><strong>Install</strong><span>Binaries, PGXS, controlled restarts, verification, and recovery.</span><b aria-hidden="true">→</b></a>
+      <a class="docs-link" href="{{ '/docs/TECHNICAL.html' | relative_url }}"><strong>Technical reference</strong><span>SQL API, consistency, memory, monitoring, and RESP2.</span><b aria-hidden="true">→</b></a>
+      <a class="docs-link" href="https://github.com/profundium/pg_local_cache"><strong>GitHub</strong><span>Source, issues, and immutable releases.</span><b aria-hidden="true">→</b></a>
+    </div>
+  </section>
+
+  <section class="band faq" aria-labelledby="faq-title">
+    <div class="page-section faq-inner">
+      <h2 id="faq-title">PostgreSQL caching questions</h2>
+      <div class="faq-list">
+        <details>
+          <summary>Does pg_local_cache replace Redis?</summary>
+          <p>No. It is a focused PostgreSQL row cache with SQL mget and a limited RESP2 endpoint, not a general Redis server.</p>
+        </details>
+        <details>
+          <summary>Does it cache ordinary SELECT queries?</summary>
+          <p>No. Only explicit <code>local_cache.mget</code> calls use the cache. Ordinary SQL keeps the normal PostgreSQL execution path.</p>
+        </details>
+        <details>
+          <summary>How does it handle transactions?</summary>
+          <p>Writes fence affected entries before commit. Unsafe reads and read-your-writes fall back to PostgreSQL.</p>
+        </details>
+        <details>
+          <summary>Which PostgreSQL versions are supported?</summary>
+          <p>Published Linux amd64 binaries target PostgreSQL 14-18 with glibc or musl. Other targets can build through PGXS.</p>
+        </details>
+      </div>
     </div>
   </section>
 </main>

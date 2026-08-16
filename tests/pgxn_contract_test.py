@@ -107,21 +107,6 @@ class PgxnMetadataContracts(unittest.TestCase):
             ):
                 validator.validate_repository(root)
 
-    def test_pgxn_documentation_discloses_activation_and_credential_boundary(self) -> None:
-        source = (ROOT / "PGXN.md").read_text(encoding="utf-8")
-        for marker in (
-            "shared_preload_libraries",
-            "one controlled restart",
-            "pgxn install",
-            "configure the server",
-            "PGXN_USERNAME",
-            "PGXN_PASSWORD",
-            "automatic semantic",
-            "Never reuse an existing semantic version",
-        ):
-            self.assertIn(marker, source)
-
-
 class PgxnArchiveContracts(unittest.TestCase):
     def test_make_dist_is_standalone(self) -> None:
         result = subprocess.run(
@@ -151,7 +136,6 @@ class PgxnArchiveContracts(unittest.TestCase):
                     "BUILD-ID",
                     "META.json",
                     "Makefile",
-                    "PGXN.md",
                     "README.md",
                     "pg_local_cache.control",
                     f"sql/pg_local_cache--{CURRENT_VERSION}.sql",
