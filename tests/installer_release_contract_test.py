@@ -1430,6 +1430,10 @@ class FetchReleaseContracts(unittest.TestCase):
                     raise SystemExit(1)
                 target = sys.argv[sys.argv.index('--output') + 1]
                 url = sys.argv[-1]
+                race = os.environ.get('FETCH_RACE_OUTPUT')
+                if race and url.endswith('/SHA256SUMS'):
+                    os.mkdir(race)
+                    open(os.path.join(race, 'sentinel'), 'w').write('keep')
                 source = os.environ[
                     'FETCH_MANIFEST' if url.endswith('/SHA256SUMS') else 'FETCH_ARCHIVE'
                 ]
@@ -1570,8 +1574,11 @@ class FetchReleaseContracts(unittest.TestCase):
                 FETCH_MANIFEST=str(manifest),
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((output / root / "install.sh").is_file())
+            self.assertTrue((output / "install.sh").is_file())
+            self.assertFalse((output / root).exists())
             self.assertIn(f"archive_sha256={digest}", result.stdout)
+            self.assertIn(f"extracted_path={output}", result.stdout)
+            self.assertIn(f"next_command=sudo {output}/install.sh install", result.stdout)
             self.assertIn("install_executed=no", result.stdout)
             command_trace = trace.read_text()
             self.assertIn("/releases/download/v1.3.0/", command_trace)
@@ -1684,6 +1691,27 @@ class FetchReleaseContracts(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("releases/download", trace.read_text())
+
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            archive = directory / "fixture.tar.gz"
+            self._archive(archive)
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            manifest = directory / "manifest"
+            manifest.write_text(
+                f"{digest}  pg_local_cache-pg16-linux-glibc-amd64.tar.gz\n",
+                encoding="ascii",
+            )
+            output = directory / "raced"
+            result, _ = self._run(
+                directory,
+                ["--release-tag", "v1.3.0", "--output-directory", str(output)],
+                FETCH_ARCHIVE=str(archive),
+                FETCH_MANIFEST=str(manifest),
+                FETCH_RACE_OUTPUT=str(output),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((output / "sentinel").read_text(), "keep")
 
     def test_tag_boundary_and_interruption_cleanup(self) -> None:
         for tag in ("latest", "master", "v1.3", "v1.3.0-rc1", "https://evil.test/x"):

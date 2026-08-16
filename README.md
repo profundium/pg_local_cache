@@ -186,41 +186,18 @@ for the exact planner, snapshot, and type rules.
 
 ## Verified binary release
 
-Open the [latest stable release](https://github.com/profundium/pg_local_cache/releases/latest)
-and copy its exact `vX.Y.Z` tag. The tag-bound helper selects and verifies the
-right package; it never executes the installer.
+Open the [latest stable release](https://github.com/profundium/pg_local_cache/releases/latest),
+copy its exact `vX.Y.Z` tag, set the database, and run one command:
 
 ```bash
-(tag=vX.Y.Z; base="https://github.com/profundium/pg_local_cache/releases/download/${tag}"; tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT; curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" -o "$tmp/fetch-release.sh" "$base/fetch-release.sh" && (cd "$tmp" && awk '$2 == "fetch-release.sh"' SHA256SUMS > helper.sha256 && [ "$(wc -l < helper.sha256)" -eq 1 ] && sha256sum --check --strict helper.sha256) && bash "$tmp/fetch-release.sh" --release-tag "$tag" --output-directory "$(pwd -P)/pg_local_cache-package")
+(set -e; tag=vX.Y.Z; db=app; pg_config="$(command -v pg_config)"; psql="$(command -v psql)"; destination="$(pwd -P)/pg_local_cache-package"; base="https://github.com/profundium/pg_local_cache/releases/download/${tag}"; tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT; curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" -o "$tmp/fetch-release.sh" "$base/fetch-release.sh"; (cd "$tmp"; awk '$2 == "fetch-release.sh"' SHA256SUMS > helper.sha256; [ "$(wc -l < helper.sha256)" -eq 1 ]; sha256sum --check --strict helper.sha256); bash "$tmp/fetch-release.sh" --release-tag "$tag" --pg-config "$pg_config" --output-directory "$destination"; sudo "$destination/install.sh" install --database "$db" --pg-config "$pg_config" --psql "$psql" --restart-method pg_ctl)
 ```
 
-The helper validates the tag, detects PostgreSQL 14–18, Linux amd64 and
-glibc/musl, verifies the selected archive against that tag's `SHA256SUMS`, and
-safely extracts it. If the target is not a published binary platform, use the
-[PGXN/source path](PGXN.md#install-from-pgxn).
-The [manual release-asset route](docs/INSTALL_EXISTING.md#manual-release-download)
-keeps both the archive and `SHA256SUMS` directly reachable.
-
-Run preflight, then stage files and settings online. Keep the state-directory
-path printed by `install`; staging is not activation:
-
-```bash
-sudo ./pg_local_cache-package/install.sh preflight --database app --mode sql-only
-sudo ./pg_local_cache-package/install.sh install --database app --mode sql-only
-```
-
-Have the operator restart PostgreSQL with the cluster's existing orchestration.
-Then use the exact printed state path for expectation-only activation and
-verification:
-
-```bash
-sudo ./pg_local_cache-package/install.sh verify \
-  --state-directory /var/lib/pg_local_cache/install-state/install-PRINTED-ID
-```
-
-The [existing-database install guide](docs/INSTALL_EXISTING.md) covers checksum
-verification, read-only preflight, online staging, restart, recovery, upgrades,
-existing Docker volumes, HA, managed services, verification and rollback.
+This verifies both helper and package, runs preflight, installs in SQL-only mode,
+restarts through the target PostgreSQL `pg_ctl`, and verifies activation. Use the
+[production install guide](docs/INSTALL_EXISTING.md) when systemd, Patroni,
+Kubernetes, managed PostgreSQL, staged maintenance, RESP, or rollback control is
+required. Unsupported binary platforms use the [PGXN/source path](PGXN.md#install-from-pgxn).
 
 The first installation requires one restart because
 `shared_preload_libraries` is evaluated at postmaster startup. File staging and

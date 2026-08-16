@@ -89,10 +89,9 @@ confirm its path:
 
 The README owns the shortest
 [tag-bound verified fetch](https://github.com/profundium/pg_local_cache#verified-binary-release).
-It detects the local PostgreSQL major and libc, verifies `SHA256SUMS`, safely
-extracts one compatible package, never runs the installer, and prints the
-package path. Continue below from that exact directory; do not substitute a
-wildcard path.
+It detects the local PostgreSQL major and libc, verifies `SHA256SUMS`, and
+safely creates one compatible package directory. Continue below from that exact
+directory; do not substitute a wildcard path.
 
 ### Manual release download
 

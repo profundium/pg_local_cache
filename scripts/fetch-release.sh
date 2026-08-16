@@ -20,7 +20,7 @@ It never executes the downloaded install.sh.
 Options:
   --release-tag TAG       Required immutable tag, for example v1.3.0
   --pg-config PATH        pg_config command or path (default: pg_config)
-  --output-directory DIR  New extraction directory
+  --output-directory DIR  New package directory
   --dry-run               Probe and print selection without network or writes
   -h, --help              Show this help
 EOF
@@ -154,8 +154,7 @@ output_parent="$(dirname -- "$output_directory")"
 
 printf 'release_tag=%s\nasset=%s\ntar=%s\narchive_url=%s\n' \
     "$release_tag" "$asset" "$tar_implementation" "$archive_url"
-printf 'checksum_url=%s\noutput=%s/%s\n' \
-    "$checksum_url" "$output_directory" "$root_name"
+printf 'checksum_url=%s\noutput=%s\n' "$checksum_url" "$output_directory"
 if [[ "$dry_run" == 1 ]]; then
     printf 'dry_run=PASS (no network or writes)\n'
     success=1
@@ -300,18 +299,16 @@ done < "$validated_root/RELEASE-METADATA"
     && -n "$metadata_build_image" ]] \
     || fail "release metadata does not match the selected asset"
 
-hash_output="$(sha256sum "$archive")" || fail "could not rehash validated archive"
-[[ "${hash_output%%[[:space:]]*}" == "$expected_hash" ]] \
-    || fail "archive changed after validation"
-mkdir -m 0700 "$output_directory"
+mkdir -m 0700 "$output_directory" \
+    || fail "could not create package directory"
 created_output=1
-tar -xzf "$archive" -C "$output_directory" \
-    || fail "final archive extraction failed"
-extracted_path="$output_directory/$root_name"
+mv -- "$validated_root"/* "$output_directory"/ \
+    || fail "could not publish validated release"
+extracted_path="$output_directory"
 [[ -d "$extracted_path" && -x "$extracted_path/install.sh" ]] \
-    || fail "final extracted release is incomplete"
+    || fail "published release is incomplete"
 
 printf 'archive_sha256=%s\nextracted_path=%s\n' "$actual_hash" "$extracted_path"
-printf 'next_command='; printf '%q ' "$extracted_path/install.sh" preflight; printf '\n'
+printf 'next_command=sudo '; printf '%q ' "$extracted_path/install.sh" install; printf '\n'
 printf 'install_executed=no\n'
 success=1

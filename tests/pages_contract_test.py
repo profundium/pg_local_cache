@@ -300,7 +300,12 @@ class PagesSourceContracts(unittest.TestCase):
             self.assertIn(RELEASES_LATEST, source)
             self.assertNotIn("/releases/latest/download", source)
         for marker in (
+            "set -e",
             "tag=vX.Y.Z",
+            "db=app",
+            'pg_config="$(command -v pg_config)"',
+            'psql="$(command -v psql)"',
+            'destination="$(pwd -P)/pg_local_cache-package"',
             'tmp="$(mktemp -d)"',
             "trap 'rm -rf -- \"$tmp\"' EXIT",
             "curl -fsSL",
@@ -313,7 +318,10 @@ class PagesSourceContracts(unittest.TestCase):
             "sha256sum --check --strict",
             'bash "$tmp/fetch-release.sh"',
             '--release-tag "$tag"',
-            '--output-directory "$(pwd -P)/pg_local_cache-package"',
+            '--pg-config "$pg_config"',
+            '--output-directory "$destination"',
+            'sudo "$destination/install.sh" install',
+            '--database "$db" --pg-config "$pg_config" --psql "$psql" --restart-method pg_ctl',
         ):
             self.assertIn(marker, readme)
         self.assertNotIn("mktemp -d", install)
@@ -341,15 +349,13 @@ class PagesSourceContracts(unittest.TestCase):
         binary = readme.split("## Verified binary release", 1)[1].split(
             "## Optional RESP2 endpoint", 1
         )[0]
-        order = [
-            binary.index('"$destination/install.sh" preflight'),
-            binary.index('"$destination/install.sh" install'),
-            binary.index("operator restart PostgreSQL"),
-            binary.index('"$destination/install.sh" verify'),
-        ]
-        self.assertEqual(order, sorted(order))
-        self.assertIn("staging is not activation", binary)
-        self.assertIn("--state-directory", binary)
+        self.assertEqual(binary.count("```bash"), 1)
+        command = binary.split("```bash\n", 1)[1].split("\n```", 1)[0]
+        self.assertNotIn("\n", command)
+        self.assertNotIn('"$destination/install.sh" preflight', binary)
+        self.assertIn('sudo "$destination/install.sh" install', binary)
+        self.assertIn("--restart-method pg_ctl", binary)
+        self.assertIn("verifies activation", binary)
         for marker in (
             "Existing Docker volume",
             "Patroni and HA",
