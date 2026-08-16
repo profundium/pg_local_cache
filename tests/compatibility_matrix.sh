@@ -128,6 +128,7 @@ artifact_preflight_smoke() {
     docker exec "$artifact_smoke_container" pg_isready \
         --username postgres --dbname app >/dev/null
     docker cp "$release_root/." "$artifact_smoke_container:/artifact/"
+    docker exec --user root "$artifact_smoke_container" chown -R 0:0 /artifact
     if [[ "$variant" == alpine3.23 ]]; then
         docker exec --user root "$artifact_smoke_container" sh -ec \
             '! command -v runuser >/dev/null 2>&1 && command -v su-exec >/dev/null'

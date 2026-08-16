@@ -1310,6 +1310,7 @@ SH
     docker cp "${repository_directory}/scripts/install-existing.sh" \
         "$container_id:${package_root}/install.sh"
 fi
+compose exec -T --user root postgres chown -R 0:0 "$package_root"
 compose exec -T --user root postgres chmod 0755 "$package_root/install.sh"
 install_output="$(
     compose exec -T --user root postgres \

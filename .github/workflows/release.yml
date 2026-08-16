@@ -293,6 +293,7 @@ jobs:
           docker exec "$container" pg_isready --username postgres \
             --dbname postgres >/dev/null
           docker cp "$extracted_root/." "$container:/artifact/"
+          docker exec --user root "$container" chown -R 0:0 /artifact
           before="$(docker exec "$container" sha256sum \
             /var/lib/postgresql/data/postgresql.auto.conf)"
           docker exec "$container" /artifact/install.sh preflight \
