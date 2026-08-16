@@ -2004,23 +2004,21 @@ class ReleaseContracts(unittest.TestCase):
         )
         self.assertNotIn("pg_local_cache_version:${version}", release)
 
-    def test_release_requires_both_exact_commit_benchmark_artifacts(self) -> None:
+    def test_release_requires_exact_commit_sql_benchmark_artifact(self) -> None:
         source = RELEASE.read_text(encoding="utf-8")
         start = source.index(
             "- name: Preserve benchmark evidence from successful CI"
         )
         end = source.index("- name: Create and verify checksums", start)
         evidence_step = source[start:end]
-        self.assertIn("comparison-smoke", evidence_step)
         self.assertIn("sql-only-benchmark-smoke", evidence_step)
         self.assertIn("scripts/validate_benchmark_evidence.py", evidence_step)
         self.assertIn('--revision "$RELEASE_SHA"', evidence_step)
         self.assertIn(
-            "--whole ci-evidence/comparison/whole-row.json", evidence_step
-        )
-        self.assertIn(
             "--sql-only ci-evidence/sql-only/sql-only.json", evidence_step
         )
+        self.assertNotIn("comparison-smoke", evidence_step)
+        self.assertNotIn("--whole", evidence_step)
         self.assertNotIn("comparison.json", evidence_step)
         self.assertNotIn("if ! gh run download", evidence_step)
         self.assertNotIn("artifact was not available", evidence_step)
@@ -2039,9 +2037,8 @@ class ReleaseContracts(unittest.TestCase):
             "PGLC_BENCH_MIN_OPS",
         ):
             self.assertNotIn(obsolete, combined)
-        self.assertIn('PGLC_BENCH_SINGLEFLIGHT_WAIT_MS: "250"', ci)
-        self.assertIn('PGLC_BENCH_ROW_RESP_MIN_OPS: "10000"', ci)
-        self.assertIn('PGLC_BENCH_ROW_WIDTH_MIN_OPS: "0"', ci)
+        self.assertIn('PGLC_BENCH_SINGLEFLIGHT_WAIT_MS: "250"', benchmark)
+        self.assertIn('PGLC_BENCH_ROW_RESP_MIN_OPS: "10000"', benchmark)
         self.assertNotIn("PGLC_BENCH_ROW_SQL_", combined)
 
 

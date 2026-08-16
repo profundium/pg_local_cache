@@ -85,16 +85,15 @@ class KvikWireContractTests(unittest.TestCase):
         dispatch = c_function(WORKER, "execute_command_inner")
         mget_at = dispatch.index('pglc_resp_arg_equals(&args[0], "MGET")')
         self.assertLess(dispatch.index("if (!client->authenticated)"), mget_at)
-        self.assertLess(dispatch.index("is_get ="), mget_at)
         self.assertIn("PGLC_MGET_MAX_KEYS + 1", dispatch)
-        self.assertIn("command_get(mapping, raw_key, 0, response_length)", dispatch)
+        self.assertNotIn('pglc_resp_arg_equals(&args[0], "GET")', dispatch)
 
         mget = c_function(WORKER, "command_mget")
         validate_at = mget.index("resolve_wire_key(")
         deadline_at = mget.index("TimestampTzPlusMilliseconds(")
         canonical_at = mget.index("canonicalize_key(")
-        count_at = mget.index("client_gets")
-        read_at = mget.index("command_get(")
+        count_at = mget.index("client_mget_keys")
+        read_at = mget.index("command_mget_one(")
         self.assertLess(deadline_at, validate_at)
         self.assertLess(validate_at, canonical_at)
         self.assertLess(canonical_at, count_at)
@@ -107,35 +106,35 @@ class KvikWireContractTests(unittest.TestCase):
         self.assertIn("raw_keys[key_index], deadline", mget)
         self.assertIn("ERR MGET deadline exceeded", mget)
 
-        get = c_function(WORKER, "command_get")
-        wait_loop = get[get.index("for (;;)") :]
-        self.assertIn("TimestampDifferenceMilliseconds(", get)
-        self.assertIn("begin_spi_transaction(statement_timeout_ms)", get)
-        self.assertIn("ERR MGET deadline exceeded", get)
+        one = c_function(WORKER, "command_mget_one")
+        wait_loop = one[one.index("for (;;)") :]
+        self.assertIn("TimestampDifferenceMilliseconds(", one)
+        self.assertIn("begin_spi_transaction(statement_timeout_ms)", one)
+        self.assertIn("ERR MGET deadline exceeded", one)
         self.assertLess(
             wait_loop.index("GetCurrentTimestamp() >= deadline"),
             wait_loop.index("pglc_cache_claim_load("),
         )
         self.assertLess(
-            get.index("ERR MGET deadline exceeded"),
-            get.index("begin_spi_transaction(statement_timeout_ms)"),
+            one.index("ERR MGET deadline exceeded"),
+            one.index("begin_spi_transaction(statement_timeout_ms)"),
         )
         self.assertIn("#define PGLC_MGET_MAX_KEYS 1024", RESP_LIMITS)
 
 
 class WholeRowWorkerContractTests(unittest.TestCase):
-    def test_get_stores_validated_tuple_payload_and_returns_row_json(self):
-        get = c_function(WORKER, "command_get")
-        self.assertIn("pglc_row_payload_encode", get)
-        self.assertIn("PGLC_ROW_PAYLOAD_FLAG_HAS_JSON", get)
-        self.assertIn("cached_row_json", get)
-        self.assertIn("source_row_json", get)
-        self.assertIn("row JSON exceeds the RESP limit", get)
-        self.assertIn("database_payload_cacheable", get)
-        self.assertIn("pglc_cache_lookup_quiet", get)
-        self.assertIn("note_resp_cache_lookup(true, false)", get)
-        self.assertIn("note_resp_cache_lookup(false, false)", get)
-        self.assertNotIn("pglc_cache_lookup(mapping, canonical", get)
+    def test_mget_stores_validated_tuple_payload_and_returns_row_json(self):
+        one = c_function(WORKER, "command_mget_one")
+        self.assertIn("pglc_row_payload_encode", one)
+        self.assertIn("PGLC_ROW_PAYLOAD_FLAG_HAS_JSON", one)
+        self.assertIn("cached_row_json", one)
+        self.assertIn("source_row_json", one)
+        self.assertIn("row JSON exceeds the RESP limit", one)
+        self.assertIn("database_payload_cacheable", one)
+        self.assertIn("pglc_cache_lookup_quiet", one)
+        self.assertIn("note_resp_cache_lookup(true, false)", one)
+        self.assertIn("note_resp_cache_lookup(false, false)", one)
+        self.assertNotIn("pglc_cache_lookup(mapping, canonical", one)
 
         source = c_function(WORKER, "source_row_json")
         self.assertIn("slot_getallattrs(slot)", source)

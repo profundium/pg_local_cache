@@ -19,7 +19,7 @@ on:
         default: 3
         type: number
       pipeline:
-        description: GET pipeline depth
+        description: MGET pipeline depth
         required: true
         default: "32"
         type: choice
@@ -100,7 +100,7 @@ jobs:
           retention-days: 30
 
   sql-only:
-    name: SQL-only GET/MGET API (prepared + unnamed extended)
+    name: SQL-only MGET API (prepared + unnamed extended)
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     steps:

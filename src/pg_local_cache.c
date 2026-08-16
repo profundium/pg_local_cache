@@ -298,7 +298,7 @@ pglc_define_gucs(void)
 							NULL);
 
 	DefineCustomIntVariable("pg_local_cache.singleflight_wait_ms",
-							"Maximum time a RESP GET waits for another worker loading the same key.",
+							"Maximum time a RESP MGET waits for another worker loading the same key.",
 							NULL,
 							&pglc_singleflight_wait_ms,
 							25,
@@ -621,7 +621,7 @@ pglc_shmem_startup(void)
 		pg_atomic_init_u64(&pglc_shared->client_disconnects, 0);
 		pg_atomic_init_u64(&pglc_shared->client_requests, 0);
 		pg_atomic_init_u64(&pglc_shared->client_request_errors, 0);
-		pg_atomic_init_u64(&pglc_shared->client_gets, 0);
+		pg_atomic_init_u64(&pglc_shared->client_mget_keys, 0);
 		pg_atomic_init_u64(&pglc_shared->client_sets, 0);
 		pg_atomic_init_u64(&pglc_shared->client_dels, 0);
 		pg_atomic_init_u64(&pglc_shared->pass_to_main, 0);
@@ -2679,7 +2679,7 @@ pglc_stats_json(void)
 		",\"client_disconnect\":" UINT64_FORMAT
 		",\"client_requests\":" UINT64_FORMAT
 		",\"client_request_errors\":" UINT64_FORMAT
-		",\"client_gets\":" UINT64_FORMAT
+		",\"client_mget_keys\":" UINT64_FORMAT
 		",\"client_sets\":" UINT64_FORMAT
 		",\"client_dels\":" UINT64_FORMAT
 		",\"cache_hit_in_main\":" UINT64_FORMAT
@@ -2721,7 +2721,7 @@ pglc_stats_json(void)
 		pg_atomic_read_u64(&pglc_shared->client_disconnects),
 		pg_atomic_read_u64(&pglc_shared->client_requests),
 		pg_atomic_read_u64(&pglc_shared->client_request_errors),
-		pg_atomic_read_u64(&pglc_shared->client_gets),
+		pg_atomic_read_u64(&pglc_shared->client_mget_keys),
 		pg_atomic_read_u64(&pglc_shared->client_sets),
 		pg_atomic_read_u64(&pglc_shared->client_dels),
 		/* Every RESP hit comes from the shared/global hash in this design. */

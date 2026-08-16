@@ -121,26 +121,6 @@ sudo ./pg_local_cache-package/install.sh install --database app --mode resp --to
 Keep the listener on `127.0.0.1` or behind authenticated TLS. RESP has no
 per-client PostgreSQL ACL context.
 
-## Upgrade from 1.x
-
-Version 2.0 has two breaking changes:
-
-- ordinary `SELECT` uses PostgreSQL's planner; use `local_cache.mget` for
-  explicit cached reads;
-- both `local_cache.get` overloads (`anyelement` and `text[]`) are removed.
-
-Before upgrading, move single-row reads to one-element `local_cache.mget` calls
-and read array element `[1]`. Composite keys become a one-row `text[][]` input.
-Remove `pg_local_cache.sql_cache` from PostgreSQL configuration.
-
-Install the new files, restart the cluster, then update SQL objects:
-
-```sql
-ALTER EXTENSION pg_local_cache UPDATE;
-SELECT local_cache.reconcile_all();
-SELECT local_cache.health();
-```
-
 ## Troubleshooting
 
 - preload error: confirm the target cluster's config and restart it;

@@ -109,7 +109,7 @@ class VersionClassificationTests(unittest.TestCase):
         )
         self.assertEqual(
             auto_version.classify_message(
-                "docs: explain migration\n\nBREAKING CHANGE: old API removed"
+                "docs: mark incompatible release\n\nBREAKING CHANGE: public API changed"
             ),
             "major",
         )

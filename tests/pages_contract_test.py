@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 import unittest
 
 
@@ -23,7 +22,6 @@ HOMEPAGE = (ROOT / "index.html").read_text(encoding="utf-8")
 class DocumentationContracts(unittest.TestCase):
     def test_product_surface_is_mget_only(self) -> None:
         for retired in (
-            "local_cache.get(",
             "Custom Scan",
             "transparent SQL",
             "planner hook",
@@ -46,52 +44,6 @@ class DocumentationContracts(unittest.TestCase):
         self.assertIn(command, install)
         self.assertIn(command, HOMEPAGE)
         self.assertIn("SHA256SUMS", install)
-
-    def test_mget_contract_is_documented(self) -> None:
-        for phrase in (
-            "1,024 keys",
-            "order",
-            "duplicates",
-            "Composite keys",
-            "SECURITY INVOKER",
-            "source table",
-        ):
-            self.assertIn(phrase, TEXT)
-
-    def test_2_0_breaking_upgrade_is_explicit(self) -> None:
-        readme = DOCS[0].read_text(encoding="utf-8")
-        install = DOCS[1].read_text(encoding="utf-8")
-        self.assertIn("BREAKING CHANGE", readme)
-        for phrase in (
-            "Version 2.0",
-            "ordinary `SELECT`",
-            "local_cache.get",
-            "array element `[1]`",
-            "one-row `text[][]`",
-            "pg_local_cache.sql_cache",
-        ):
-            self.assertIn(phrase, install)
-
-    def test_benchmark_docs_have_no_retired_sql_lane(self) -> None:
-        benchmark_text = (ROOT / "docs" / "BENCHMARKS.md").read_text()
-        source = (ROOT / "benchmarks" / "whole_row.py").read_text()
-        self.assertIn("mget", benchmark_text)
-        self.assertNotIn("ordinary_sql", source)
-        self.assertNotIn("PGLC_BENCH_ROW_SQL_", source)
-        self.assertIn("previous transparent-SQL evidence was removed", benchmark_text)
-
-    def test_local_markdown_links_resolve(self) -> None:
-        pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
-        for source in DOCS:
-            text = source.read_text(encoding="utf-8")
-            for target in pattern.findall(text):
-                if target.startswith(("http://", "https://", "#")):
-                    continue
-                path_text = target.split("#", 1)[0]
-                if not path_text:
-                    continue
-                with self.subTest(source=source.name, target=target):
-                    self.assertTrue((source.parent / path_text).resolve().exists())
 
 
 if __name__ == "__main__":

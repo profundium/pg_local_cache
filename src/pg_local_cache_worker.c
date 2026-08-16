@@ -120,8 +120,8 @@ static bool cached_row_json(PgLocalCacheMapping *mapping,
 							MemoryContext result_context,
 							char **json, Size *json_length);
 static void ensure_mapping_current(const PgLocalCacheMapping *mapping);
-static char *command_get(PgLocalCacheMapping *mapping, const char *raw_key,
-							 TimestampTz deadline, Size *response_length);
+static char *command_mget_one(PgLocalCacheMapping *mapping, const char *raw_key,
+							  TimestampTz deadline, Size *response_length);
 static char *command_mget(PgLocalCacheRespArg *args, int argc,
 							  Size *response_length);
 static char *command_set(PgLocalCacheMapping *mapping, const char *raw_key,
@@ -1024,7 +1024,6 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 	char	   *key_error;
 	PgLocalCacheMapping *mapping;
 	bool		is_delete;
-	bool		is_get;
 	bool		is_set;
 
 	if (argc == 0)
@@ -1070,23 +1069,16 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 								  response_length);
 
 	/* Keep the dominant cache commands at the front of the dispatch path. */
-	is_get = pglc_resp_arg_equals(&args[0], "GET");
-	is_set = !is_get && pglc_resp_arg_equals(&args[0], "SET");
-	is_delete = !is_get && !is_set && pglc_resp_arg_equals(&args[0], "DEL");
-	if (is_get || is_set || is_delete)
+	is_set = pglc_resp_arg_equals(&args[0], "SET");
+	is_delete = !is_set && pglc_resp_arg_equals(&args[0], "DEL");
+	if (is_set || is_delete)
 	{
-		if ((is_get && argc != 2) ||
-			(is_set && argc != 3) ||
+		if ((is_set && argc != 3) ||
 			(is_delete && argc != 2))
 			return pglc_resp_error("ERR wrong number of arguments",
 								  response_length);
 		if (!resolve_wire_key(&args[1], &mapping, &raw_key, &key_error))
 			return pglc_resp_error(key_error, response_length);
-		if (is_get)
-		{
-			pg_atomic_fetch_add_u64(&pglc_shared->client_gets, 1);
-			return command_get(mapping, raw_key, 0, response_length);
-		}
 		if (is_set)
 		{
 			pg_atomic_fetch_add_u64(&pglc_shared->client_sets, 1);
@@ -1511,7 +1503,7 @@ cached_row_json(PgLocalCacheMapping *mapping,
 }
 
 /*
- * A source row may be wider than one fixed-size cache entry.  KVik-style GET
+ * A source row may be wider than one fixed-size cache entry.  An MGET element
  * must still return it from PostgreSQL, so render it in a bounded temporary
  * context and simply skip cache admission.  Inspect every source attribute
  * before row_to_json: a composite can contain tiny external TOAST pointers
@@ -1653,8 +1645,8 @@ note_resp_cache_lookup(bool hit, bool negative)
 }
 
 static char *
-command_get(PgLocalCacheMapping *mapping, const char *raw_key,
-			TimestampTz deadline, Size *response_length)
+command_mget_one(PgLocalCacheMapping *mapping, const char *raw_key,
+				 TimestampTz deadline, Size *response_length)
 {
 	Datum		key_values[PGLC_MAX_KEY_COLUMNS];
 	char	   *canonical;
@@ -1808,7 +1800,7 @@ command_get(PgLocalCacheMapping *mapping, const char *raw_key,
 		pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
 		if (SPI_execute_plan(mapping->get_plan, values, NULL, true, 1) !=
 			SPI_OK_SELECT)
-			elog(ERROR, "pg_local_cache GET plan failed");
+			elog(ERROR, "pg_local_cache MGET plan failed");
 		ensure_mapping_current(mapping);
 		if (SPI_processed == 1)
 		{
@@ -1930,13 +1922,13 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 		(void) canonical;
 	}
 
-	pg_atomic_fetch_add_u64(&pglc_shared->client_gets, (uint64) key_count);
+	pg_atomic_fetch_add_u64(&pglc_shared->client_mget_keys, (uint64) key_count);
 	initStringInfo(&response);
 	appendStringInfo(&response, "*%d\r\n", key_count);
 	for (key_index = 0; key_index < key_count; key_index++)
 	{
 		Size		element_length;
-		char	   *element = command_get(
+		char	   *element = command_mget_one(
 			mappings[key_index], raw_keys[key_index], deadline, &element_length);
 
 		if (element_length > 0 && element[0] == '-')

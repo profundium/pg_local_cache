@@ -862,7 +862,7 @@ try:
     last = None
     while time.monotonic() < deadline:
         try:
-            last = client.command("GET", key(expected_schema))
+            last = helper.mget_one(client, key(expected_schema))
             if isinstance(last, str) and json.loads(last).get("value") == "schema-row":
                 break
         except (helper.RespError, json.JSONDecodeError) as error:
@@ -878,7 +878,7 @@ try:
         last = None
         while time.monotonic() < deadline:
             try:
-                last = client.command("GET", key(rejected_schema))
+                last = helper.mget_one(client, key(rejected_schema))
             except helper.RespError as error:
                 last = error
                 if "unknown KVik table mapping" in str(error):
@@ -1367,8 +1367,8 @@ def command(*parts: bytes) -> bytes:
 
 
 key = f'CRUD:{os.environ["PG_LOCAL_CACHE_DATABASE"]}.public.phase2_resp:{{"id":1}}'.encode()
-response = command(b"GET", key)
-assert response.startswith(b"$") and b"fresh-installer-cache" in response, response
+response = command(b"MGET", key)
+assert response.startswith(b"*1\r\n$") and b"fresh-installer-cache" in response, response
 PY
 check_auth_framing
 

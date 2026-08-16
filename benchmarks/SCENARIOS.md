@@ -3,7 +3,7 @@
 `make benchmark` runs:
 
 - SQL `mget` against direct and stock PostgreSQL baselines;
-- RESP `GET` against Valkey and Redis;
+- one-key RESP `MGET` against Valkey and Redis;
 - RESP response-width regression.
 
 Use `make benchmark-test` before changing a harness. Environment variables

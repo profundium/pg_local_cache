@@ -64,7 +64,6 @@ class PgxnMetadataContracts(unittest.TestCase):
                 "performance",
                 "shared-memory",
                 "primary-key",
-                "custom-scan",
                 "transactions",
                 "sql",
                 "postgresql",

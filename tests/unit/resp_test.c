@@ -41,7 +41,7 @@ static void
 test_complete_requests(void)
 {
 	const char *request =
-		"*2\r\n$3\r\nGET\r\n$10\r\nusers:0042\r\n"
+		"*2\r\n$4\r\nMGET\r\n$10\r\nusers:0042\r\n"
 		"*1\r\n$4\r\nPING\r\n";
 	PgLocalCacheRespArg args[PGLC_RESP_MAX_ARGS];
 	const char *error;
@@ -53,8 +53,8 @@ test_complete_requests(void)
 	CHECK(status == 1);
 	CHECK(error == NULL);
 	CHECK(argc == 2);
-	CHECK(consumed == strlen("*2\r\n$3\r\nGET\r\n$10\r\nusers:0042\r\n"));
-	CHECK(pglc_resp_arg_equals(&args[0], "get"));
+	CHECK(consumed == strlen("*2\r\n$4\r\nMGET\r\n$10\r\nusers:0042\r\n"));
+	CHECK(pglc_resp_arg_equals(&args[0], "mget"));
 	CHECK(args[1].len == 10);
 	CHECK(memcmp(args[1].data, "users:0042", 10) == 0);
 
@@ -88,7 +88,7 @@ test_binary_and_empty_bulk_strings(void)
 static void
 test_all_valid_prefixes_are_incomplete(void)
 {
-	const char *request = "*2\r\n$3\r\nGET\r\n$5\r\nns:k1\r\n";
+	const char *request = "*2\r\n$4\r\nMGET\r\n$5\r\nns:k1\r\n";
 	Size		length = strlen(request);
 	Size		prefix;
 
@@ -126,12 +126,12 @@ test_malformed_requests(void)
 		{"*\r\n", "empty decimal length"},
 		{"*1\n", "invalid decimal length"},
 		{"*9223372036854775808\r\n", "decimal length overflow"},
-		{"*1\r\n+3\r\nGET\r\n", "command arguments must be bulk strings"},
+		{"*1\r\n+4\r\nMGET\r\n", "command arguments must be bulk strings"},
 		{"*1\r\n$-1\r\n", "invalid bulk string length"},
 		{"*1\r\n$65537\r\n", "invalid bulk string length"},
 		{"*1\r\n$x\r\n", "invalid decimal length"},
 		{"*1\r\n$\r\n", "empty decimal length"},
-		{"*1\r\n$3\r\nGET\n\n", "bulk string is not terminated by CRLF"},
+		{"*1\r\n$4\r\nMGET\n\n", "bulk string is not terminated by CRLF"},
 	};
 	Size		i;
 

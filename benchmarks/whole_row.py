@@ -181,8 +181,8 @@ def wait_for_mapping(
         connection: compare.RespConnection | None = None
         try:
             connection = compare.RespConnection(target, config.auth_token)
-            last = connection.command("GET", row_key(1))
-            if last == expected[0]:
+            last = connection.command("MGET", row_key(1))
+            if last == [expected[0]]:
                 return
         except (OSError, compare.RespError) as error:
             last = error
@@ -221,9 +221,9 @@ def populate_external_target(
         connection.close()
 
 
-def get_frames(config: compare.Config) -> list[bytes]:
+def mget_frames(config: compare.Config) -> list[bytes]:
     return [
-        compare.RespConnection.encode_command("GET", row_key(row_id))
+        compare.RespConnection.encode_command("MGET", row_key(row_id))
         for row_id in range(1, config.keys + 1)
     ]
 
@@ -299,7 +299,7 @@ def variable_worker(
             for index in indexes:
                 response = connection.read_response()
                 completed_at = time.perf_counter_ns()
-                if response != expected[index]:
+                if response != [expected[index]]:
                     result.errors += 1
                     if len(result.messages) < 5:
                         result.messages.append(
@@ -528,7 +528,7 @@ def resp_comparison(
     config: compare.Config,
     expected: list[bytes],
 ) -> tuple[dict[str, Any], list[str]]:
-    frames = get_frames(config)
+    frames = mget_frames(config)
     for target in compare.TARGETS[1:]:
         populate_external_target(target, config, expected)
     reset_pg_local_cache(config)
@@ -636,7 +636,7 @@ def width_sweep(
         setup_mapped_postgres(config, payload_size)
         expected = fetch_expected_rows(config)
         wait_for_mapping(target, config, expected)
-        frames = get_frames(config)
+        frames = mget_frames(config)
         warm_variable(target, config, frames, expected)
         runs: list[dict[str, Any]] = []
         for repetition in range(config.repetitions):

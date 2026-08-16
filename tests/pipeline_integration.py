@@ -144,6 +144,12 @@ class RespConnection:
         raise ValueError(f"unsupported RESP prefix {prefix!r}")
 
 
+def mget_one(client: RespConnection, key: str) -> object:
+    response = client.command("MGET", key)
+    assert isinstance(response, list) and len(response) == 1, response
+    return response[0]
+
+
 def psql_args(query: str) -> list[str]:
     return psql_base_args() + ["-c", query]
 
@@ -183,7 +189,7 @@ def wait_for_mapping(client: RespConnection, key: str) -> bytes:
     deadline = time.monotonic() + 10
     while True:
         try:
-            value = client.command("GET", key)
+            value = mget_one(client, key)
             assert isinstance(value, bytes)
             return value
         except RespError as error:
@@ -197,7 +203,7 @@ def wait_for_mapping(client: RespConnection, key: str) -> bytes:
 def assert_eventual_value(client: RespConnection, key: str, expected: bytes) -> None:
     deadline = time.monotonic() + 5
     while True:
-        value = client.command("GET", key)
+        value = mget_one(client, key)
         if value == expected:
             return
         if time.monotonic() >= deadline:
@@ -309,17 +315,17 @@ def test_fragmented_suffix_and_order(table: str) -> None:
     client = RespConnection()
     try:
         ping = client.encode("PING")
-        get = client.encode("GET", crud_key(table, 1))
+        mget = client.encode("MGET", crud_key(table, 1))
         echo = client.encode("ECHO", "after-fragment")
-        split = len(get) - 3
+        split = len(mget) - 3
 
         # Reading PONG proves the server parsed the complete prefix while the
         # next frame was still incomplete and retained in its input buffer.
-        client.socket.sendall(ping + get[:split])
+        client.socket.sendall(ping + mget[:split])
         assert client.read_response() == "PONG"
-        for byte in get[split:] + echo:
+        for byte in mget[split:] + echo:
             client.socket.sendall(bytes((byte,)))
-        assert client.read_response() == row_bytes(1, "initial")
+        assert client.read_response() == [row_bytes(1, "initial")]
         assert client.read_response() == b"after-fragment"
         assert client.command("PING") == "PONG"
     finally:
@@ -331,8 +337,8 @@ def test_command_error_does_not_poison_batch(table: str) -> None:
     try:
         client.socket.sendall(
             client.encode("PING")
-            + client.encode("GET", crud_key(table, "not-a-bigint"))
-            + client.encode("GET", crud_key(table, 1))
+            + client.encode("MGET", crud_key(table, "not-a-bigint"))
+            + client.encode("MGET", crud_key(table, 1))
             + client.encode("ECHO", "after-error")
         )
         assert client.read_response() == "PONG"
@@ -341,7 +347,7 @@ def test_command_error_does_not_poison_batch(table: str) -> None:
             raise AssertionError("invalid key did not return a PostgreSQL error")
         except RespError as error:
             assert "PostgreSQL" in str(error)
-        assert client.read_response() == row_bytes(1, "initial")
+        assert client.read_response() == [row_bytes(1, "initial")]
         assert client.read_response() == b"after-error"
         assert client.command("PING") == "PONG"
     finally:
@@ -353,12 +359,12 @@ def test_warm_pipeline_has_no_sql_reads(table: str) -> None:
     try:
         key = crud_key(table, 1)
         expected = row_bytes(1, "initial")
-        assert client.command("GET", key) == expected
+        assert mget_one(client, key) == expected
         before = json.loads(client.command("STAT"))
         count = 128
-        client.socket.sendall(client.encode("GET", key) * count)
+        client.socket.sendall(client.encode("MGET", key) * count)
         for _ in range(count):
-            assert client.read_response() == expected
+            assert client.read_response() == [expected]
         after = json.loads(client.command("STAT"))
         assert after["cache_misses"] - before["cache_misses"] == 0
         assert after["database_reads"] - before["database_reads"] == 0
@@ -399,7 +405,12 @@ def test_mget(table: str, composite_table: str) -> None:
         except RespError as error:
             assert "unknown KVik table mapping" in str(error)
         after_invalid = json.loads(client.command("STAT"))
-        for counter in ("client_gets", "cache_hits", "cache_misses", "database_reads"):
+        for counter in (
+            "client_mget_keys",
+            "cache_hits",
+            "cache_misses",
+            "database_reads",
+        ):
             assert after_invalid[counter] == before_invalid[counter], (
                 counter,
                 before_invalid,
@@ -420,7 +431,7 @@ def test_mget(table: str, composite_table: str) -> None:
             row_bytes(2, "x" * BACKPRESSURE_VALUE_BYTES),
         ], mixed
         after = json.loads(client.command("STAT"))
-        assert after["client_gets"] - before["client_gets"] == 5
+        assert after["client_mget_keys"] - before["client_mget_keys"] == 5
         assert after["cache_hits"] - before["cache_hits"] == 3
         assert after["cache_misses"] - before["cache_misses"] == 2
         assert after["database_reads"] - before["database_reads"] == 2
@@ -428,7 +439,7 @@ def test_mget(table: str, composite_table: str) -> None:
         repeated = client.command("MGET", *mixed_arguments)
         assert repeated == mixed
         repeated_stats = json.loads(client.command("STAT"))
-        assert repeated_stats["client_gets"] - after["client_gets"] == 5
+        assert repeated_stats["client_mget_keys"] - after["client_mget_keys"] == 5
         assert repeated_stats["cache_hits"] - after["cache_hits"] == 5
         assert repeated_stats["negative_hits"] - after["negative_hits"] == 1
         assert repeated_stats["database_reads"] == after["database_reads"]
@@ -499,12 +510,12 @@ def test_half_close_drains_final_pipeline(table: str) -> None:
     try:
         client.socket.sendall(
             client.encode("ECHO", "before-half-close")
-            + client.encode("GET", crud_key(table, 1))
+            + client.encode("MGET", crud_key(table, 1))
             + client.encode("ECHO", "after-half-close")
         )
         client.socket.shutdown(socket.SHUT_WR)
         assert client.read_response() == b"before-half-close"
-        assert client.read_response() == row_bytes(1, "initial")
+        assert client.read_response() == [row_bytes(1, "initial")]
         assert client.read_response() == b"after-half-close"
         try:
             client.read_response()
@@ -532,20 +543,20 @@ def test_backpressure_preserves_every_response(table: str) -> None:
         client.socket.settimeout(20)
         key = crud_key(table, 2)
         expected = row_bytes(2, "x" * BACKPRESSURE_VALUE_BYTES)
-        assert client.command("GET", key) == expected
+        assert mget_one(client, key) == expected
         peer = same_worker_peer(client)
         before = json.loads(peer.command("STAT"))
-        encoded_get = client.encode("GET", key)
+        encoded_mget = client.encode("MGET", key)
         tail = (
             client.encode("DEL", crud_key(table, 3))
-            + client.encode("GET", crud_key(table, 3))
+            + client.encode("MGET", crud_key(table, 3))
         )
         count = min(
             1024,
-            (MAX_PIPELINE_INPUT_BYTES - len(tail) - 1) // len(encoded_get),
+            (MAX_PIPELINE_INPUT_BYTES - len(tail) - 1) // len(encoded_mget),
         )
         assert count >= 256
-        batch = encoded_get * count + tail
+        batch = encoded_mget * count + tail
         assert len(batch) < MAX_PIPELINE_INPUT_BYTES
         client.socket.sendall(batch)
         client.socket.shutdown(socket.SHUT_WR)
@@ -566,13 +577,13 @@ def test_backpressure_preserves_every_response(table: str) -> None:
             time.sleep(0.01)
         assert peer.command("ECHO", "same-worker-live") == b"same-worker-live"
         for _ in range(count):
-            assert client.read_response() == expected
+            assert client.read_response() == [expected]
         # The mutating command is deliberately placed after enough large
         # replies to trigger output backpressure.  Its input cursor may only
         # advance after the integer response is durably queued; replaying DEL
         # after EAGAIN would return 0 instead of 1.
         assert client.read_response() == 1
-        assert client.read_response() is None
+        assert client.read_response() == [None]
         assert sql(f"SELECT count(*) FROM public.{table} WHERE id = 3") == "0"
         after = json.loads(peer.command("STAT"))
         assert (
@@ -668,7 +679,7 @@ def test_transactional_commit_and_rollback(table: str) -> None:
             during_commit_writer["invalidations"]
             == before_commit_writer["invalidations"]
         )
-        assert client.command("GET", key) == initial
+        assert mget_one(client, key) == initial
         after_open_commit_get = json.loads(client.command("STAT"))
         assert (
             after_open_commit_get["cache_hits"]
@@ -686,7 +697,7 @@ def test_transactional_commit_and_rollback(table: str) -> None:
         finish_writer(commit_writer, commit=True)
         after_commit = json.loads(client.command("STAT"))
         assert after_commit["invalidations"] - before_commit_writer["invalidations"] == 1
-        assert client.command("GET", key) == committed
+        assert mget_one(client, key) == committed
         after_commit_refill = json.loads(client.command("STAT"))
         assert (
             after_commit_refill["cache_misses"]
@@ -700,7 +711,7 @@ def test_transactional_commit_and_rollback(table: str) -> None:
         )
         assert after_commit_refill["cache_hits"] == after_commit["cache_hits"]
         before_commit_hit = after_commit_refill
-        assert client.command("GET", key) == committed
+        assert mget_one(client, key) == committed
         after_commit_hit = json.loads(client.command("STAT"))
         assert after_commit_hit["cache_hits"] - before_commit_hit["cache_hits"] == 1
         assert after_commit_hit["cache_misses"] == before_commit_hit["cache_misses"]
@@ -720,7 +731,7 @@ def test_transactional_commit_and_rollback(table: str) -> None:
             during_rollback_writer["invalidations"]
             == before_rollback_writer["invalidations"]
         )
-        assert client.command("GET", key) == committed
+        assert mget_one(client, key) == committed
         after_open_rollback_get = json.loads(client.command("STAT"))
         assert (
             after_open_rollback_get["cache_hits"]
@@ -741,7 +752,7 @@ def test_transactional_commit_and_rollback(table: str) -> None:
             before_rollback_hit["invalidations"]
             == before_rollback_writer["invalidations"]
         )
-        assert client.command("GET", key) == committed
+        assert mget_one(client, key) == committed
         after_rollback_hit = json.loads(client.command("STAT"))
         assert (
             after_rollback_hit["cache_hits"]

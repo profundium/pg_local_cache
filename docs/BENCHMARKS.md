@@ -4,7 +4,7 @@ The repository keeps two focused harnesses:
 
 - `benchmarks/sql_only.py`: `local_cache.mget` versus an indexed source
   query on mapped and stock PostgreSQL;
-- `benchmarks/whole_row.py`: warm RESP `GET` versus Valkey and Redis, plus a
+- `benchmarks/whole_row.py`: warm one-key RESP `MGET` versus Valkey and Redis, plus a
   response-width sweep.
 
 There is no ordinary-`SELECT` cache lane because ordinary SQL is not
@@ -47,7 +47,7 @@ Relative gates are optional because hardware and container scheduling vary.
 
 ## RESP method
 
-The whole-row harness sends identical authenticated `GET` frames and validates
+The whole-row harness sends identical authenticated one-key `MGET` frames and validates
 every returned byte on pg_local_cache, Valkey, and Redis. It also repeats the
 pg_local_cache measurement across configured row widths.
 

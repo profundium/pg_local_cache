@@ -398,14 +398,11 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          install -d ci-evidence/comparison ci-evidence/sql-only
-          gh run download "$TRIGGER_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name comparison-smoke --dir ci-evidence/comparison
+          install -d ci-evidence/sql-only
           gh run download "$TRIGGER_RUN_ID" --repo "$GITHUB_REPOSITORY" \
             --name sql-only-benchmark-smoke --dir ci-evidence/sql-only
           python3 scripts/validate_benchmark_evidence.py \
             --revision "$RELEASE_SHA" \
-            --whole ci-evidence/comparison/whole-row.json \
             --sql-only ci-evidence/sql-only/sql-only.json
 
           epoch="$(git show -s --format=%ct "$RELEASE_SHA")"

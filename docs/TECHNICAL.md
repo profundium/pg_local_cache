@@ -121,8 +121,8 @@ RESP uses the same mappings and shared cache. The wire key is:
 CRUD:database.schema.table:{"pk_column":<json-scalar>,...}
 ```
 
-Supported commands are authenticated `GET`, bounded `MGET`, `SET`,
-`DEL`, and scoped invalidation. RESP workers use one configured PostgreSQL
+Supported commands are authenticated bounded `MGET`, `SET`, `DEL`, and scoped
+invalidation. RESP workers use one configured PostgreSQL
 role; they do not inherit each network client's database ACLs.
 
 The endpoint has no TLS. Bind to loopback or place it behind an authenticated

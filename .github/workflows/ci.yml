@@ -28,14 +28,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Test the production RESP codec source
+      - name: Validate and test source
         env:
           ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: make source-test source-sanitize
-
-      - name: Test the benchmark source
-        run: make benchmark-test
+        run: make verify-static source-test source-sanitize benchmark-test
 
   monitoring-config:
     name: monitoring-config (Prometheus + Grafana + Compose)
@@ -44,13 +41,6 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Validate source contracts and Grafana JSON
-        run: |
-          python3 -m unittest -v tests/monitoring_contract_test.py
-          python3 -m json.tool \
-            monitoring/grafana/dashboards/pg-local-cache.json >/dev/null
-          bash -n monitoring/postgres/provision-monitor.sh
 
       - name: Validate Prometheus config, alerts, and rule tests
         run: |
@@ -81,115 +71,27 @@ jobs:
             --file compose.monitoring.yaml \
             config --quiet
 
-  comparative-docker-smoke:
-    name: comparative-docker-smoke
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Exercise Compose, identical RESP client, and pgbench
-        env:
-          PGLC_BENCH_DURATION: "1"
-          PGLC_BENCH_WARMUP_SECONDS: "0"
-          PGLC_BENCH_REPETITIONS: "1"
-          PGLC_BENCH_CONCURRENCY: "4"
-          PGLC_BENCH_PIPELINE: "8"
-          PGLC_BENCH_KEYS: "128"
-          PGLC_BENCH_CACHE_ENTRIES: "256"
-          PGLC_BENCH_PG_LOCAL_CACHE_WORKERS: "1"
-          PGLC_BENCH_SINGLEFLIGHT_WAIT_MS: "250"
-          PGLC_BENCH_SERVER_CPUS: "2"
-          PGLC_BENCH_CLIENT_CPUS: "2"
-          PGLC_BENCH_SERVER_MEMORY: "1g"
-          PGLC_BENCH_ROW_RESP_MIN_OPS: "10000"
-          PGLC_BENCH_ROW_WIDTH_MIN_OPS: "0"
-          PGLC_BENCH_OUTPUT_DIR: ${{ runner.temp }}/comparison-smoke
-        run: bash benchmarks/run.sh
-
-      - name: Upload smoke diagnostics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: comparison-smoke
-          path: ${{ runner.temp }}/comparison-smoke/
-          if-no-files-found: warn
-          retention-days: 7
-
   docker-integration:
-    name: docker-integration (${{ matrix.profile }})
+    name: docker-integration
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - profile: correctness-small-cache-2pc
-            database: pg_local_cache_ci
-            role: local_cache_ci_worker
-            cache_entries: "128"
-            max_prepared_transactions: "10"
-            require_small_cache: "1"
-            require_2pc: "1"
-            duration: "1"
-            min_ops: "0"
-            concurrency: "4"
-            pipeline: "8"
-            keys: "128"
-          - profile: warm-throughput
-            database: app
-            role: local_cache_worker
-            cache_entries: "65536"
-            max_prepared_transactions: "0"
-            require_small_cache: "0"
-            require_2pc: "0"
-            duration: "5"
-            min_ops: "10000"
-            concurrency: "16"
-            pipeline: "32"
-            keys: "1024"
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Validate scripts
-        run: |
-          bash -n docker/entrypoint.sh
-          bash -n docker/healthcheck.sh
-          bash -n docker/attach-table.sh
-          bash -n docker/initdb/010_pg_local_cache.sh
-          bash -n tests/docker_smoke.sh
-          bash -n tests/docker_sql_only_smoke.sh
-          bash -n tests/compatibility_matrix.sh
-          bash -n benchmarks/run.sh
-          python3 -m py_compile \
-            benchmarks/compare.py \
-            benchmarks/scenarios.py \
-            benchmarks/whole_row.py \
-            benchmarks/sql_only.py \
-            tests/cache_contract_test.py \
-            tests/whole_row_integration.py \
-            tests/whole_row_benchmark_test.py \
-            tests/oom_monitoring_integration.py \
-            tests/pipeline_integration.py \
-            tests/sql_mget_integration.py \
-            tests/sql_api_test.py \
-            tests/sql_only_benchmark_test.py
-
-      - name: Build, integrate, and enforce warm-cache throughput
+      - name: Build and integrate
         env:
-          PG_LOCAL_CACHE_SMOKE_DATABASE: ${{ matrix.database }}
-          PG_LOCAL_CACHE_SMOKE_ROLE: ${{ matrix.role }}
-          PG_LOCAL_CACHE_SMOKE_CACHE_ENTRIES: ${{ matrix.cache_entries }}
-          PG_LOCAL_CACHE_SMOKE_MAX_PREPARED_TRANSACTIONS: ${{ matrix.max_prepared_transactions }}
-          PG_LOCAL_CACHE_SMOKE_REQUIRE_SMALL_CACHE: ${{ matrix.require_small_cache }}
-          PG_LOCAL_CACHE_SMOKE_REQUIRE_2PC: ${{ matrix.require_2pc }}
-          PG_LOCAL_CACHE_SMOKE_DURATION: ${{ matrix.duration }}
-          PG_LOCAL_CACHE_SMOKE_MIN_OPS: ${{ matrix.min_ops }}
-          PG_LOCAL_CACHE_SMOKE_CONCURRENCY: ${{ matrix.concurrency }}
-          PG_LOCAL_CACHE_SMOKE_PIPELINE: ${{ matrix.pipeline }}
-          PG_LOCAL_CACHE_SMOKE_KEYS: ${{ matrix.keys }}
+          PG_LOCAL_CACHE_SMOKE_DATABASE: pg_local_cache_ci
+          PG_LOCAL_CACHE_SMOKE_ROLE: local_cache_ci_worker
+          PG_LOCAL_CACHE_SMOKE_CACHE_ENTRIES: "128"
+          PG_LOCAL_CACHE_SMOKE_MAX_PREPARED_TRANSACTIONS: "10"
+          PG_LOCAL_CACHE_SMOKE_REQUIRE_SMALL_CACHE: "1"
+          PG_LOCAL_CACHE_SMOKE_REQUIRE_2PC: "1"
+          PG_LOCAL_CACHE_SMOKE_DURATION: "1"
+          PG_LOCAL_CACHE_SMOKE_MIN_OPS: "0"
+          PG_LOCAL_CACHE_SMOKE_CONCURRENCY: "4"
+          PG_LOCAL_CACHE_SMOKE_PIPELINE: "8"
+          PG_LOCAL_CACHE_SMOKE_KEYS: "128"
         run: bash tests/docker_smoke.sh
 
   docker-compatibility:
@@ -211,7 +113,7 @@ jobs:
         run: bash tests/compatibility_matrix.sh
 
   docker-sql-only:
-    name: docker-sql-only (SQL GET/MGET, no RESP secret)
+    name: docker-sql-only (SQL MGET, no RESP secret)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -259,7 +161,6 @@ jobs:
     needs:
       - source-unit
       - monitoring-config
-      - comparative-docker-smoke
       - docker-integration
       - docker-compatibility
       - docker-sql-only

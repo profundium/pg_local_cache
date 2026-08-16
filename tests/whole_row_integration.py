@@ -30,7 +30,7 @@ KVIK_STAT_NAMES = {
     "client_disconnect",
     "client_requests",
     "client_request_errors",
-    "client_gets",
+    "client_mget_keys",
     "client_sets",
     "client_dels",
     "cache_hit",
@@ -115,6 +115,12 @@ class RespClient:
                 return None
             return [self._read_response() for _ in range(length)]
         raise ValueError(f"unsupported RESP prefix {prefix!r}")
+
+
+def mget_one(client: RespClient, key: str) -> object:
+    response = client.command("MGET", key)
+    assert isinstance(response, list) and len(response) == 1, response
+    return response[0]
 
 
 def sql_identifier(value: str) -> str:
@@ -214,7 +220,7 @@ def wait_for_json(client: RespClient, key: str) -> dict[str, object]:
     deadline = time.monotonic() + 10
     while True:
         try:
-            response = client.command("GET", key)
+            response = mget_one(client, key)
             assert isinstance(response, str), response
             parsed = json.loads(response)
             assert isinstance(parsed, dict), parsed
@@ -229,7 +235,7 @@ def wait_for_absent(client: RespClient, key: str) -> None:
     deadline = time.monotonic() + 10
     while True:
         try:
-            response = client.command("GET", key)
+            response = mget_one(client, key)
             assert response is None, response
             return
         except RespError as error:
@@ -325,13 +331,13 @@ def main() -> None:
 
         # A negative entry suppresses duplicate PostgreSQL reads for RESP.
         before_missing = stat(client)
-        assert client.command("GET", missing_key) is None
-        assert client.command("GET", missing_key) is None
+        assert mget_one(client, missing_key) is None
+        assert mget_one(client, missing_key) is None
         after_missing = stat(client)
         assert after_missing["database_reads"] - before_missing["database_reads"] == 1
         assert after_missing["negative_hits"] - before_missing["negative_hits"] >= 1
         # A committed insert invalidates the negative entry before the new row
-        # is visible, so GET cannot remain falsely empty.
+        # is visible, so MGET cannot remain falsely empty.
         missing_id = 9_000_000_000 + os.getpid()
         app_sql(
             f"INSERT INTO {relation} VALUES (7, {missing_id}, 'after-negative', "
@@ -376,7 +382,7 @@ def main() -> None:
         assert_resp_error(client, "invalid input syntax", "SET", key_two, "{")
         assert client.command("DEL", key_two) == 1
         assert client.command("DEL", key_two) == 0
-        assert client.command("GET", key_two) is None
+        assert mget_one(client, key_two) is None
 
         # Writable rows support identity PKs and stored generated non-key
         # columns.  The wire key supplies the explicit identity value while
@@ -455,14 +461,14 @@ def main() -> None:
             "ROLLBACK;\n"
         )
         assert wait_for_json(client, key_one)["payload"] == "committed"
-        assert client.command("GET", moved_key) is None
+        assert mget_one(client, moved_key) is None
         app_script(
             "BEGIN;\n"
             f"UPDATE {relation} SET tenant_id = 8, id = 11 "
             "WHERE tenant_id = 7 AND id = 1;\n"
             "COMMIT;\n"
         )
-        assert client.command("GET", key_one) is None
+        assert mget_one(client, key_one) is None
         moved = wait_for_json(client, moved_key)
         assert moved["tenant_id"] == 8 and moved["id"] == 11, moved
         assert moved["payload"] == "committed", moved
@@ -511,7 +517,7 @@ def main() -> None:
         assert_resp_error(
             client,
             "row JSON exceeds the RESP limit",
-            "GET",
+            "MGET",
             crud_key(table, 100, 100),
         )
 

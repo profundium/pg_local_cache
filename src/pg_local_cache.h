@@ -150,7 +150,7 @@ typedef struct PgLocalCacheSharedState
 	pg_atomic_uint64 client_disconnects;
 	pg_atomic_uint64 client_requests;
 	pg_atomic_uint64 client_request_errors;
-	pg_atomic_uint64 client_gets;
+	pg_atomic_uint64 client_mget_keys;
 	pg_atomic_uint64 client_sets;
 	pg_atomic_uint64 client_dels;
 	pg_atomic_uint64 pass_to_main;

@@ -153,8 +153,8 @@ class CacheOwnershipSourceTests(unittest.TestCase):
         self.assertLess(generation_at, publish_at)
         self.assertIn("entry->loading = false;", store)
 
-        command_get = c_function(WORKER, "command_get")
-        self.assertGreaterEqual(command_get.count("owns_load ? load_id : 0"), 2)
+        mget_one = c_function(WORKER, "command_mget_one")
+        self.assertGreaterEqual(mget_one.count("owns_load ? load_id : 0"), 2)
 
     def test_claim_rejects_loader_from_an_obsolete_transaction_fence(self) -> None:
         claim = c_function(CORE, "pglc_cache_claim_load")
@@ -227,9 +227,9 @@ class CacheOwnershipSourceTests(unittest.TestCase):
     def test_waiter_metric_is_once_per_request_not_once_per_poll(self) -> None:
         claim = c_function(CORE, "pglc_cache_claim_load")
         self.assertNotIn("singleflight_waiters", claim)
-        command_get = c_function(WORKER, "command_get")
-        self.assertIn("waiter_counted", command_get)
-        self.assertEqual(command_get.count("pglc_note_singleflight_waiter();"), 1)
+        mget_one = c_function(WORKER, "command_mget_one")
+        self.assertIn("waiter_counted", mget_one)
+        self.assertEqual(mget_one.count("pglc_note_singleflight_waiter();"), 1)
 
     def test_follower_retries_after_owner_publishes_new_generation(self) -> None:
         claim = c_function(CORE, "pglc_cache_claim_load")
