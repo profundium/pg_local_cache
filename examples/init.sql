@@ -1,5 +1,11 @@
 \set ON_ERROR_STOP on
 CREATE EXTENSION pg_local_cache;
+-- Mapping registration validates this role even with the RESP listener disabled.
+CREATE ROLE local_cache_worker LOGIN NOSUPERUSER NOINHERIT NOCREATEDB
+    NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+GRANT CONNECT ON DATABASE pglc_demo TO local_cache_worker;
+GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
+GRANT SELECT ON local_cache.mapping TO local_cache_worker;
 CREATE ROLE demo LOGIN PASSWORD 'demo-only';
 CREATE TABLE public.items (
     id bigint PRIMARY KEY,
