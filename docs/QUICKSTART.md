@@ -82,7 +82,7 @@ Look at `sql_cache_hits`, `sql_cache_misses`, `sql_cache_fills`, and
 With Node.js 20 or later:
 
 ```bash
-npm --prefix examples/node-postgres install --ignore-scripts
+npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
 

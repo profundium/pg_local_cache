@@ -2,32 +2,8 @@ name: Documentation site
 
 on:
   push:
-    branches: ["master"]
-    paths:
-      - "_config.yml"
-      - "_data/**"
-      - "_layouts/**"
-      - "assets/**"
-      - "docs/**"
-      - "index.html"
-      - "robots.txt"
-      - "sitemap.xml"
-      - "scripts/check_site.py"
-      - "tests/pages_contract_test.py"
-      - ".github/workflows/pages.yml"
+    branches: [master, docs/2.0-adoption]
   pull_request:
-    paths:
-      - "_config.yml"
-      - "_data/**"
-      - "_layouts/**"
-      - "assets/**"
-      - "docs/**"
-      - "index.html"
-      - "robots.txt"
-      - "sitemap.xml"
-      - "scripts/check_site.py"
-      - "tests/pages_contract_test.py"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -37,24 +13,81 @@ concurrency:
   cancel-in-progress: true
 jobs:
   validate:
-    if: github.event_name == 'pull_request'
+    name: Pages artifact (${{ matrix.target }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(github.repository == 'profundium/pg_local_cache' && '["production"]' || '["production", "preview"]') }}
+    env:
+      SITE_BASE_URL: ${{ matrix.target == 'production' && 'https://profundium.github.io/pg_local_cache/' || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Build Jekyll site without deployment
+      - name: Configure the fork preview
+        if: matrix.target == 'preview'
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          url = urlsplit(os.environ['SITE_BASE_URL'])
+          path = Path('_config.yml')
+          text = path.read_text()
+          for key, value in {'url': f'{url.scheme}://{url.netloc}', 'baseurl': url.path.rstrip('/')}.items():
+              text, count = re.subn(rf'^{key}:.*$', f'{key}: {json.dumps(value)}', text, flags=re.M)
+              assert count == 1, key
+          path.write_text(text + '\npreview: true\n')
+          PY
+      - name: Build Jekyll site
         uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1
         with:
           source: ./
           destination: ./_site
-      - name: Check the rendered site
-        run: python3 scripts/check_site.py _site
+      - name: Check metadata and record the build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          args=()
+          if [[ "$TARGET" == preview ]]; then args+=(--preview); fi
+          python3 scripts/check_site.py _site --base-url "$SITE_BASE_URL" "${args[@]}"
+          python3 scripts/site_manifest.py write _site --base-url "$SITE_BASE_URL" --commit "$GITHUB_SHA"
+      - name: Package the Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          name: pages-${{ matrix.target }}
+          path: _site
+          retention-days: 14
+      - name: Unpack the exact upload for browser testing
+        run: |
+          mkdir _candidate
+          tar -xf "$RUNNER_TEMP/artifact.tar" -C _candidate
+          diff -qr _site _candidate
+      - name: Install browser test dependencies
+        run: |
+          python3 -m pip install -r tests/browser/requirements.txt
+          python3 -m playwright install --with-deps chromium webkit
+      - name: Test pages and user interactions
+        run: python3 tests/browser/site_smoke.py _candidate
+      - name: Keep screenshots, traces and checks
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-${{ matrix.target }}
+          path: qa-artifacts/browser/
+          retention-days: 14
+          if-no-files-found: error
 
   deploy:
-    if: github.event_name != 'pull_request'
+    name: Publish verified Pages artifact
+    needs: validate
+    if: >-
+      github.event_name != 'pull_request' &&
+      ((github.repository == 'profundium/pg_local_cache' && github.ref == 'refs/heads/master') ||
+       (github.repository == 'aicopilot-fr/pg_local_cache' && github.ref == 'refs/heads/docs/2.0-adoption'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
       pages: write
@@ -65,17 +98,38 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Configure Pages
+      - name: Check Pages configuration
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
-      - name: Build Jekyll site
-        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1
-        with:
-          source: ./
-          destination: ./_site
-      - name: Check the rendered site before publishing
-        run: python3 scripts/check_site.py _site
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
-      - name: Deploy to GitHub Pages
+      - name: Deploy the tested artifact without rebuilding
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          artifact_name: pages-${{ github.repository == 'profundium/pg_local_cache' && 'production' || 'preview' }}
+      - name: Download the same artifact for post-deploy comparison
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pages-${{ github.repository == 'profundium/pg_local_cache' && 'production' || 'preview' }}
+          path: _download
+      - name: Verify the published commit and every file
+        env:
+          PAGES_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          mkdir _published
+          tar -xf _download/artifact.tar -C _published
+          python3 scripts/site_manifest.py verify _published --base-url "$PAGES_URL" --attempts 12
+      - name: Install browser test dependencies
+        run: |
+          python3 -m pip install -r tests/browser/requirements.txt
+          python3 -m playwright install --with-deps chromium webkit
+      - name: Test the live site
+        env:
+          PAGES_URL: ${{ steps.deployment.outputs.page_url }}
+        run: python3 tests/browser/site_smoke.py _published --url "$PAGES_URL"
+      - name: Keep live-site evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-live
+          path: qa-artifacts/browser/
+          retention-days: 14
+          if-no-files-found: warn

@@ -6,10 +6,11 @@ services:
       context: https://github.com/profundium/pg_local_cache.git#8569a937abb9ba1859ffb9c2a4dbc34f076fbe20
       target: extension
       args:
-        POSTGRES_MAJOR: "16"
+        POSTGRES_MAJOR: "${PGLC_DEMO_PG:-16}"
         POSTGRES_VARIANT: bookworm
         PGLC_BUILD_ID: 8569a937abb9ba1859ffb9c2a4dbc34f076fbe20
     environment:
+      PGDATA: /var/lib/postgresql/data
       POSTGRES_DB: pglc_demo
       POSTGRES_PASSWORD: demo-only
     ports:

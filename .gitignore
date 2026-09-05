@@ -19,7 +19,8 @@ docs/superpowers
 .codegraph
 *.dSYM/
 examples/node-postgres/node_modules/
-examples/node-postgres/package-lock.json
 /benchmark.json
 /benchmark.md
 /benchmark-artifact/
+
+/qa-artifacts/

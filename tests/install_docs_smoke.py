@@ -51,6 +51,7 @@ def main() -> None:
         # The image contains the compiled extension, but no demo SQL is mounted.
         docker("run", "--detach", "--name", name, "--network", "none",
                "--tmpfs", "/var/lib/postgresql/data",
+               "-e", "PGDATA=/var/lib/postgresql/data",
                "-e", "POSTGRES_DB=app", "-e", "POSTGRES_PASSWORD=disposable-test-only",
                image, "postgres", *options)
         for _ in range(60):

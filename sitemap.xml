@@ -5,6 +5,7 @@ sitemap: false
 ---
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+{% unless site.preview %}
 {% assign pages = site.pages | sort: 'url' %}
 {% for item in pages %}{% if item.sitemap != false %}{% if item.home or item.layout == 'doc' %}
   <url>
@@ -12,4 +13,5 @@ sitemap: false
     {% if item.last_modified_at %}<lastmod>{{ item.last_modified_at | date: '%Y-%m-%d' }}</lastmod>{% endif %}
   </url>
 {% endif %}{% endif %}{% endfor %}
+{% endunless %}
 </urlset>

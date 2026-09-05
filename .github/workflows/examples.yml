@@ -11,8 +11,18 @@ concurrency:
   cancel-in-progress: true
 jobs:
   demo:
+    name: Documented commands (PG ${{ matrix.postgres }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [14, 15, 16, 17, 18]
+    env:
+      PGLC_DEMO_PG: ${{ matrix.postgres }}
+      # Also check the documented non-default port path.
+      PGLC_DEMO_PORT: "55433"
+      PGLC_HARNESS_REF: ${{ github.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Unit tests
@@ -23,34 +33,26 @@ jobs:
         run: docker compose -f examples/compose.yaml up --build --wait --wait-timeout 120
       - name: Check source-install instructions on an empty database
         run: python3 tests/install_docs_smoke.py
-      - name: Install the example dependency
-        run: npm --prefix examples/node-postgres install --ignore-scripts
-      - name: Check application reads and concurrent transactions
-        run: npm --prefix examples/node-postgres run demo
-      - name: Exercise the benchmark and preserve measurements
-        env:
-          CLIENTS: "2"
-          REQUESTS: "40"
-          REPEATS: "1"
-          BATCHES: "1,16"
-          PGLC_HARNESS_REF: ${{ github.sha }}
+      - name: Run quickstart commands and the default benchmark
+        run: python3 tests/quickstart_docs_smoke.py
+      - name: Preserve the measurements and their environment
         run: |
           mkdir -p benchmark-artifact
-          npm --prefix examples/node-postgres run --silent benchmark > benchmark-artifact/results.json
-          python3 scripts/benchmark_report.py benchmark-artifact/results.json > benchmark-artifact/report.md
-          cat benchmark-artifact/report.md
+          cp benchmark.json benchmark-artifact/results.json
+          python3 scripts/benchmark_report.py benchmark.json > benchmark-artifact/report.md
           cp examples/node-postgres/package-lock.json benchmark-artifact/
           docker compose -f examples/compose.yaml config > benchmark-artifact/compose.yaml
           docker image inspect "$(docker compose -f examples/compose.yaml images -q postgres)" > benchmark-artifact/image.json
       - name: Upload benchmark records (not a performance gate)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: demo-benchmark
+          name: demo-benchmark-pg${{ matrix.postgres }}
           path: benchmark-artifact/
-          if-no-files-found: ignore
+          if-no-files-found: warn
+          retention-days: 14
       - name: Logs and cleanup
         if: always()
         run: |
           docker compose -f examples/compose.yaml logs --no-color
-          docker compose -f examples/compose.yaml down
+          docker compose -f examples/compose.yaml down --volumes

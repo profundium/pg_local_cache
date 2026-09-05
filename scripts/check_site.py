@@ -63,11 +63,12 @@ class Page(HTMLParser):
             self.in_json = False
 
 
-def check(root):
+def check(root, base=BASE, preview=False):
+    base = base.rstrip("/") + "/"
     errors, pages, titles, descriptions = [], {}, set(), set()
     for path in root.rglob("*.html"):
         relative = path.relative_to(root).as_posix()
-        url = BASE + (relative[:-10] if relative.endswith("index.html") else relative)
+        url = base + (relative[:-10] if relative.endswith("index.html") else relative)
         page = Page(path.read_text())
         pages[url] = page
         for error in page.errors:
@@ -76,6 +77,8 @@ def check(root):
             errors.append(f"{relative}: expected one h1 and main-content")
         if page.canonical != url:
             errors.append(f"{relative}: incorrect canonical: {page.canonical}")
+        if ("noindex" in page.meta.get("robots", "")) != preview:
+            errors.append(f"{relative}: unexpected indexing policy")
         description = page.meta.get("description", "")
         if not page.title.strip() or page.title in titles:
             errors.append(f"{relative}: missing or duplicate title")
@@ -94,13 +97,13 @@ def check(root):
         for target in page.links:
             absolute = urljoin(url, target)
             parsed = urlsplit(absolute)
-            if parsed.netloc != urlsplit(BASE).netloc:
+            if parsed.netloc != urlsplit(base).netloc:
                 continue
             path_url = parsed._replace(query="", fragment="").geturl()
-            if not path_url.startswith(BASE):
+            if not path_url.startswith(base):
                 errors.append(f"{url}: link escapes baseurl: {target}")
                 continue
-            relative = unquote(path_url[len(BASE):])
+            relative = unquote(path_url[len(base):])
             file = root / (relative + "index.html" if not relative or relative.endswith("/") else relative)
             if not file.is_file():
                 errors.append(f"{url}: missing local target: {target}")
@@ -120,8 +123,10 @@ def check(root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--base-url", default=BASE)
+    parser.add_argument("--preview", action="store_true")
     args = parser.parse_args()
-    failures = check(args.directory)
+    failures = check(args.directory, args.base_url, args.preview)
     if failures:
         parser.exit(1, "\n".join(failures) + "\n")
     print("PASS: built page metadata, JSON-LD, sitemap, links, fragments and copy targets")

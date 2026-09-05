@@ -19,6 +19,7 @@ def module(name):
 
 site = module('check_site')
 report = module('benchmark_report')
+manifest = module('site_manifest')
 
 
 class PagesContracts(unittest.TestCase):
@@ -61,8 +62,10 @@ class PagesContracts(unittest.TestCase):
     def test_sitemap_and_workflow_cover_the_built_pages(self):
         self.assertIn('site.pages', (ROOT / 'sitemap.xml').read_text())
         workflow = (ROOT / '.github/workflows/pages.yml').read_text()
-        self.assertEqual(workflow.count('python3 scripts/check_site.py _site'), 2)
-        self.assertIn('"_data/**"', workflow)
+        self.assertIn('python3 scripts/check_site.py _site', workflow)
+        self.assertIn('needs: validate', workflow)
+        self.assertIn('site_manifest.py verify', workflow)
+        self.assertIn('site_smoke.py _candidate', workflow)
         layout = (ROOT / '_layouts/default.html').read_text()
         self.assertIn('rel="canonical"', layout)
         self.assertIn('application/ld+json', layout)
@@ -87,6 +90,30 @@ class BuiltSiteChecks(unittest.TestCase):
 </head><body><main id="main-content"><h1>Demo</h1><a href="#code">Code</a>
 <pre id="code">SELECT 1</pre><button data-copy="code">Copy</button></main></body></html>''')
         (root / 'sitemap.xml').write_text('''<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://profundium.github.io/pg_local_cache/</loc></url></urlset>''')
+
+    def test_preview_policy_and_canonical_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            base = 'https://aicopilot-fr.github.io/pg_local_cache/'
+            path = root / 'index.html'
+            path.write_text(path.read_text().replace(site.BASE, base).replace('content="index,follow"', 'content="noindex,follow"'))
+            (root / 'sitemap.xml').write_text('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"/>')
+            self.assertEqual(site.check(root, base, preview=True), [])
+            self.assertTrue(site.check(root, base))
+            self.assertTrue(site.check(root, site.BASE, preview=True))
+
+    def test_manifest_records_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            before = manifest.manifest(root, 'a' * 40, site.BASE)
+            self.assertIn('index.html', before['files'])
+            (root / 'index.html').write_text('changed')
+            self.assertNotEqual(before, manifest.manifest(root, 'a' * 40, site.BASE))
+            (root / 'link').symlink_to(root / 'index.html')
+            with self.assertRaises(ValueError):
+                manifest.manifest(root, 'a' * 40, site.BASE)
 
     def test_valid_artifact(self):
         with tempfile.TemporaryDirectory() as directory:

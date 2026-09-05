@@ -9,7 +9,7 @@
     <title>{{ meta_title | escape }}</title>
     <meta name="description" content="{{ meta_description | escape }}">
     <meta name="author" content="pg_local_cache contributors">
-    <meta name="robots" content="{% if page.sitemap == false %}noindex,follow{% else %}index,follow,max-image-preview:large{% endif %}">
+    <meta name="robots" content="{% if site.preview or page.sitemap == false %}noindex,follow{% else %}index,follow,max-image-preview:large{% endif %}">
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#0d1319" media="(prefers-color-scheme: dark)">
     <meta name="color-scheme" content="light dark">
