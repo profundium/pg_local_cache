@@ -5,6 +5,7 @@ seo_title: Install pg_local_cache on PostgreSQL 14-18
 description: Install the pg_local_cache PostgreSQL extension with verified Linux binaries or PGXS, then configure preload, restart, verify, and recover safely.
 section: Install
 permalink: /docs/INSTALL_EXISTING.html
+last_modified_at: "2026-09-05"
 ---
 
 # Install pg_local_cache on an existing PostgreSQL server
@@ -26,6 +27,7 @@ PGXS toolchain. Both paths require one controlled PostgreSQL restart before
 | PGXS source build | Unsupported platform or custom PostgreSQL installation | Your normal operations workflow |
 
 Published binaries support PostgreSQL 14-18 on Linux amd64 with glibc or musl.
+The fixed-version examples below use pg_local_cache 2.0.1.
 
 ## Fast binary install
 
@@ -38,7 +40,7 @@ curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download
 Replace `app` with the database name. This enables SQL-only mode with
 `pg_local_cache.port = 0`.
 
-The bootstrap resolves one immutable release tag, verifies `fetch-release.sh`
+The bootstrap resolves one release tag, verifies `fetch-release.sh`
 against that release's `SHA256SUMS`, selects the matching PostgreSQL and libc
 archive, verifies it, installs, restarts, creates the extension, and runs
 `local_cache.health()`.
@@ -56,8 +58,8 @@ bash install-latest.sh app
 Download a fixed release with its published helper:
 
 ```bash
-curl -fsSLO https://github.com/profundium/pg_local_cache/releases/download/vX.Y.Z/fetch-release.sh
-bash fetch-release.sh --release-tag vX.Y.Z --output-directory ./pg_local_cache-package
+curl -fsSLO https://github.com/profundium/pg_local_cache/releases/download/v2.0.1/fetch-release.sh
+bash fetch-release.sh --release-tag v2.0.1 --output-directory ./pg_local_cache-package
 ```
 
 Run preflight, then choose the restart owner explicitly:
@@ -87,42 +89,73 @@ Use the same `pg_config` as the target PostgreSQL server. Install its server
 development headers, a C compiler, and GNU Make first.
 
 ```bash
-git clone --branch vX.Y.Z --depth 1 https://github.com/profundium/pg_local_cache.git
+git clone --branch v2.0.1 --depth 1 https://github.com/profundium/pg_local_cache.git
 cd pg_local_cache
 make PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
 sudo make install PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
 ```
 
-The checkout must be a clean, immutable revision so the build can record a
-trustworthy build ID. Source installation copies extension files only. Continue
-with preload configuration, restart, `CREATE EXTENSION`, and verification below.
+Build from a clean checkout so the binary records its Git commit. Source
+installation copies extension files only. Continue with preload configuration,
+restart, and the SQL initialization below.
 
 ## Configure before restart
 
-Minimum SQL-only configuration:
+Minimum SQL-only configuration using the default capacity and memory budget:
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
 pg_local_cache.database = 'app'
-pg_local_cache.cache_entries = 100000
+pg_local_cache.role = 'local_cache_worker'
+pg_local_cache.cache_entries = 16384
+pg_local_cache.memory_budget_mb = 384
 pg_local_cache.port = 0
 ```
 
+Keep any existing `shared_preload_libraries` entries. Replace `app` with the
+actual database name here and in the SQL grants below. The memory budget is for
+the extension, not the whole PostgreSQL server.
+
 Size `cache_entries`, relation states, clients, workers, and
 `memory_budget_mb` together. Binary installer preflight rejects inconsistent
-plans. Source builds require the same capacity review before restart.
+plans. Source builds require the same capacity review before restart; do not
+increase the entry count without reviewing the memory budget.
 
-## Create the extension and attach a table
+## Initialize a source installation
 
-After PostgreSQL restarts:
+After restarting, connect to the configured database as a database superuser.
+For a first manual installation, run:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_local_cache;
+CREATE ROLE local_cache_worker LOGIN NOINHERIT NOSUPERUSER
+    NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+GRANT CONNECT ON DATABASE app TO local_cache_worker;
+GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
+GRANT SELECT ON TABLE local_cache.mapping TO local_cache_worker;
+```
+
+The binary installer creates this role and its metadata grants; skip this block
+when it has already completed that setup. For a custom `pg_local_cache.role`,
+use that name consistently. Do not repurpose a role that owns application tables.
+
+**The role is required even with `pg_local_cache.port = 0`.** Table attachment
+validates it in SQL-only mode too. It must be separate from the table owner and
+have the attributes and metadata grants shown above. `attach_table` manages its
+access to each mapped table. No password or network listener is needed for
+SQL-only operation.
+
+## Attach a table
+
+Use an existing permanent table with a supported primary key. As a database
+superuser in the configured database:
+
+```sql
 SELECT local_cache.attach_table('public.items'::regclass);
 SELECT local_cache.health();
 ```
 
-Grant an application only what it needs:
+Grant an existing application role only what it needs:
 
 ```sql
 GRANT SELECT ON public.items TO app_user;
@@ -146,8 +179,8 @@ counters move as expected.
 
 ## Enable optional RESP2
 
-RESP2 adds a listener, worker processes, a dedicated PostgreSQL role, and one
-shared token:
+RESP2 adds a listener, worker processes, and one shared token. It uses the
+same dedicated PostgreSQL role required for table attachment:
 
 ```bash
 sudo ./pg_local_cache-package/install.sh preflight \
@@ -182,6 +215,8 @@ recorded state and operational impact.
 
 - **Preload error:** confirm the target cluster's configuration and restart the
   correct postmaster.
+- **Worker role missing or rejected:** complete the SQL initialization above,
+  including its role attributes and metadata grants, even in SQL-only mode.
 - **Table rejected:** use a permanent, non-partitioned, non-RLS table with a
   supported primary key.
 - **`mget` permission error:** grant source-table `SELECT`, schema `USAGE`, and

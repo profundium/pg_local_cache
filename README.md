@@ -137,12 +137,16 @@ Minimum SQL-only configuration:
 ```conf
 shared_preload_libraries = 'pg_local_cache'
 pg_local_cache.database = 'app'
-pg_local_cache.cache_entries = 100000
+pg_local_cache.role = 'local_cache_worker'
+pg_local_cache.cache_entries = 16384
+pg_local_cache.memory_budget_mb = 384
 pg_local_cache.port = 0
 ```
 
 Preserve existing preload entries. Size cache entries, relation states, clients,
-workers, and the memory budget together before restart.
+workers, and the memory budget together before restart. Manual source installs
+also need the [role and metadata grants](docs/INSTALL_EXISTING.md#initialize-a-source-installation)
+before attaching a table, even when RESP is disabled.
 
 Useful administration functions:
 

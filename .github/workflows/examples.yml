@@ -21,6 +21,8 @@ jobs:
           python3 -m unittest discover -s tests -p pages_contract_test.py -v
       - name: Build the pinned 2.0 demo
         run: docker compose -f examples/compose.yaml up --build --wait --wait-timeout 120
+      - name: Check source-install instructions on an empty database
+        run: python3 tests/install_docs_smoke.py
       - name: Install the example dependency
         run: npm --prefix examples/node-postgres install --ignore-scripts
       - name: Check application reads and concurrent transactions
