@@ -61,10 +61,15 @@ jobs:
           name: pages-${{ matrix.target }}
           path: _site
           retention-days: 14
+      - name: Download the packaged artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pages-${{ matrix.target }}
+          path: _download
       - name: Unpack the exact upload for browser testing
         run: |
           mkdir _candidate
-          tar -xf "$RUNNER_TEMP/artifact.tar" -C _candidate
+          tar -xf _download/artifact.tar -C _candidate
           diff -qr _site _candidate
       - name: Install browser test dependencies
         run: |

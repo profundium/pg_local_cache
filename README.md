@@ -28,7 +28,7 @@ Follow the [quickstart](docs/QUICKSTART.md) to run queries and remove it.
 With Node.js 20 or later, check the result contract and concurrent writes:
 
 ```bash
-npm --prefix examples/node-postgres install --ignore-scripts
+npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
 

@@ -2,10 +2,12 @@
 """Contracts for public docs, built-site validation, and benchmark reporting."""
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import re
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -114,6 +116,26 @@ class BuiltSiteChecks(unittest.TestCase):
             (root / 'link').symlink_to(root / 'index.html')
             with self.assertRaises(ValueError):
                 manifest.manifest(root, 'a' * 40, site.BASE)
+
+    def test_http_verification_rejects_stale_or_changed_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            expected = manifest.manifest(root, 'a' * 40, site.BASE)
+            (root / 'site-manifest.json').write_text(json.dumps(expected))
+            def response(url):
+                return (root / url.removeprefix(site.BASE)).read_bytes()
+            with patch.object(manifest, 'fetch', side_effect=response):
+                manifest.verify(root, site.BASE, 1)
+            stale = {**expected, 'source_commit': 'b' * 40}
+            with patch.object(manifest, 'fetch', return_value=json.dumps(stale).encode()):
+                with self.assertRaisesRegex(ValueError, 'different build'):
+                    manifest.verify(root, site.BASE, 1)
+            def corrupt(url):
+                return b'changed' if url.endswith('index.html') else response(url)
+            with patch.object(manifest, 'fetch', side_effect=corrupt):
+                with self.assertRaisesRegex(ValueError, 'Published bytes differ'):
+                    manifest.verify(root, site.BASE, 1)
 
     def test_valid_artifact(self):
         with tempfile.TemporaryDirectory() as directory:

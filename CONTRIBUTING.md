@@ -3,17 +3,72 @@
 Public documentation describes the 2.0 SQL mget contract. Keep historical
 benchmarks and migration narratives out of these pages.
 
-Run `make verify-static source-test`, plus:
+## Checks before merging
+
+Every pull request runs the source tests, package validation, documentation
+examples, and Pages artifact checks. Check the latest commit, not an older
+successful run. No benchmark throughput threshold is used as a correctness test.
+
+The examples workflow runs PostgreSQL 14–18 on fresh Linux amd64 runners. It
+executes shell blocks taken directly from QUICKSTART.md, including the default
+benchmark, and SQL/configuration extracted from INSTALL_EXISTING.md. The latter
+uses a separate container without demo initialization or external networking.
+The non-default demo port is tested too. Node dependencies come from the
+committed lockfile via `npm ci --ignore-scripts`.
+
+The Pages workflow builds production and fork-preview configurations. Preview
+pages are marked `noindex`; production pages must remain indexable. It packages
+the site with upload-pages-artifact, downloads that archive, unpacks it, checks
+its bytes, and serves it under `/pg_local_cache/` for Playwright. Chromium and
+WebKit each test all pages at 1440, 390 and 320 pixels, plus a JavaScript-disabled
+mobile case. Checks cover metadata, HTTP errors, console errors, horizontal
+overflow, the mobile menu, table of contents, FAQ, and clipboard writes.
+
+Artifacts are kept for 14 days: `pages-production`, `pages-preview`,
+`browser-production`, `browser-preview`, and `demo-benchmark-pg14` through
+`demo-benchmark-pg18`. Browser artifacts contain screenshots, traces, and a
+machine-readable result with the tested source commit. For a PR this is GitHub's
+temporary merge commit, not just its head. Benchmark records identify the
+extension and harness revisions separately.
+
+For a local check after downloading and unpacking a Pages artifact:
 
 ```bash
-node --test examples/node-postgres/queries.test.mjs
-python3 scripts/check_site.py _site
+python3 -m pip install -r tests/browser/requirements.txt
+python3 -m playwright install --with-deps chromium webkit
+python3 tests/browser/site_smoke.py /path/to/unpacked/site
 ```
 
-The second command needs a built Jekyll site. The Pages workflow runs it before
-deployment. The Documentation examples workflow builds the pinned demo, checks
-concurrent transactions, and archives benchmark JSON and the dependency lockfile.
-Shared-runner timings are not a reference performance claim.
+Quick tests do not need Docker or browsers:
+
+```bash
+make verify-static source-test
+node --test examples/node-postgres/queries.test.mjs
+```
+
+## Publishing and checking the live site
+
+Only a push to upstream `master`, or the explicit review branch in the testing
+fork, can publish. Pull requests have read-only permissions and never deploy.
+Publication waits for the artifact's browser checks and uploads no rebuilt copy.
+After deployment, every HTTP resource is checked against the artifact's SHA-256
+manifest and the browser suite runs against the live URL. A stale deployment,
+missing asset, or failed interaction fails the workflow rather than reporting
+that a successful build was a successful publication.
+
+GitHub Pages must already be enabled with **Settings → Pages → Source: GitHub
+Actions**. The workflow token can deploy but cannot grant itself the
+administration permission needed to enable Pages. A disabled site fails at
+`Check Pages configuration`; it is not skipped or treated as a pass. After the
+owner enables Pages, rerun the failed job while its artifact still exists. If
+artifacts have expired, rerun all jobs.
+
+Before merging upstream, require successful CI, package, examples and Pages
+artifact checks on the current commit. To claim a completed preview deployment,
+also require the non-PR `Publish verified Pages artifact` job to pass, including
+its live HTTP and browser steps. Browser engines on Linux do not replace tests
+on physical iOS devices. These tests do not exercise a production restart under
+systemd or Patroni, or guarantee search ranking.
 
 ## Publishing a result
 

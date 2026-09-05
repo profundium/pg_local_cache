@@ -17,7 +17,7 @@ Start the [demo](QUICKSTART.md), install the example's pinned dependency, and
 run its integration assertions:
 
 ```bash
-npm --prefix examples/node-postgres install --ignore-scripts
+npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
 

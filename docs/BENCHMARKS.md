@@ -24,7 +24,7 @@ shared runners, not production capacity estimates.
 Start the [disposable demo](QUICKSTART.md), then run from the repository root:
 
 ```bash
-npm --prefix examples/node-postgres install --ignore-scripts
+npm --prefix examples/node-postgres ci --ignore-scripts
 CLIENTS=4 REQUESTS=2000 REPEATS=3 BATCHES=1,16,64 \
   npm --prefix examples/node-postgres run --silent benchmark > benchmark.json
 python3 scripts/benchmark_report.py benchmark.json > benchmark.md
@@ -76,7 +76,7 @@ Read-path order and write-table order alternate between repetitions.
 `benchmark.json` records extension and harness revisions separately, the
 PostgreSQL and Node.js versions, client OS/architecture/CPU, visible CPU count,
 cache settings, row counts, concurrency, and every sample. Retain the JSON, not
-just the rendered summary. Dependency installation produces a lockfile; retain
+just the rendered summary. Dependencies are pinned by the committed lockfile; retain
 that file with results too.
 
 Each sample includes elapsed time, completed requests/s, requested read keys/s,
