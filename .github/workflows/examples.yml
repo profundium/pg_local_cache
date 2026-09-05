@@ -1,0 +1,54 @@
+name: Documentation examples
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pglc-examples-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  demo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Unit tests
+        run: |
+          node --test examples/node-postgres/queries.test.mjs
+          python3 -m unittest discover -s tests -p pages_contract_test.py -v
+      - name: Build the pinned 2.0 demo
+        run: docker compose -f examples/compose.yaml up --build --wait --wait-timeout 120
+      - name: Install the example dependency
+        run: npm --prefix examples/node-postgres install --ignore-scripts
+      - name: Check application reads and concurrent transactions
+        run: npm --prefix examples/node-postgres run demo
+      - name: Exercise the benchmark and preserve measurements
+        env:
+          CLIENTS: "2"
+          REQUESTS: "40"
+          REPEATS: "1"
+          BATCHES: "1,16"
+          PGLC_HARNESS_REF: ${{ github.sha }}
+        run: |
+          mkdir -p benchmark-artifact
+          npm --prefix examples/node-postgres run --silent benchmark > benchmark-artifact/results.json
+          python3 scripts/benchmark_report.py benchmark-artifact/results.json > benchmark-artifact/report.md
+          cat benchmark-artifact/report.md
+          cp examples/node-postgres/package-lock.json benchmark-artifact/
+          docker compose -f examples/compose.yaml config > benchmark-artifact/compose.yaml
+          docker image inspect "$(docker compose -f examples/compose.yaml images -q postgres)" > benchmark-artifact/image.json
+      - name: Upload benchmark records (not a performance gate)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-benchmark
+          path: benchmark-artifact/
+          if-no-files-found: ignore
+      - name: Logs and cleanup
+        if: always()
+        run: |
+          docker compose -f examples/compose.yaml logs --no-color
+          docker compose -f examples/compose.yaml down

@@ -1,10 +1,14 @@
 title: pg_local_cache
-description: Open-source PostgreSQL extension for bounded shared-memory caching of primary-key rows through SQL mget, with transaction-aware invalidation and RESP2.
+description: PostgreSQL extension for primary-key row caching in shared memory, with an explicit SQL mget API and transaction-aware invalidation.
 url: https://profundium.github.io
 baseurl: /pg_local_cache
 repository: profundium/pg_local_cache
+release_series: "2.0"
 social_image: /assets/social-card.png
 lang: en
+# Add the property owner's real token; empty values emit no verification tag.
+google_site_verification: ""
+bing_site_verification: ""
 markdown: kramdown
 plugins:
   - jekyll-relative-links
@@ -17,8 +21,10 @@ kramdown:
 permalink: pretty
 exclude:
   - README.md
+  - CONTRIBUTING.md
   - PRODUCT.md
   - docker
+  - examples
   - scripts
   - sql
   - src
@@ -26,6 +32,7 @@ exclude:
   - tests
   - Dockerfile
   - Makefile
+  - META.json
   - compose.yaml
   - pg_local_cache.control
   - vendor

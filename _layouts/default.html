@@ -6,38 +6,36 @@
     {% assign meta_image = page.image | default: site.social_image | absolute_url %}
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ meta_title }}</title>
+    <title>{{ meta_title | escape }}</title>
     <meta name="description" content="{{ meta_description | escape }}">
     <meta name="author" content="pg_local_cache contributors">
-    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1">
+    <meta name="robots" content="{% if page.sitemap == false %}noindex,follow{% else %}index,follow,max-image-preview:large{% endif %}">
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#0d1319" media="(prefers-color-scheme: dark)">
     <meta name="color-scheme" content="light dark">
+    {% if site.google_site_verification != '' and site.google_site_verification %}<meta name="google-site-verification" content="{{ site.google_site_verification | escape }}">{% endif %}
+    {% if site.bing_site_verification != '' and site.bing_site_verification %}<meta name="msvalidate.01" content="{{ site.bing_site_verification | escape }}">{% endif %}
     <script>document.documentElement.classList.replace('no-js', 'js');</script>
     <link rel="canonical" href="{{ page.url | absolute_url }}">
-    <link rel="alternate" hreflang="en" href="{{ page.url | absolute_url }}">
-    <link rel="sitemap" type="application/xml" href="{{ '/sitemap.xml' | absolute_url }}">
+    <link rel="sitemap" type="application/xml" href="{{ '/sitemap.xml' | relative_url }}">
     <meta property="og:type" content="{% if page.home %}website{% else %}article{% endif %}">
     <meta property="og:locale" content="en_US">
     <meta property="og:site_name" content="{{ site.title }}">
-    <meta property="og:title" content="{{ meta_title }}">
+    <meta property="og:title" content="{{ meta_title | escape }}">
     <meta property="og:description" content="{{ meta_description | escape }}">
     <meta property="og:url" content="{{ page.url | absolute_url }}">
     <meta property="og:image" content="{{ meta_image }}">
-    <meta property="og:image:secure_url" content="{{ meta_image }}">
-    <meta property="og:image:type" content="image/png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
     <meta property="og:image:alt" content="pg_local_cache PostgreSQL row cache data path">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="{{ meta_title }}">
+    <meta name="twitter:title" content="{{ meta_title | escape }}">
     <meta name="twitter:description" content="{{ meta_description | escape }}">
     <meta name="twitter:image" content="{{ meta_image }}">
-    <meta name="twitter:image:alt" content="pg_local_cache PostgreSQL row cache data path">
     <link rel="icon" href="{{ '/assets/favicon.svg' | relative_url }}" type="image/svg+xml">
     <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
-    {% if page.home %}
     <script type="application/ld+json">
+    {% if page.home %}
     {
       "@context": "https://schema.org",
       "@type": "SoftwareSourceCode",
@@ -50,12 +48,9 @@
       "runtimePlatform": ["PostgreSQL 14", "PostgreSQL 15", "PostgreSQL 16", "PostgreSQL 17", "PostgreSQL 18"],
       "operatingSystem": "Linux amd64 (glibc or musl)",
       "downloadUrl": "https://github.com/{{ site.repository }}/releases/latest",
-      "license": "https://opensource.org/license/mit",
-      "keywords": ["PostgreSQL extension", "PostgreSQL cache", "primary-key cache", "shared memory", "SQL mget", "RESP2"]
+      "license": "https://opensource.org/license/mit"
     }
-    </script>
     {% else %}
-    <script type="application/ld+json">
     {
       "@context": "https://schema.org",
       "@type": "TechArticle",
@@ -63,36 +58,24 @@
       "description": {{ meta_description | jsonify }},
       "url": {{ page.url | absolute_url | jsonify }},
       "image": {{ meta_image | jsonify }},
-      "author": {
-        "@type": "Organization",
-        "name": "pg_local_cache contributors",
-        "url": "https://github.com/{{ site.repository }}/graphs/contributors"
-      },
-      "isPartOf": {
-        "@type": "WebSite",
-        "name": "pg_local_cache documentation",
-        "url": {{ '/' | absolute_url | jsonify }}
-      },
-      "about": {
-        "@type": "SoftwareSourceCode",
-        "name": "pg_local_cache",
-        "codeRepository": "https://github.com/{{ site.repository }}"
-      }
+      {% if page.last_modified_at %}"dateModified": {{ page.last_modified_at | date: '%Y-%m-%d' | jsonify }},{% endif %}
+      "author": {"@type": "Organization", "name": "pg_local_cache contributors", "url": "https://github.com/{{ site.repository }}/graphs/contributors"},
+      "isPartOf": {"@type": "WebSite", "name": "pg_local_cache documentation", "url": {{ '/' | absolute_url | jsonify }}}
     }
-    </script>
     {% endif %}
+    </script>
   </head>
   <body class="{% if page.home %}home{% else %}documentation{% endif %}">
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="site-header">
       <div class="header-inner">
-        <a class="wordmark" href="{{ '/' | relative_url }}" aria-label="pg_local_cache home">pg_local_cache</a>
+        <a class="wordmark" href="{{ '/' | relative_url }}">pg_local_cache</a>
         <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
         <nav id="site-nav" class="site-nav" aria-label="Primary navigation">
-          <a href="{{ '/#sql-api' | relative_url }}">SQL API</a>
-          <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}"{% if page.url == '/docs/INSTALL_EXISTING.html' %} aria-current="page"{% endif %}>Install</a>
-          <a href="{{ '/docs/TECHNICAL.html' | relative_url }}"{% if page.url == '/docs/TECHNICAL.html' %} aria-current="page"{% endif %}>Technical</a>
-          <a class="nav-download" href="https://github.com/{{ site.repository }}/releases/latest">Download</a>
+          <a href="{{ '/docs/QUICKSTART.html' | relative_url }}">Try locally</a>
+          <a href="{{ '/docs/BENCHMARKS.html' | relative_url }}">Benchmarks</a>
+          <a href="{{ '/docs/TECHNICAL.html' | relative_url }}">Reference</a>
+          <a class="nav-download" href="https://github.com/{{ site.repository }}">GitHub</a>
         </nav>
       </div>
     </header>
@@ -100,8 +83,8 @@
     <footer class="site-footer">
       <div class="footer-inner">
         <a class="wordmark" href="{{ '/' | relative_url }}">pg_local_cache</a>
-        <p>PostgreSQL 14-18 / Linux amd64 / MIT</p>
-        <a href="https://github.com/{{ site.repository }}">GitHub</a>
+        <p>{{ site.release_series }} / PostgreSQL 14-18 / Linux amd64 / MIT</p>
+        <a href="https://github.com/{{ site.repository }}/releases/latest">Releases</a>
       </div>
     </footer>
     <script src="{{ '/assets/site.js' | relative_url }}" defer></script>

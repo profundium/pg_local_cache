@@ -4,10 +4,10 @@ layout: default
 <main id="main-content" class="doc-shell">
   <aside class="doc-sidebar">
     <nav class="doc-nav" aria-label="Documentation sections">
-      <p>Documentation</p>
-      <a href="{{ '/#sql-api' | relative_url }}">SQL API</a>
-      <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}"{% if page.url == '/docs/INSTALL_EXISTING.html' %} aria-current="page"{% endif %}>Installation</a>
-      <a href="{{ '/docs/TECHNICAL.html' | relative_url }}"{% if page.url == '/docs/TECHNICAL.html' %} aria-current="page"{% endif %}>Technical reference</a>
+      <p>pg_local_cache {{ site.release_series }}</p>
+      {% for item in site.data.navigation %}
+      <a href="{{ item.url | relative_url }}"{% if page.url == item.url %} aria-current="page"{% endif %}>{{ item.title }}</a>
+      {% endfor %}
     </nav>
     <nav class="doc-toc" aria-label="On this page" data-doc-toc hidden>
       <p>On this page</p>
@@ -16,10 +16,10 @@ layout: default
   </aside>
   <article class="doc-content">
     <div class="doc-heading">
-      <a href="{{ '/' | relative_url }}">pg_local_cache</a>
-      <span>/</span>
-      <span>{{ page.section | default: page.title }}</span>
+      <a href="{{ '/' | relative_url }}">pg_local_cache {{ site.release_series }}</a>
+      <span>/</span><span>{{ page.section | default: page.title }}</span>
     </div>
     {{ content }}
+    {% if page.last_modified_at %}<p>Updated <time datetime="{{ page.last_modified_at | date: '%Y-%m-%d' }}">{{ page.last_modified_at | date: '%B %-d, %Y' }}</time>.</p>{% endif %}
   </article>
 </main>

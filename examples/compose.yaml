@@ -1,0 +1,39 @@
+name: pglc-demo
+services:
+  postgres:
+    build:
+      # pg_local_cache 2.0.1; the demo does not track a moving branch.
+      context: https://github.com/profundium/pg_local_cache.git#8569a937abb9ba1859ffb9c2a4dbc34f076fbe20
+      target: extension
+      args:
+        POSTGRES_MAJOR: "16"
+        POSTGRES_VARIANT: bookworm
+        PGLC_BUILD_ID: 8569a937abb9ba1859ffb9c2a4dbc34f076fbe20
+    environment:
+      POSTGRES_DB: pglc_demo
+      POSTGRES_PASSWORD: demo-only
+    ports:
+      - "127.0.0.1:${PGLC_DEMO_PORT:-55432}:5432"
+    shm_size: 256mb
+    # No existing data directory or persistent volume is mounted.
+    tmpfs:
+      - /var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_local_cache
+      - -c
+      - pg_local_cache.database=pglc_demo
+      - -c
+      - pg_local_cache.port=0
+      - -c
+      - pg_local_cache.cache_entries=1024
+      - -c
+      - pg_local_cache.memory_budget_mb=384
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/010-demo.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d pglc_demo -h 127.0.0.1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

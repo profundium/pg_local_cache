@@ -1,0 +1,32 @@
+name: Workload evaluation
+description: Report a reproducible result or a reason you could not use the extension.
+title: "Workload: "
+body:
+  - type: textarea
+    id: workload
+    attributes:
+      label: What are you trying to improve?
+      description: Query shape, key distribution, row size, read/write mix, and latency target. Remove sensitive data.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: PostgreSQL and extension versions, source revision, CPU/memory limits, OS, container/VM, network, and cache settings.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Commands and results
+      description: Exact commands, benchmark JSON or logs, baseline query, latency, and cache-counter deltas. Include slower samples too.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Did you keep it, reject it, or get blocked during setup? Which constraint matters?
+    validations:
+      required: true

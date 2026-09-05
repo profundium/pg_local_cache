@@ -1,49 +1,54 @@
 # pg_local_cache: PostgreSQL row cache
 
-**Transaction-aware, bounded shared-memory cache for PostgreSQL 14-18
-primary-key row reads.**
+**Version 2.0: explicit SQL mget, bounded shared memory, and transaction-aware
+invalidation for PostgreSQL 14-18.**
 
-`pg_local_cache` is an open-source PostgreSQL extension for repeated exact-key
-lookups. It exposes an explicit SQL `mget` API and an optional RESP2 endpoint.
-PostgreSQL remains the source of truth, and writes invalidate affected cache
-entries transactionally.
+Cache whole rows by their complete primary key. PostgreSQL remains the source
+of truth; ordinary writes invalidate affected entries. Ordinary `SELECT`
+queries are not rewritten. An optional, limited RESP2 endpoint shares the cache.
 
 [Documentation](https://profundium.github.io/pg_local_cache/) |
+[Try locally](docs/QUICKSTART.md) |
+[Benchmarks](docs/BENCHMARKS.md) |
 [Installation](docs/INSTALL_EXISTING.md) |
-[Technical reference](docs/TECHNICAL.md) |
-[Latest release](https://github.com/profundium/pg_local_cache/releases/latest)
+[Technical reference](docs/TECHNICAL.md)
 
-## Why use pg_local_cache
+## Try without changing an existing database
 
-- **Explicit:** only `local_cache.mget(...)` and optional RESP2 commands use the
-  cache. Ordinary `SELECT` keeps the normal PostgreSQL planner and executor.
-- **Transaction-aware:** a transaction reads its own writes from PostgreSQL;
-  commit invalidates old entries and rollback publishes nothing.
-- **Bounded:** shared-memory capacity is fixed at PostgreSQL startup.
-- **Fail-safe:** unsafe state, malformed entries, and oversized rows fall back
-  to an indexed source-table read.
-- **Focused:** whole rows are cached by their complete primary key, not by
-  arbitrary query text.
-
-## Quick start
-
-Supported binary target: **Linux amd64, PostgreSQL 14-18, glibc or musl**.
-
-> **Restart required:** first activation adds `pg_local_cache` to
-> `shared_preload_libraries` and restarts PostgreSQL once.
-
-For a local cluster managed by `pg_ctl`:
+With Docker Compose, from this repository:
 
 ```bash
-curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh | bash -s -- app
+docker compose -f examples/compose.yaml up --build --wait
 ```
 
-Replace `app` with the database name. The bootstrap pins one release, verifies
-checksums, selects the matching binary, installs it, restarts PostgreSQL,
-creates the extension, and checks health.
+The demo builds extension 2.0.1 from a pinned commit. It binds PostgreSQL to
+loopback port 55432, keeps disposable data in tmpfs, and mounts no host database.
+Follow the [quickstart](docs/QUICKSTART.md) to run queries and remove it.
 
-Use the [installation guide](docs/INSTALL_EXISTING.md) for systemd, Patroni,
-Kubernetes, checksum-first installation, source builds, RESP, or rollback.
+With Node.js 20 or later, check the result contract and concurrent writes:
+
+```bash
+npm --prefix examples/node-postgres install --ignore-scripts
+npm --prefix examples/node-postgres run demo
+```
+
+## Measure before adopting
+
+The [benchmark](docs/BENCHMARKS.md) compares `mget` with a prepared
+`WHERE id = ANY($1)` query through the same driver. Both paths return ordered
+whole-row objects, including duplicates and missing positions. It covers warm
+reads, cold cache fills, reads mixed with updates, and write overhead.
+
+```bash
+npm --prefix examples/node-postgres run --silent benchmark > benchmark.json
+python3 scripts/benchmark_report.py benchmark.json
+```
+
+No reference speedup is claimed without a recorded run. The report includes
+requests/s, requested keys/s, read/write p50/p95/p99, cache counters, and the
+configuration. CI checks the harness; shared-runner timings are not a capacity
+estimate. See [row caching vs shared_buffers](docs/row-cache-vs-shared-buffers.md)
+for the work a hit can avoid and the work it still does.
 
 ## Read whole rows by primary key
 
@@ -53,7 +58,7 @@ Attach a permanent table with a supported primary key:
 SELECT local_cache.attach_table('public.items'::regclass);
 ```
 
-Fetch ordered JSON rows:
+Fetch an ordered `text[]` of JSON rows:
 
 ```sql
 SELECT local_cache.mget(
@@ -63,7 +68,8 @@ SELECT local_cache.mget(
 ```
 
 The result preserves order, duplicates, and `NULL` positions. Missing rows also
-return `NULL`. A batch can contain at most 1,024 keys.
+return `NULL`. A batch can contain at most 1,024 keys. Use `unnest(...)` to display
+one array element per result row; the function itself does not return a set.
 
 Composite keys use `text[][]` in primary-key column order:
 
@@ -88,29 +94,43 @@ Writes remain ordinary PostgreSQL:
 UPDATE public.items SET value = 'new' WHERE id = 42;
 ```
 
-## Consistency contract
+See the [Node.js example](docs/node-postgres.md) for parameter binding and result
+decoding, and the [invalidation walkthrough](docs/cache-invalidation.md) for
+commit, rollback, and read-your-writes.
+
+## Consistency and workload fit
 
 Each cache hit is checked against mapping, relation, transaction, row, and
 snapshot state. `REPEATABLE READ`, `SERIALIZABLE`, recovery, parallel execution,
-and transactions that wrote mapped data bypass the cache.
+and transactions that wrote mapped data bypass the cache. Oversized or unsafe
+entries fall back to an indexed source-table read.
 
-This design preserves read-your-writes and PostgreSQL visibility rules. The
-cache accelerates eligible reads; it never becomes authoritative data storage.
-
-## Workload fit
-
-| Use pg_local_cache for | Keep using PostgreSQL directly for |
+| Worth measuring | Keep using PostgreSQL directly for |
 |---|---|
-| Repeated exact primary-key reads | Joins, ranges, aggregates, and full scans |
-| A hot row set that fits bounded memory | Arbitrary query-result caching |
-| One writable PostgreSQL primary | Multi-primary or distributed coordination |
-| Ordered whole-row JSON or limited RESP2 access | TTL, pub/sub, or a Redis replacement |
+| Repeated complete primary-key reads | Joins, ranges, aggregates, and full scans |
+| A hot set of whole rows that fits the cache | Arbitrary query-result caching |
+| READ COMMITTED on one writable primary | RLS, partitioned, or inherited tables |
+| An application that can call mget explicitly | Queries that need locking or have no measured benefit |
 
-Mapped tables must be permanent heap tables with a valid primary key. RLS,
-partitioning, inheritance, extension-owned tables, and unsupported key types
-are rejected.
+The extension is not a Redis replacement. It provides no TTL, pub/sub, or
+distributed coordination. SQL mget still uses a PostgreSQL connection.
 
-## Configure
+## Install on an existing server
+
+Supported binary target: **Linux amd64, PostgreSQL 14-18, glibc or musl**.
+First activation adds `pg_local_cache` to `shared_preload_libraries` and requires
+one controlled PostgreSQL restart.
+
+For a local cluster managed by `pg_ctl`:
+
+```bash
+curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh | bash -s -- app
+```
+
+Replace `app` with the database name. This command installs and restarts; it is
+not the disposable demo. Use the [installation guide](docs/INSTALL_EXISTING.md)
+for systemd, Patroni, Kubernetes, checksum-first installation, source builds,
+RESP, or recovery.
 
 Minimum SQL-only configuration:
 
@@ -121,9 +141,8 @@ pg_local_cache.cache_entries = 100000
 pg_local_cache.port = 0
 ```
 
-Keep existing `shared_preload_libraries` entries. Size cache entries, relation
-states, clients, workers, and the extension memory budget together before the
-restart.
+Preserve existing preload entries. Size cache entries, relation states, clients,
+workers, and the memory budget together before restart.
 
 Useful administration functions:
 
@@ -136,36 +155,25 @@ SELECT local_cache.detach_table('public.items'::regclass);
 
 ## Optional RESP2 endpoint
 
-RESP2 uses the same mappings and bounded cache. It supports authenticated,
-bounded `MGET`, `SET`, `DEL`, and scoped invalidation. It is not a complete Redis
-server.
-
-Run workers under a dedicated PostgreSQL role. Keep the listener on loopback or
+RESP2 supports authenticated, bounded `MGET`, `SET`, `DEL`, and scoped
+invalidation. Workers run under one configured PostgreSQL role; network clients
+do not inherit individual PostgreSQL ACLs. Keep the listener on loopback or
 behind authenticated TLS, and prefer `pg_local_cache.auth_token_file` over an
-inline token. Network clients do not inherit individual PostgreSQL ACLs.
-
-## Build from source
-
-Source builds use PostgreSQL's standard PGXS toolchain. Install the server
-development headers for the target PostgreSQL version, then follow the
-[source-build procedure](docs/INSTALL_EXISTING.md#build-from-source).
+inline token. See the [technical reference](docs/TECHNICAL.md).
 
 ## Develop
+
+Source builds use PostgreSQL's PGXS toolchain and the target server's headers.
+Follow the [source-build procedure](docs/INSTALL_EXISTING.md#build-from-source).
 
 ```bash
 make verify-static source-test
 make docker-smoke
+node --test examples/node-postgres/queries.test.mjs
 ```
 
-Local PGXS builds require PostgreSQL server headers. The Docker smoke test is
-the portable PostgreSQL 14-18 verification path.
-
-## Documentation
-
-- [Documentation home](https://profundium.github.io/pg_local_cache/)
-- [Install on an existing PostgreSQL server](docs/INSTALL_EXISTING.md)
-- [Technical reference](docs/TECHNICAL.md)
-- [Releases](https://github.com/profundium/pg_local_cache/releases)
-- [Issues](https://github.com/profundium/pg_local_cache/issues)
+[Report a workload](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml) |
+[Releases](https://github.com/profundium/pg_local_cache/releases) |
+[Contributing](CONTRIBUTING.md)
 
 License: [MIT](LICENSE).

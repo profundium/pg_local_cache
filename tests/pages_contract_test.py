@@ -1,68 +1,147 @@
 #!/usr/bin/env python3
-"""Contracts for the public documentation site."""
-
+"""Contracts for public docs, built-site validation, and benchmark reporting."""
+import copy
+import importlib.util
 from pathlib import Path
 import re
+import tempfile
 import unittest
 
-
 ROOT = Path(__file__).resolve().parents[1]
-INSTALL_COMMAND = (
-    "curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/"
-    "download/install-latest.sh | bash -s -- app"
-)
+
+
+def module(name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / f'{name}.py')
+    result = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(result)
+    return result
+
+
+site = module('check_site')
+report = module('benchmark_report')
 
 
 class PagesContracts(unittest.TestCase):
-    def test_pages_deploys_the_current_public_docs(self) -> None:
-        workflow = (ROOT / ".github/workflows/pages.yml").read_text()
-        self.assertIn("actions/jekyll-build-pages", workflow)
-        self.assertIn("actions/deploy-pages", workflow)
-        for path in (
-            "index.html",
-            "docs/INSTALL_EXISTING.md",
-            "docs/TECHNICAL.md",
-        ):
-            self.assertTrue((ROOT / path).is_file())
+    def test_navigation_resolves_and_metadata_is_distinct(self):
+        paths, titles, descriptions = set(), set(), set()
+        for document in [ROOT / 'index.html', *(ROOT / 'docs').glob('*.md')]:
+            text = document.read_text()
+            self.assertTrue(text.startswith('---\n'), document)
+            frontmatter = text.split('---', 2)[1]
+            fields = dict(re.findall(r'^([a-z_]+):\s*(.+)$', frontmatter, re.M))
+            for key, seen in [('title', titles), ('description', descriptions), ('permalink', paths)]:
+                value = fields[key].strip('"\'')
+                self.assertNotIn(value, seen, document)
+                seen.add(value)
+        navigation = (ROOT / '_data/navigation.yml').read_text()
+        for url in re.findall(r'^  url: (.+)$', navigation, re.M):
+            self.assertIn(url, paths)
+        self.assertEqual(len(paths), len(re.findall(r'^  url: (.+)$', navigation, re.M)) + 1)
 
-    def test_homepage_exposes_installer_and_mget(self) -> None:
-        homepage = (ROOT / "index.html").read_text()
-        self.assertIn(INSTALL_COMMAND, homepage)
-        self.assertIn("local_cache.mget", homepage)
-        self.assertNotIn("BENCHMARKS", homepage)
-        self.assertNotIn("MONITORING", homepage)
+    def test_homepage_starts_with_demo_and_benchmark(self):
+        homepage = (ROOT / 'index.html').read_text()
+        hero = homepage.split('<section id="benchmarks"')[0]
+        self.assertIn('QUICKSTART.html', hero)
+        self.assertIn('BENCHMARKS.html', hero)
+        self.assertIn('unnest(local_cache.mget', hero)
+        self.assertNotIn('curl -fsSL', hero)
+        self.assertNotIn('1.3.0', homepage)
 
-    def test_local_markdown_links_resolve(self) -> None:
-        failures: list[str] = []
-        for document in (ROOT / "README.md", *(ROOT / "docs").glob("*.md")):
-            for target in re.findall(r"\[[^]]*\]\(([^)]+)\)", document.read_text()):
-                if target.startswith(("http://", "https://", "#", "mailto:")):
+    def test_local_markdown_links_resolve(self):
+        failures = []
+        for document in [ROOT / 'README.md', ROOT / 'CONTRIBUTING.md', *(ROOT / 'docs').glob('*.md')]:
+            for target in re.findall(r'\[[^]]*\]\(([^)]+)\)', document.read_text()):
+                if target.startswith(('http://', 'https://', '#', 'mailto:')):
                     continue
-                path = target.split("#", 1)[0]
+                path = target.split('#', 1)[0]
                 if path and not (document.parent / path).resolve().exists():
-                    failures.append(f"{document.relative_to(ROOT)} -> {target}")
+                    failures.append(f'{document.name} -> {target}')
         self.assertEqual(failures, [])
 
-    def test_public_docs_have_search_metadata_and_no_pgxn_content(self) -> None:
-        layout = (ROOT / "_layouts/default.html").read_text()
-        homepage = (ROOT / "index.html").read_text()
-        public_docs = (
-            ROOT / "README.md",
-            ROOT / "index.html",
-            ROOT / "sitemap.xml",
-            ROOT / "_layouts/default.html",
-            ROOT / "_layouts/doc.html",
-            *(ROOT / "docs").glob("*.md"),
-        )
-
+    def test_sitemap_and_workflow_cover_the_built_pages(self):
+        self.assertIn('site.pages', (ROOT / 'sitemap.xml').read_text())
+        workflow = (ROOT / '.github/workflows/pages.yml').read_text()
+        self.assertEqual(workflow.count('python3 scripts/check_site.py _site'), 2)
+        self.assertIn('"_data/**"', workflow)
+        layout = (ROOT / '_layouts/default.html').read_text()
         self.assertIn('rel="canonical"', layout)
-        self.assertIn('property="og:image"', layout)
-        self.assertIn('name="twitter:card" content="summary_large_image"', layout)
-        self.assertIn('"@type": "SoftwareSourceCode"', layout)
-        self.assertIn("PostgreSQL row cache", homepage)
-        for document in public_docs:
-            self.assertNotIn("pgxn", document.read_text().lower(), document)
+        self.assertIn('application/ld+json', layout)
+        self.assertIn('google_site_verification', layout)
+
+    def test_benchmark_defines_metrics_and_scope(self):
+        document = (ROOT / 'docs/BENCHMARKS.md').read_text()
+        self.assertIn('requests/s', document)
+        self.assertIn('benchmark.json', document)
+        self.assertNotIn('1.3.0', document)
+        self.assertIn('closed-loop', document.lower())
+        self.assertIn('coordinated omission', document)
 
 
-if __name__ == "__main__":
+class BuiltSiteChecks(unittest.TestCase):
+    def fixture(self, root):
+        (root / 'index.html').write_text('''<!doctype html><html><head><title>Demo</title>
+<meta name="description" content="A demo"><meta name="robots" content="index,follow">
+<meta property="og:url" content="https://profundium.github.io/pg_local_cache/">
+<link rel="canonical" href="https://profundium.github.io/pg_local_cache/">
+<script type="application/ld+json">{"@type":"SoftwareSourceCode"}</script>
+</head><body><main id="main-content"><h1>Demo</h1><a href="#code">Code</a>
+<pre id="code">SELECT 1</pre><button data-copy="code">Copy</button></main></body></html>''')
+        (root / 'sitemap.xml').write_text('''<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://profundium.github.io/pg_local_cache/</loc></url></urlset>''')
+
+    def test_valid_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            self.assertEqual(site.check(root), [])
+
+    def test_broken_fragment_and_copy_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / 'index.html'
+            path.write_text(path.read_text().replace('id="code"', 'id="different"'))
+            errors = site.check(root)
+            self.assertTrue(any('missing fragment' in error for error in errors))
+            self.assertTrue(any('copy target' in error for error in errors))
+
+    def test_bad_json_and_missing_page(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / 'index.html'
+            path.write_text(path.read_text().replace('{"@type":"SoftwareSourceCode"}', '{bad}').replace('href="#code"', 'href="missing.html"'))
+            errors = site.check(root)
+            self.assertTrue(any('invalid JSON-LD' in error for error in errors))
+            self.assertTrue(any('missing local target' in error for error in errors))
+
+
+class BenchmarkReportChecks(unittest.TestCase):
+    def sample(self):
+        return {'schema': 1, 'measured_at': 'test fixture',
+                'environment': {'postgres_version': '16', 'extension_version': '2.0.1'},
+                'extension_ref': 'test', 'harness_ref': 'test', 'results': [
+                    {'repeat': 1, 'workload': 'warm', 'mode': 'mget', 'batch': 16,
+                     'requests_s': 100, 'requested_read_keys_s': 1600,
+                     'read_latency': {'samples': 10, 'p50_ms': 1, 'p95_ms': 2, 'p99_ms': 3},
+                     'write_latency': None}]}
+
+    def test_keeps_repetitions_separate(self):
+        data = self.sample()
+        second = copy.deepcopy(data['results'][0])
+        second['repeat'] = 2
+        data['results'].append(second)
+        text = report.summary(data)
+        self.assertIn('| 1 | warm | mget', text)
+        self.assertIn('| 2 | warm | mget', text)
+        self.assertIn('1,600.000', text)
+
+    def test_rejects_invalid_measurements(self):
+        for value in [float('nan'), float('inf'), -1, True, '100']:
+            with self.assertRaises(ValueError):
+                report.number(value)
+        with self.assertRaises(ValueError):
+            report.summary({'schema': 1, 'results': []})
+
+
+if __name__ == '__main__':
     unittest.main()

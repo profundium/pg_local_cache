@@ -5,32 +5,36 @@ on:
     branches: ["master"]
     paths:
       - "_config.yml"
+      - "_data/**"
       - "_layouts/**"
       - "assets/**"
       - "docs/**"
       - "index.html"
       - "robots.txt"
       - "sitemap.xml"
+      - "scripts/check_site.py"
+      - "tests/pages_contract_test.py"
       - ".github/workflows/pages.yml"
   pull_request:
     paths:
       - "_config.yml"
+      - "_data/**"
       - "_layouts/**"
       - "assets/**"
       - "docs/**"
       - "index.html"
       - "robots.txt"
       - "sitemap.xml"
+      - "scripts/check_site.py"
+      - "tests/pages_contract_test.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-
 concurrency:
   group: pg_local_cache-pages-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   validate:
     if: github.event_name == 'pull_request'
@@ -39,12 +43,13 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
       - name: Build Jekyll site without deployment
         uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1
         with:
           source: ./
           destination: ./_site
+      - name: Check the rendered site
+        run: python3 scripts/check_site.py _site
 
   deploy:
     if: github.event_name != 'pull_request'
@@ -60,19 +65,17 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
-
       - name: Build Jekyll site
         uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1
         with:
           source: ./
           destination: ./_site
-
+      - name: Check the rendered site before publishing
+        run: python3 scripts/check_site.py _site
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
-
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

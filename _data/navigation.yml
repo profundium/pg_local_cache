@@ -1,0 +1,21 @@
+- title: Try locally
+  url: /docs/QUICKSTART.html
+  description: Disposable PostgreSQL, sample rows, cache hits, and cleanup.
+- title: Benchmarks
+  url: /docs/BENCHMARKS.html
+  description: Compare mget with batched SQL, including misses and writes.
+- title: Row cache vs shared_buffers
+  url: /docs/row-cache-vs-shared-buffers.html
+  description: What another cache can avoid and what it still costs.
+- title: Cache invalidation
+  url: /docs/cache-invalidation.html
+  description: Commit, rollback, snapshots, and concurrent readers.
+- title: Node.js example
+  url: /docs/node-postgres.html
+  description: Parameterized queries and the actual text[] result contract.
+- title: Installation
+  url: /docs/INSTALL_EXISTING.html
+  description: Binaries, source builds, controlled restarts, and recovery.
+- title: Technical reference
+  url: /docs/TECHNICAL.html
+  description: SQL API, table restrictions, memory, monitoring, and RESP2.
