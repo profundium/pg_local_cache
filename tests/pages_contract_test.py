@@ -201,9 +201,10 @@ class BenchmarkReportChecks(unittest.TestCase):
 
     def test_rejects_partial_run_after_query_error(self):
         data = self.sample()
-        data['error'] = {'message': 'canceling statement due to statement timeout', 'code': '57014'}
-        with self.assertRaisesRegex(ValueError, 'benchmark did not complete'):
-            report.summary(data)
+        for error in [{'message': 'canceling statement due to statement timeout', 'code': '57014'}, {}, None, '']:
+            data['error'] = error
+            with self.assertRaisesRegex(ValueError, 'benchmark did not complete'):
+                report.summary(data)
 
 
 if __name__ == '__main__':

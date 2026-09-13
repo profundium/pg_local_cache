@@ -1,0 +1,7 @@
+# Optional overlay for measuring an exact local extension revision.
+services:
+  postgres:
+    build:
+      context: ..
+      args:
+        PGLC_BUILD_ID: "${PGLC_EXTENSION_REF:?Set PGLC_EXTENSION_REF to the local git revision}"
