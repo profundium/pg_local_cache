@@ -9,7 +9,7 @@
     <title>{{ meta_title | escape }}</title>
     <meta name="description" content="{{ meta_description | escape }}">
     <meta name="author" content="pg_local_cache contributors">
-    <meta name="robots" content="{% if site.preview or page.sitemap == false %}noindex,follow{% else %}index,follow,max-image-preview:large{% endif %}">
+    <meta name="robots" content="{% if page.sitemap == false %}noindex,follow{% else %}index,follow,max-image-preview:large{% endif %}">
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#0d1319" media="(prefers-color-scheme: dark)">
     <meta name="color-scheme" content="light dark">
@@ -32,7 +32,9 @@
     <meta name="twitter:title" content="{{ meta_title | escape }}">
     <meta name="twitter:description" content="{{ meta_description | escape }}">
     <meta name="twitter:image" content="{{ meta_image }}">
+    <meta name="twitter:image:alt" content="pg_local_cache PostgreSQL row cache data path">
     <link rel="icon" href="{{ '/assets/favicon.svg' | relative_url }}" type="image/svg+xml">
+    <link rel="preload" href="{{ '/assets/fonts/outfit-latin.woff2' | relative_url }}" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
     <script type="application/ld+json">
     {% if page.home %}
@@ -53,14 +55,24 @@
     {% else %}
     {
       "@context": "https://schema.org",
+      "@graph": [{
       "@type": "TechArticle",
       "headline": {{ page.title | jsonify }},
       "description": {{ meta_description | jsonify }},
       "url": {{ page.url | absolute_url | jsonify }},
+      "mainEntityOfPage": {{ page.url | absolute_url | jsonify }},
+      "inLanguage": {{ site.lang | jsonify }},
       "image": {{ meta_image | jsonify }},
       {% if page.last_modified_at %}"dateModified": {{ page.last_modified_at | date: '%Y-%m-%d' | jsonify }},{% endif %}
       "author": {"@type": "Organization", "name": "pg_local_cache contributors", "url": "https://github.com/{{ site.repository }}/graphs/contributors"},
       "isPartOf": {"@type": "WebSite", "name": "pg_local_cache documentation", "url": {{ '/' | absolute_url | jsonify }}}
+      }, {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          {"@type": "ListItem", "position": 1, "name": "pg_local_cache", "item": {{ '/' | absolute_url | jsonify }}},
+          {"@type": "ListItem", "position": 2, "name": {{ page.title | jsonify }}, "item": {{ page.url | absolute_url | jsonify }}}
+        ]
+      }]
     }
     {% endif %}
     </script>

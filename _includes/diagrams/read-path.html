@@ -1,0 +1,29 @@
+{% assign diagram_id = include.id | default: 'read-path' %}
+<figure class="diagram">
+  <svg viewBox="0 0 384 468" role="img" aria-labelledby="{{ diagram_id }}-title {{ diagram_id }}-desc">
+    <title id="{{ diagram_id }}-title">The SQL mget read path</title>
+    <desc id="{{ diagram_id }}-desc">The application calls local_cache.mget inside PostgreSQL. After eligibility and snapshot checks, a cache hit returns the stored whole-row payload. A miss or bypass reads the source table. Both paths return rows through the same PostgreSQL connection.</desc>
+    <defs>
+      <marker id="{{ diagram_id }}-arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 L8 4 L0 8" fill="var(--blue)"/></marker>
+    </defs>
+    <rect class="diagram-zone" x="8" y="136" width="368" height="324" rx="8"/>
+    <text class="diagram-muted" x="32" y="168" font-size="20">PostgreSQL</text>
+    <g class="diagram-edge" marker-end="url(#{{ diagram_id }}-arrow)">
+      <path d="M192 80 V192"/>
+      <path d="M176 264 V312 Q176 320 168 320 H96 Q88 320 88 328 V368"/>
+      <path d="M208 264 V312 Q208 320 216 320 H288 Q296 320 296 328 V368"/>
+    </g>
+    <rect class="diagram-node" x="72" y="16" width="240" height="64" rx="8"/>
+    <text class="diagram-label" x="192" y="56" text-anchor="middle" font-size="24">Application</text>
+    <rect class="diagram-accent" x="48" y="192" width="288" height="72" rx="8"/>
+    <text class="diagram-label" x="192" y="220" text-anchor="middle" font-size="20">local_cache.mget</text>
+    <text class="diagram-muted" x="192" y="248" text-anchor="middle" font-size="20">Eligibility + snapshot</text>
+    <text class="diagram-label" x="88" y="308" text-anchor="middle" font-size="20">Hit</text>
+    <text class="diagram-label" x="292" y="308" text-anchor="middle" font-size="20">Miss / bypass</text>
+    <rect class="diagram-hit" x="24" y="368" width="144" height="64" rx="8"/>
+    <text class="diagram-hit-label" x="96" y="396" text-anchor="middle" font-size="20"><tspan x="96">Stored</tspan><tspan x="96" dy="24">row</tspan></text>
+    <rect class="diagram-node" x="216" y="368" width="144" height="64" rx="8"/>
+    <text class="diagram-label" x="288" y="396" text-anchor="middle" font-size="20"><tspan x="288">Source</tspan><tspan x="288" dy="24">table</tspan></text>
+  </svg>
+  <figcaption>Both paths return serialized whole rows over the same PostgreSQL connection. An eligible source-table read may fill the cache.</figcaption>
+</figure>

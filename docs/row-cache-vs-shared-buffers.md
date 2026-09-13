@@ -5,21 +5,31 @@ seo_title: "PostgreSQL Row Cache vs shared_buffers | pg_local_cache"
 description: Compare PostgreSQL page caching with pg_local_cache 2.0 whole-row caching. See what a row-cache hit avoids, what it still costs, and when not to add another cache.
 section: Read paths
 permalink: /docs/row-cache-vs-shared-buffers.html
-last_modified_at: "2026-09-05"
+last_modified_at: "2026-09-14"
 ---
 
 # PostgreSQL row cache vs shared_buffers
 
-A warm database is the relevant baseline. A second cache is not justified just
-because data fits in memory.
-
 PostgreSQL's [`shared_buffers`](https://www.postgresql.org/docs/16/runtime-config-resource.html#GUC-SHARED-BUFFERS)
-contains database pages. The operating system may also cache file contents.
-A page already in memory can avoid a storage read, but a query still has to
-produce a result from the database's tuples.
+contains database pages. pg_local_cache separately stores serialized whole-row
+payloads under their complete primary keys. A page already in memory can avoid
+a storage read, but a query still has to produce a result from the database's
+tuples. A row-cache hit can return the stored payload after eligibility and
+snapshot checks.
 
-pg_local_cache separately stores a serialized whole-row payload under the
-complete primary key. It is not a replacement for PostgreSQL's buffer manager.
+The operating system may also cache file contents. Use a warm database as the
+baseline; data fitting in memory alone does not justify a second cache.
+
+{% include diagrams/read-path.html id="buffers-read" %}
+
+## Does PostgreSQL cache SELECT results?
+
+`shared_buffers` caches pages used by a query, rather than its final result set.
+A [prepared statement](https://www.postgresql.org/docs/18/sql-prepare.html)
+reuses parsing work and may reuse a plan, but PostgreSQL still executes it.
+pg_local_cache adds whole-row caching through explicit `mget` calls; it does
+not cache arbitrary SELECT results or rewrite existing queries. The
+[Node.js example](node-postgres.md) shows the two read APIs side by side.
 
 ## Compare the work, not just the storage medium
 
@@ -55,9 +65,9 @@ joins, ranges, and aggregation dominate. First compare an ordinary batched
 query with the application's current per-key calls. A gain from batching is
 not evidence of a gain from caching.
 
-pg_local_cache 2.0 also requires explicit `mget` calls, extension installation,
-and a startup preload. It rejects RLS, partitioned, and inherited tables. Those
-constraints are part of the decision, not setup details to discover afterwards.
+pg_local_cache 2.0 requires explicit `mget` calls, extension installation,
+and a startup preload. It rejects RLS, partitioned, and inherited tables.
+Account for these constraints before adopting it.
 
 ## Row cache or an external cache?
 

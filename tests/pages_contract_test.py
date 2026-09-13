@@ -7,7 +7,6 @@ from pathlib import Path
 import re
 import tempfile
 import unittest
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -21,7 +20,6 @@ def module(name):
 
 site = module('check_site')
 report = module('benchmark_report')
-manifest = module('site_manifest')
 
 
 class PagesContracts(unittest.TestCase):
@@ -66,8 +64,9 @@ class PagesContracts(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/pages.yml').read_text()
         self.assertIn('python3 scripts/check_site.py _site', workflow)
         self.assertIn('needs: validate', workflow)
-        self.assertIn('site_manifest.py verify', workflow)
-        self.assertIn('site_smoke.py _candidate', workflow)
+        self.assertIn('site_smoke.py _site', workflow)
+        self.assertNotIn('docs/2.0-adoption', workflow)
+        self.assertNotIn('site_manifest', workflow)
         layout = (ROOT / '_layouts/default.html').read_text()
         self.assertIn('rel="canonical"', layout)
         self.assertIn('application/ld+json', layout)
@@ -86,61 +85,70 @@ class BuiltSiteChecks(unittest.TestCase):
     def fixture(self, root):
         (root / 'index.html').write_text('''<!doctype html><html><head><title>Demo</title>
 <meta name="description" content="A demo"><meta name="robots" content="index,follow">
+<meta property="og:title" content="Demo"><meta property="og:description" content="A demo">
+<meta name="twitter:title" content="Demo"><meta name="twitter:description" content="A demo">
+<meta property="og:image" content="https://profundium.github.io/pg_local_cache/card.png">
+<meta name="twitter:image" content="https://profundium.github.io/pg_local_cache/card.png">
 <meta property="og:url" content="https://profundium.github.io/pg_local_cache/">
 <link rel="canonical" href="https://profundium.github.io/pg_local_cache/">
 <script type="application/ld+json">{"@type":"SoftwareSourceCode"}</script>
 </head><body><main id="main-content"><h1>Demo</h1><a href="#code">Code</a>
 <pre id="code">SELECT 1</pre><button data-copy="code">Copy</button></main></body></html>''')
+        (root / 'card.png').write_bytes(b'image fixture')
         (root / 'sitemap.xml').write_text('''<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://profundium.github.io/pg_local_cache/</loc></url></urlset>''')
 
-    def test_preview_policy_and_canonical_host(self):
+    def test_rejects_noindex_and_wrong_canonical_host(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.fixture(root)
-            base = 'https://aicopilot-fr.github.io/pg_local_cache/'
             path = root / 'index.html'
-            path.write_text(path.read_text().replace(site.BASE, base).replace('content="index,follow"', 'content="noindex,follow"'))
-            (root / 'sitemap.xml').write_text('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"/>')
-            self.assertEqual(site.check(root, base, preview=True), [])
-            self.assertTrue(site.check(root, base))
-            self.assertTrue(site.check(root, site.BASE, preview=True))
+            path.write_text(path.read_text().replace('content="index,follow"', 'content="noindex,follow"'))
+            self.assertTrue(any('indexing policy' in error for error in site.check(root)))
+            self.fixture(root)
+            path.write_text(path.read_text().replace(site.BASE, 'https://example.com/'))
+            self.assertTrue(any('canonical' in error for error in site.check(root)))
 
-    def test_manifest_records_exact_bytes(self):
+    def test_missing_social_image_and_duplicate_canonical(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.fixture(root)
-            before = manifest.manifest(root, 'a' * 40, site.BASE)
-            self.assertIn('index.html', before['files'])
-            (root / 'index.html').write_text('changed')
-            self.assertNotEqual(before, manifest.manifest(root, 'a' * 40, site.BASE))
-            (root / 'link').symlink_to(root / 'index.html')
-            with self.assertRaises(ValueError):
-                manifest.manifest(root, 'a' * 40, site.BASE)
-
-    def test_http_verification_rejects_stale_or_changed_files(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.fixture(root)
-            expected = manifest.manifest(root, 'a' * 40, site.BASE)
-            (root / 'site-manifest.json').write_text(json.dumps(expected))
-            def response(url):
-                return (root / url.removeprefix(site.BASE)).read_bytes()
-            with patch.object(manifest, 'fetch', side_effect=response):
-                manifest.verify(root, site.BASE, 1)
-            stale = {**expected, 'source_commit': 'b' * 40}
-            with patch.object(manifest, 'fetch', return_value=json.dumps(stale).encode()):
-                with self.assertRaisesRegex(ValueError, 'different build'):
-                    manifest.verify(root, site.BASE, 1)
-            def corrupt(url):
-                return b'changed' if url.endswith('index.html') else response(url)
-            with patch.object(manifest, 'fetch', side_effect=corrupt):
-                with self.assertRaisesRegex(ValueError, 'Published bytes differ'):
-                    manifest.verify(root, site.BASE, 1)
+            (root / 'card.png').unlink()
+            path = root / 'index.html'
+            path.write_text(path.read_text().replace('</head>',
+                '<link rel="canonical" href="https://profundium.github.io/pg_local_cache/"></head>'))
+            errors = site.check(root)
+            self.assertTrue(any('card.png' in error for error in errors))
+            self.assertTrue(any('duplicate canonical' in error for error in errors))
 
     def test_valid_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.fixture(root)
+            self.assertEqual(site.check(root), [])
+
+    def test_svg_title_does_not_change_page_title(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / 'index.html'
+            path.write_text(path.read_text().replace('</main>',
+                '<svg role="img" aria-labelledby="diagram-title"><title id="diagram-title">Read path</title></svg></main>'))
+            self.assertEqual(site.check(root), [])
+
+    def test_sitemap_entry_cannot_replace_a_crawlable_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            home = root / 'index.html'
+            orphan = home.read_text().replace('Demo', 'Guide').replace('A demo', 'A guide')
+            orphan = orphan.replace('href="' + site.BASE + '"', 'href="' + site.BASE + 'guide.html"')
+            orphan = orphan.replace('content="' + site.BASE + '"', 'content="' + site.BASE + 'guide.html"')
+            (root / 'guide.html').write_text(orphan)
+            sitemap = root / 'sitemap.xml'
+            sitemap.write_text(sitemap.read_text().replace('</urlset>',
+                '<url><loc>' + site.BASE + 'guide.html</loc></url></urlset>'))
+            self.assertEqual(site.check(root), [site.BASE + 'guide.html: page is not reachable through links from the homepage'])
+            home.write_text(home.read_text().replace('</main>', '<a href="guide.html">Guide</a></main>'))
             self.assertEqual(site.check(root), [])
 
     def test_broken_fragment_and_copy_target(self):

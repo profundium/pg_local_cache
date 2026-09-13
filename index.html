@@ -4,21 +4,29 @@ title: "PostgreSQL row cache extension | pg_local_cache"
 seo_title: "PostgreSQL Row Cache Extension | pg_local_cache"
 description: Cache PostgreSQL primary-key rows in shared memory with explicit SQL mget and transaction-aware invalidation. Try the local demo and compare it with batched SQL.
 image: /assets/social-card.png
-last_modified_at: "2026-09-05"
+last_modified_at: "2026-09-14"
 home: true
 permalink: /
 ---
 <main id="main-content">
   <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
     <div class="hero-copy">
-      <h1 id="hero-title">A row cache inside PostgreSQL.</h1>
+      <h1 id="hero-title">A row cache<br>inside <span>PostgreSQL.</span></h1>
       <p>Read frequently requested rows by primary key with <code>local_cache.mget</code>. Writes stay in PostgreSQL; the extension invalidates affected cache entries.</p>
       <div class="hero-actions">
         <a class="button primary" href="{{ '/docs/QUICKSTART.html' | relative_url }}">Try locally <span aria-hidden="true">→</span></a>
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | relative_url }}">Compare with SQL <span aria-hidden="true">→</span></a>
       </div>
-      <div class="benchmark-note">Version 2.0. Explicit SQL API; ordinary SELECT is unchanged. Installation on an existing server requires a PostgreSQL restart.</div>
+      <p class="hero-note">Explicit SQL API · PostgreSQL 14–18 · Open source</p>
     </div>
+  </section>
+
+  <section id="read-path" class="page-section read-path" aria-labelledby="read-path-title">
+    <div class="read-path-heading">
+      <h2 id="read-path-title">One call. Two read paths.</h2>
+      <p>An eligible hit returns the stored row. A miss or bypass reads the source table. Your ordinary <code>SELECT</code> queries keep their existing path.</p>
+    </div>
+    <div class="read-path-grid">
     <div class="terminal" aria-label="PostgreSQL mget example">
       <div class="terminal-bar"><strong>psql</strong> │ primary-key reads</div>
       <pre><code><span class="sql">CREATE TABLE</span> public.items (
@@ -41,24 +49,27 @@ permalink: /
 {"id":42,"value":"cached"}</span>
 <span class="comment">-- final row is SQL NULL</span></code></pre>
     </div>
+    {% include diagrams/read-path.html id="home-read" %}
+    </div>
+    <a class="text-link" href="{{ '/docs/row-cache-vs-shared-buffers.html' | relative_url }}">What a row-cache hit avoids <span aria-hidden="true">→</span></a>
   </section>
 
   <section class="proof-rail" aria-label="Requirements and behavior">
     <div class="proof-item"><strong>SQL mget</strong><p>Up to 1,024 keys per call. Order, duplicates, and NULL positions are preserved.</p></div>
     <div class="proof-item"><strong>Ordinary writes</strong><p>INSERT, UPDATE, and DELETE invalidate affected entries.</p></div>
     <div class="proof-item"><strong>Fixed capacity</strong><p>Allocate the shared row cache at PostgreSQL startup.</p></div>
-    <div class="proof-item"><strong>Source-table fallback</strong><p>Ineligible reads use PostgreSQL, not an unchecked cached row.</p></div>
+    <div class="proof-item"><strong>Snapshot checks</strong><p>Ineligible reads use the source table under PostgreSQL visibility rules.</p></div>
   </section>
 
   <section id="benchmarks" class="band" aria-labelledby="benchmark-title">
     <div class="page-section section-grid">
       <div class="section-intro">
         <h2 id="benchmark-title">Compare before installing.</h2>
-        <p>A warm primary-key index is the baseline, not one query per key.</p>
+        <p>Measure against a warm primary-key index and a batched query.</p>
       </div>
       <div>
         <p>The benchmark uses the same Node.js driver and returns the same ordered rows through <code>mget</code> and <code>WHERE id = ANY($1)</code>. It measures warm reads, cold cache fills, reads mixed with updates, and the write cost of an attached table.</p>
-        <p>Output includes requests/s, requested keys/s, p50/p95/p99 latency, cache-counter deltas, and the test configuration. There is no published speedup claim without a recorded run.</p>
+        <p>Record throughput, p50/p95/p99 latency, cache counters, and the test configuration. Run the comparison on your hardware before deciding whether to use the cache.</p>
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | relative_url }}">Commands and methodology <span aria-hidden="true">→</span></a>
       </div>
     </div>
@@ -79,7 +90,7 @@ permalink: /
   </section>
 
   <section id="quick-start" class="page-section quick-start" aria-labelledby="quick-start-title">
-    <h2 id="quick-start-title">Try it without touching your database.</h2>
+    <h2 id="quick-start-title">Run a local demo.</h2>
     <p class="quick-start-lead">The Docker demo builds pg_local_cache 2.0.1 from a pinned commit. It creates its own PostgreSQL data directory in memory and binds only to loopback. No host database is mounted or restarted.</p>
     <div class="install-command">
       <div class="command-label">From the repository root; Docker Compose required</div>
@@ -87,6 +98,7 @@ permalink: /
       <pre id="demo-command"><code>docker compose -f examples/compose.yaml up --build --wait</code></pre>
     </div>
     <p class="quick-start-more"><a href="{{ '/docs/QUICKSTART.html' | relative_url }}">Get the files, run the queries, and remove the demo</a>. For an existing server, use the <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">installation guide</a>.</p>
+    <p class="quick-start-more">Installing on an existing server requires a PostgreSQL restart.</p>
   </section>
 
   <section class="band"><div class="page-section docs-index">

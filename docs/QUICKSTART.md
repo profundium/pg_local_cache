@@ -5,7 +5,7 @@ seo_title: "Try a PostgreSQL Row Cache Locally | pg_local_cache"
 description: Run pg_local_cache 2.0 in disposable PostgreSQL, read sample rows, inspect cache hits, test updates, and remove the demo without changing an existing database.
 section: Quickstart
 permalink: /docs/QUICKSTART.html
-last_modified_at: "2026-09-05"
+last_modified_at: "2026-09-14"
 ---
 
 # Try pg_local_cache locally
@@ -15,9 +15,8 @@ It does not install anything in your existing PostgreSQL server. The extension
 source is pinned to commit `8569a937abb9ba1859ffb9c2a4dbc34f076fbe20`.
 
 You need Git, Docker, and Docker Compose with `up --wait` support. The image is
-built from source, not downloaded from an unlisted container registry. Binary
-packages are tested on Linux amd64; a successful build on another architecture
-is not evidence of equivalent performance or support.
+built from source. Binary packages are tested on Linux amd64; a build on another
+architecture does not establish equivalent performance or support.
 
 ## Start the database
 
@@ -30,7 +29,7 @@ docker compose -f examples/compose.yaml up --build --wait
 The demo binds PostgreSQL to `127.0.0.1:55432`. It has no RESP listener and no
 persistent volume. Its data directory is a container-local tmpfs. Stopping the
 container discards the data. The password `demo-only` is for this loopback-only
-demo, not an example of production credential management.
+demo. Use your own credentials for production.
 
 If port 55432 is occupied, set `PGLC_DEMO_PORT` before starting Compose and keep
 it set when running the Node.js example:

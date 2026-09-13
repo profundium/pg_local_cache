@@ -3,7 +3,51 @@ name: CI
 on:
   push:
     branches: ["master"]
+    paths-ignore:
+      - "docs/**"
+      - "examples/**"
+      - "assets/**"
+      - "_layouts/**"
+      - "_includes/**"
+      - "_data/**"
+      - "_config.yml"
+      - "index.html"
+      - "sitemap.xml"
+      - "robots.txt"
+      - "README.md"
+      - "PRODUCT.md"
+      - "CONTRIBUTING.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/examples.yml"
+      - "scripts/check_site.py"
+      - "scripts/benchmark_report.py"
+      - "tests/pages_contract_test.py"
+      - "tests/browser/**"
+      - "tests/*docs_smoke.py"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "examples/**"
+      - "assets/**"
+      - "_layouts/**"
+      - "_includes/**"
+      - "_data/**"
+      - "_config.yml"
+      - "index.html"
+      - "sitemap.xml"
+      - "robots.txt"
+      - "README.md"
+      - "PRODUCT.md"
+      - "CONTRIBUTING.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/examples.yml"
+      - "scripts/check_site.py"
+      - "scripts/benchmark_report.py"
+      - "tests/pages_contract_test.py"
+      - "tests/browser/**"
+      - "tests/*docs_smoke.py"
   workflow_dispatch:
     inputs:
       release:

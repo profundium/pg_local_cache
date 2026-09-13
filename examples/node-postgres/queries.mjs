@@ -3,8 +3,10 @@ export async function getRows(client, keys, cached = true) {
   if (!Array.isArray(keys) || keys.length > 1024) {
     throw new RangeError('Expected an array of at most 1024 keys');
   }
-  if (keys.some(key => key !== null && !Number.isSafeInteger(key))) {
-    throw new TypeError('This example accepts safe integer keys or null');
+  for (const key of keys) {
+    if (key !== null && !Number.isSafeInteger(key)) {
+      throw new TypeError('This example accepts safe integer keys or null');
+    }
   }
   if (!keys.length) return [];
 

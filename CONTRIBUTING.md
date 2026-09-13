@@ -5,70 +5,66 @@ benchmarks and migration narratives out of these pages.
 
 ## Checks before merging
 
-Every pull request runs the source tests, package validation, documentation
-examples, and Pages artifact checks. Check the latest commit, not an older
-successful run. No benchmark throughput threshold is used as a correctness test.
+Pull-request CI follows the changed files. Extension changes run source tests, sanitizers,
+Docker integration and PostgreSQL compilation. Documentation changes run the
+Pages checks; executable-example changes also run PostgreSQL 14–18 smoke tests.
+Package inputs retain their separate archive validation. Manual workflow
+dispatch remains available. The examples matrix is not repeated on a push to
+`master`; direct pushes that bypass PR checks need a manual examples run.
+Check the latest commit before merging.
 
-The examples workflow runs PostgreSQL 14–18 on fresh Linux amd64 runners. It
-executes shell blocks taken directly from QUICKSTART.md, including the default
-benchmark, and SQL/configuration extracted from INSTALL_EXISTING.md. The latter
-uses a separate container without demo initialization or external networking.
-The non-default demo port is tested too. Node dependencies come from the
-committed lockfile via `npm ci --ignore-scripts`.
+The examples execute shell blocks from QUICKSTART.md and SQL/configuration
+from INSTALL_EXISTING.md on fresh databases, including a non-default port.
+The full default benchmark and Node unit tests run once, on PostgreSQL 16;
+other versions run the functional examples. Throughput is never a pass/fail
+threshold. Benchmark records and browser screenshots/traces are retained for
+14 days as `demo-benchmark-pg16` and `browser` artifacts.
 
-The Pages workflow builds production and fork-preview configurations. Preview
-pages are marked `noindex`; production pages must remain indexable. It packages
-the site with upload-pages-artifact, downloads that archive, unpacks it, checks
-its bytes, and serves it under `/pg_local_cache/` for Playwright. Chromium and
-WebKit each test all pages at 1440, 390 and 320 pixels, plus a JavaScript-disabled
-mobile case. Checks cover metadata, HTTP errors, console errors, horizontal
-overflow, the mobile menu, table of contents, FAQ, and clipboard writes.
-
-Artifacts are kept for 14 days: `pages-production`, `pages-preview`,
-`browser-production`, `browser-preview`, and `demo-benchmark-pg14` through
-`demo-benchmark-pg18`. Browser artifacts contain screenshots, traces, and a
-machine-readable result with the tested source commit. For a PR this is GitHub's
-temporary merge commit, not just its head. Benchmark records identify the
-extension and harness revisions separately.
-
-For a local check after downloading and unpacking a Pages artifact:
+Quick local checks:
 
 ```bash
-python3 -m pip install -r tests/browser/requirements.txt
-python3 -m playwright install --with-deps chromium webkit
-python3 tests/browser/site_smoke.py /path/to/unpacked/site
-```
-
-Quick tests do not need Docker or browsers:
-
-```bash
-make verify-static source-test
+make verify-static source-test source-sanitize
 node --test examples/node-postgres/queries.test.mjs
 ```
 
-## Publishing and checking the live site
+Run the documented database examples locally (Docker and Node.js 20+):
 
-Only a push to upstream `master`, or the explicit review branch in the testing
-fork, can publish. Pull requests have read-only permissions and never deploy.
-Publication waits for the artifact's browser checks and uploads no rebuilt copy.
-After deployment, every HTTP resource is checked against the artifact's SHA-256
-manifest and the browser suite runs against the live URL. A stale deployment,
-missing asset, or failed interaction fails the workflow rather than reporting
-that a successful build was a successful publication.
+```bash
+docker compose -f examples/compose.yaml up --build --wait
+python3 tests/install_docs_smoke.py
+python3 tests/quickstart_docs_smoke.py
+docker compose -f examples/compose.yaml down
+```
 
-GitHub Pages must already be enabled with **Settings → Pages → Source: GitHub
-Actions**. The workflow token can deploy but cannot grant itself the
-administration permission needed to enable Pages. A disabled site fails at
-`Check Pages configuration`; it is not skipped or treated as a pass. After the
-owner enables Pages, rerun the failed job while its artifact still exists. If
-artifacts have expired, rerun all jobs.
+For PostgreSQL 14, 15, 17 or 18, export `PGLC_DEMO_PG` before starting Compose.
+Use `--skip-benchmark` on the quickstart check when only testing functionality.
+Always run `compose down` after a failed check too; the demo data is disposable.
 
-Before merging upstream, require successful CI, package, examples and Pages
-artifact checks on the current commit. To claim a completed preview deployment,
-also require the non-PR `Publish verified Pages artifact` job to pass, including
-its live HTTP and browser steps. Browser engines on Linux do not replace tests
-on physical iOS devices. These tests do not exercise a production restart under
-systemd or Patroni, or guarantee search ranking.
+After building the site with GitHub Pages' Jekyll builder, check the output:
+
+```bash
+python3 scripts/check_site.py _site
+python3 -m venv /tmp/pglc-browser-tests
+/tmp/pglc-browser-tests/bin/pip install -r tests/browser/requirements.txt
+/tmp/pglc-browser-tests/bin/python -m playwright install --with-deps chromium webkit
+/tmp/pglc-browser-tests/bin/python tests/browser/site_smoke.py _site
+```
+
+The browser suite covers all pages with Chromium and WebKit at 1440, 390 and
+320 pixels, plus a mobile case without JavaScript. It checks metadata, HTTP and
+console errors, overflow, navigation, table of contents, FAQ and clipboard.
+
+## Publishing
+
+Pages builds once, validates that output, then publishes the same artifact
+on upstream `master`. Pull requests never deploy. The workflow checks the
+published homepage's HTTP response; it does not repeat the browser suite.
+Forks can validate pull requests but do not publish a preview automatically.
+
+Enable **Settings → Pages → Source: GitHub Actions** before deploying.
+If deployment fails after validation, rerun the failed job while its Pages
+artifact exists. After its 14-day retention period, rerun the workflow.
+Local checks cannot verify account permissions or GitHub's deployment service.
 
 ## Publishing a result
 
@@ -83,6 +79,16 @@ The project site is `https://profundium.github.io/pg_local_cache/`. Its sitemap
 is generated from the public pages; adding a document does not require a
 second URL list. Set `last_modified_at` only after a substantive content edit.
 Do not replace it with the build date.
+
+Keep each guide focused on a reader's task: trying the extension, installing
+it, comparing read paths, testing transaction behavior, or calling the API.
+Use a descriptive title and answer the main question in the opening paragraphs.
+Link to the next relevant guide in context. Google's guidance covers
+[title links](https://developers.google.com/search/docs/appearance/title-link),
+[snippets](https://developers.google.com/search/docs/appearance/snippet), and
+[crawlable internal links](https://developers.google.com/search/docs/crawling-indexing/links-crawlable).
+A Lighthouse SEO score checks basic technical signals; it does not establish
+index coverage, search demand, rankings, or traffic.
 
 A property owner must verify that URL-prefix property in Google Search Console.
 Add the real HTML verification token to `google_site_verification` in

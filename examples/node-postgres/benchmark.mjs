@@ -40,6 +40,10 @@ async function run(clients, admin, mode, workload, batch, requests) {
   const writeOnly = workload.startsWith('writes-');
   const count = cold ? 4096 / batch : requests;
   const table = workload === 'writes-unattached' ? 'public.direct_items' : 'public.items';
+  const update = {
+    name: `update-${table}`,
+    text: `UPDATE ${table} SET revision = revision + 1 WHERE id = $1`,
+  };
 
   // Reset only the disposable demo tables; this is outside the timed region.
   await admin.query('TRUNCATE public.items, public.direct_items');
@@ -53,6 +57,9 @@ async function run(clients, admin, mode, workload, batch, requests) {
   for (const client of clients) {
     await getRows(client, Array.from({ length: 128 }, (_, i) => i + 1), false);
     await getRows(client, [1], cached);
+    if (writeOnly || workload === 'mixed-5pct') {
+      await client.query({ ...update, values: [0] });
+    }
   }
   if (cold) {
     await admin.query("SELECT local_cache.invalidate('public.items')");
@@ -71,11 +78,7 @@ async function run(clients, admin, mode, workload, batch, requests) {
       const start = performance.now();
       try {
         if (write) {
-          await client.query({
-            name: `update-${table}`,
-            text: `UPDATE ${table} SET revision = revision + 1 WHERE id = $1`,
-            values: [(request * 17) % 128 + 1],
-          });
+          await client.query({ ...update, values: [(request * 17) % 128 + 1] });
           writes.push(performance.now() - start);
         } else {
           await getRows(client, keysFor(request, batch, cold), cached);

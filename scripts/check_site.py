@@ -14,12 +14,13 @@ class Page(HTMLParser):
     def __init__(self, text):
         super().__init__(convert_charrefs=True)
         self.ids, self.links, self.meta, self.copies = set(), [], {}, []
+        self.anchors = []
         self.h1 = 0
         self.canonical = None
         self.title = ""
         self.structured = []
         self.errors = []
-        self.in_title = self.in_json = False
+        self.in_head = self.in_title = self.in_json = False
         self.json_text = ""
         self.feed(text)
 
@@ -31,14 +32,20 @@ class Page(HTMLParser):
             self.ids.add(attrs["id"])
         if tag == "h1":
             self.h1 += 1
-        if tag == "title":
+        if tag == "head":
+            self.in_head = True
+        if tag == "title" and self.in_head:
             self.in_title = True
         if tag == "meta":
             self.meta[attrs.get("name", attrs.get("property"))] = attrs.get("content", "")
         if tag == "link" and attrs.get("rel") == "canonical":
+            if self.canonical is not None:
+                self.errors.append("duplicate canonical")
             self.canonical = attrs.get("href")
         if "href" in attrs:
             self.links.append(attrs["href"])
+            if tag == "a":
+                self.anchors.append(attrs["href"])
         if "src" in attrs:
             self.links.append(attrs["src"])
         if "data-copy" in attrs:
@@ -53,6 +60,8 @@ class Page(HTMLParser):
             self.json_text += text
 
     def handle_endtag(self, tag):
+        if tag == "head":
+            self.in_head = False
         if tag == "title":
             self.in_title = False
         if tag == "script" and self.in_json:
@@ -63,7 +72,7 @@ class Page(HTMLParser):
             self.in_json = False
 
 
-def check(root, base=BASE, preview=False):
+def check(root, base=BASE):
     base = base.rstrip("/") + "/"
     errors, pages, titles, descriptions = [], {}, set(), set()
     for path in root.rglob("*.html"):
@@ -77,7 +86,7 @@ def check(root, base=BASE, preview=False):
             errors.append(f"{relative}: expected one h1 and main-content")
         if page.canonical != url:
             errors.append(f"{relative}: incorrect canonical: {page.canonical}")
-        if ("noindex" in page.meta.get("robots", "")) != preview:
+        if "noindex" in page.meta.get("robots", ""):
             errors.append(f"{relative}: unexpected indexing policy")
         description = page.meta.get("description", "")
         if not page.title.strip() or page.title in titles:
@@ -88,11 +97,29 @@ def check(root, base=BASE, preview=False):
         descriptions.add(description)
         if not page.structured or page.meta.get("og:url") != url:
             errors.append(f"{relative}: missing structured data or wrong og:url")
+        for prefix in ('og', 'twitter'):
+            if page.meta.get(f'{prefix}:title') != page.title or page.meta.get(f'{prefix}:description') != description:
+                errors.append(f"{relative}: inconsistent {prefix} title or description")
+            image = page.meta.get(f'{prefix}:image', '')
+            if not image.startswith('https://'):
+                errors.append(f"{relative}: missing absolute {prefix} image URL")
+            else:
+                page.links.append(image)
         for target in page.copies:
             if target not in page.ids:
                 errors.append(f"{relative}: copy target not found: {target}")
     if not pages:
         errors.append("no HTML pages were built")
+    reachable, pending = set(), [base]
+    while pending:
+        url = pending.pop()
+        if url in reachable or url not in pages:
+            continue
+        reachable.add(url)
+        for target in pages[url].anchors:
+            pending.append(urlsplit(urljoin(url, target))._replace(query="", fragment="").geturl())
+    for url in sorted(pages.keys() - reachable):
+        errors.append(f"{url}: page is not reachable through links from the homepage")
     for url, page in pages.items():
         for target in page.links:
             absolute = urljoin(url, target)
@@ -124,9 +151,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--base-url", default=BASE)
-    parser.add_argument("--preview", action="store_true")
     args = parser.parse_args()
-    failures = check(args.directory, args.base_url, args.preview)
+    failures = check(args.directory, args.base_url)
     if failures:
         parser.exit(1, "\n".join(failures) + "\n")
-    print("PASS: built page metadata, JSON-LD, sitemap, links, fragments and copy targets")
+    print("PASS: metadata, JSON-LD, sitemap, crawlable pages, links, fragments and copy targets")

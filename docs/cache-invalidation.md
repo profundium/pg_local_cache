@@ -5,7 +5,7 @@ seo_title: "PostgreSQL Cache Invalidation: Commit and Rollback | pg_local_cache"
 description: Test pg_local_cache 2.0 invalidation with concurrent PostgreSQL sessions. Check uncommitted updates, read-your-writes, rollback, committed reads, and fallback rules.
 section: Cache invalidation
 permalink: /docs/cache-invalidation.html
-last_modified_at: "2026-09-05"
+last_modified_at: "2026-09-14"
 ---
 
 # Transaction-aware cache invalidation in PostgreSQL
@@ -20,6 +20,8 @@ path. A fill carries generation information so it can be rejected after an
 invalidation. Cached positive entries also carry tuple visibility information.
 An ineligible entry falls back to a source-table read. See the
 [technical reference](TECHNICAL.md#transaction-consistency) for the contract.
+
+{% include diagrams/transaction.html id="invalidation-transaction" %}
 
 ## Test with two sessions
 
@@ -75,10 +77,9 @@ that have written mapped data use the source-table path. An oversized row may
 be returned successfully without being cached. A cache hit rate near zero is
 not necessarily a failed installation: check the workload and bypass counters.
 
-Do not replace row locking with `mget`. When the application needs
-`SELECT ... FOR UPDATE`, use the ordinary PostgreSQL operation. Likewise, a
-successful example here says nothing about replica failover, a custom trigger
-setup, or an untested extension combination.
+When the application needs `SELECT ... FOR UPDATE`, use the ordinary PostgreSQL
+operation; `mget` does not replace row locking. This example does not test
+replica failover, custom trigger configurations, or untested extension combinations.
 
 ## Inspect the cause of a miss
 

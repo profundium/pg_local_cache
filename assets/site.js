@@ -13,7 +13,7 @@
       nav.dataset.open = 'false';
     });
     document.addEventListener('keydown', event => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || toggle.getAttribute('aria-expanded') !== 'true') return;
       toggle.setAttribute('aria-expanded', 'false');
       nav.dataset.open = 'false';
       toggle.focus();

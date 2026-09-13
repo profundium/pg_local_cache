@@ -5,7 +5,7 @@ seo_title: "PostgreSQL Row Cache Benchmarks: mget vs Batched SQL"
 description: Reproduce pg_local_cache 2.0 benchmarks against a prepared PostgreSQL ANY query, including warm reads, cold fills, concurrent updates, latency, and write overhead.
 section: Benchmarks
 permalink: /docs/BENCHMARKS.html
-last_modified_at: "2026-09-05"
+last_modified_at: "2026-09-14"
 ---
 
 # PostgreSQL primary-key cache benchmarks
@@ -46,12 +46,12 @@ samples. It does not accept an arbitrary production `DATABASE_URL`.
 | SQL mget | `SELECT local_cache.mget('public.items'::regclass, $1::bigint[]) AS rows` | Decode the text array and parse each JSON row |
 | Prepared SQL baseline | `SELECT id::text AS key, row_to_json(i)::text AS row FROM public.items AS i WHERE id = ANY($1::bigint[])` | Restore input order, duplicates, and missing positions, then parse each JSON row |
 
-Both queries use named prepared statements through node-postgres. The baseline
+Both queries use named prepared statements through node-postgres. Read and
+UPDATE statements are prepared on each connection before timing. The baseline
 reads the same attached table through ordinary PostgreSQL; attachment does not
-rewrite its SELECT. The JSON baseline is chosen to match the cache's whole-row
-contract. It is not a claim that JSON is the fastest format for every client.
-An application that needs only two columns should also measure its existing
-projection without whole-row JSON conversion.
+rewrite its SELECT. The JSON baseline matches the cache's whole-row contract.
+If your application needs only two columns, also measure its existing projection
+without whole-row JSON conversion.
 
 Source: [queries.mjs](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/queries.mjs)
 and [benchmark.mjs](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/benchmark.mjs).
