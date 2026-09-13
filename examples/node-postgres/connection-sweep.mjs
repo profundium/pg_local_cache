@@ -15,7 +15,7 @@ const seconds = integer('DURATION_SECONDS', 5, 120);
 const repeats = integer('REPEATS', 3, 20);
 const connections = (process.env.CONNECTIONS || '1,4,16,32').split(',').map(Number);
 const batches = (process.env.BATCHES || '1,64').split(',').map(Number);
-assert.ok(connections.length && new Set(connections).size === connections.length && connections.every(n => Number.isInteger(n) && n >= 1 && n <= 64));
+assert.ok(connections.length && new Set(connections).size === connections.length && connections.every(n => Number.isInteger(n) && n >= 1 && n <= 256));
 assert.ok(batches.length && new Set(batches).size === batches.length && batches.every(n => [1,16,64].includes(n)));
 const connection = demoConnection();
 const admin = new pg.Client(demoConnection(true));
