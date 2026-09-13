@@ -1,3 +1,6 @@
+export const MGET_SQL = "SELECT local_cache.mget('public.items'::regclass, $1::bigint[]) AS rows";
+export const ANY_SQL = 'SELECT id::text AS key, row_to_json(i)::text AS row FROM public.items AS i WHERE id = ANY($1::bigint[])';
+
 // Both paths return one object (or null) per requested key.
 export async function getRows(client, keys, cached = true) {
   if (!Array.isArray(keys) || keys.length > 1024) {
@@ -13,7 +16,7 @@ export async function getRows(client, keys, cached = true) {
   if (cached) {
     const result = await client.query({
       name: 'demo-mget',
-      text: "SELECT local_cache.mget('public.items'::regclass, $1::bigint[]) AS rows",
+      text: MGET_SQL,
       values: [keys],
     });
     return result.rows[0].rows.map(row => row === null ? null : JSON.parse(row));
@@ -21,7 +24,7 @@ export async function getRows(client, keys, cached = true) {
 
   const result = await client.query({
     name: 'demo-any',
-    text: 'SELECT id::text AS key, row_to_json(i)::text AS row FROM public.items AS i WHERE id = ANY($1::bigint[])',
+    text: ANY_SQL,
     values: [keys],
   });
   const rows = new Map(result.rows.map(row => [row.key, row.row]));
