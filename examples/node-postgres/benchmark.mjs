@@ -145,21 +145,24 @@ async function main() {
     await admin.query('SELECT sum(octet_length(value)) FROM public.items');
     const health = (await admin.query('SELECT local_cache.health() AS health')).rows[0].health;
     const results = [];
-    for (let repeat = 1; repeat <= repeats; repeat++) {
-      const modes = repeat % 2 ? ['postgres-any', 'mget'] : ['mget', 'postgres-any'];
-      for (const batch of batches) {
-        for (const workload of ['warm', 'cold-fill', 'mixed-5pct']) {
-          for (const mode of modes) {
-            console.error(`repeat ${repeat}: ${workload}, batch ${batch}, ${mode}`);
-            results.push({ repeat, ...await run(clients, admin, mode, workload, batch, requests) });
+    let failure;
+    try {
+      for (let repeat = 1; repeat <= repeats; repeat++) {
+        const modes = repeat % 2 ? ['postgres-any', 'mget'] : ['mget', 'postgres-any'];
+        for (const batch of batches) {
+          for (const workload of ['warm', 'cold-fill', 'mixed-5pct']) {
+            for (const mode of modes) {
+              console.error(`repeat ${repeat}: ${workload}, batch ${batch}, ${mode}`);
+              results.push({ repeat, ...await run(clients, admin, mode, workload, batch, requests) });
+            }
           }
         }
+        const writeCases = repeat % 2 ? ['writes-unattached', 'writes-attached'] : ['writes-attached', 'writes-unattached'];
+        for (const workload of writeCases) {
+          results.push({ repeat, ...await run(clients, admin, 'postgres-any', workload, 1, requests) });
+        }
       }
-      const writeCases = repeat % 2 ? ['writes-unattached', 'writes-attached'] : ['writes-attached', 'writes-unattached'];
-      for (const workload of writeCases) {
-        results.push({ repeat, ...await run(clients, admin, 'postgres-any', workload, 1, requests) });
-      }
-    }
+    } catch (error) { failure = error; }
     console.log(JSON.stringify({
       schema: 1, measured_at: new Date().toISOString(),
       extension_ref: '8569a937abb9ba1859ffb9c2a4dbc34f076fbe20',
@@ -167,7 +170,9 @@ async function main() {
       environment: { ...setup, health, node: process.version, client_os: platform(), client_arch: arch(), cpu: cpus()[0]?.model, visible_cpus: cpus().length },
       workload: { concurrency, requests_per_sample: requests, repeats, batches, rows: 4096, hot_rows: 128, value_bytes: 128, protocol: 'prepared statements', transport: 'loopback TCP', closed_loop: true },
       results,
+      ...(failure ? { error: { message: failure.message, code: failure.code ?? null } } : {}),
     }, null, 2));
+    if (failure) throw failure;
   } finally {
     await Promise.allSettled([admin.end(), ...clients.map(client => client.end())]);
   }
