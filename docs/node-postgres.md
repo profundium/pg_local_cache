@@ -1,17 +1,16 @@
 ---
 layout: doc
 title: Batch row lookups with node-postgres
-seo_title: "PostgreSQL mget with Node.js and node-postgres | pg_local_cache"
+seo_title: "Batch PostgreSQL Row Lookups with node-postgres"
 description: Use pg_local_cache 2.0 from Node.js with a parameterized bigint array. Decode text[] results, preserve order and nulls, and compare with a prepared ANY query.
 section: Node.js
 permalink: /docs/node-postgres.html
-last_modified_at: "2026-09-05"
+last_modified_at: "2026-09-14"
 ---
 
 # Batch row lookups with node-postgres
 
-The extension exposes a SQL function. You do not need a new wire protocol or a
-custom client library to use its SQL API.
+The extension exposes a SQL function that works with existing PostgreSQL clients.
 
 Start the [demo](QUICKSTART.md), install the example's pinned dependency, and
 run its integration assertions:

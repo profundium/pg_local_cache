@@ -15,10 +15,10 @@ layout: default
     </nav>
   </aside>
   <article class="doc-content">
-    <div class="doc-heading">
+    <nav class="doc-heading" aria-label="Breadcrumb">
       <a href="{{ '/' | relative_url }}">pg_local_cache {{ site.release_series }}</a>
-      <span>/</span><span>{{ page.section | default: page.title }}</span>
-    </div>
+      <span aria-hidden="true">/</span><span aria-current="page">{{ page.section | default: page.title }}</span>
+    </nav>
     {{ content }}
     {% if page.last_modified_at %}<p>Updated <time datetime="{{ page.last_modified_at | date: '%Y-%m-%d' }}">{{ page.last_modified_at | date: '%B %-d, %Y' }}</time>.</p>{% endif %}
   </article>

@@ -20,6 +20,10 @@ kramdown:
   syntax_highlighter: rouge
 permalink: pretty
 exclude:
+  - benchmark.json
+  - benchmark.md
+  - benchmark-artifact
+  - qa-artifacts
   - README.md
   - CONTRIBUTING.md
   - PRODUCT.md

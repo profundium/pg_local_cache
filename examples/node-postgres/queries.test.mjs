@@ -23,7 +23,7 @@ test('ANY baseline restores order, duplicates and nulls', async () => {
 test('invalid keys do not reach the database', async () => {
   const client = { query: () => { throw new Error('unexpected query'); } };
   assert.deepEqual(await getRows(client, []), []);
-  for (const keys of [[1.5], ['1'], [undefined], [Number.MAX_SAFE_INTEGER + 1]]) {
+  for (const keys of [[1.5], ['1'], [undefined], Array(1), [Number.MAX_SAFE_INTEGER + 1]]) {
     await assert.rejects(getRows(client, keys), TypeError);
   }
   await assert.rejects(getRows(client, Array(1025).fill(1)), RangeError);

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the quickstart's SQL and Node commands verbatim against its disposable DB."""
+import argparse
 from pathlib import Path
 import re
 import subprocess
@@ -8,10 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--skip-benchmark', action='store_true', help='Run only the functional examples')
+    args = parser.parse_args()
     text = (ROOT / 'docs/QUICKSTART.md').read_text()
     # Startup and teardown are owned by Actions, so cleanup also runs on failure.
     # These are the commands a reader runs after `compose up --wait`.
-    sections = ['Read as an application role', 'Check commit and rollback', 'Compare with ordinary SQL']
+    sections = ['Read as an application role', 'Check commit and rollback']
+    if not args.skip_benchmark:
+        sections.append('Compare with ordinary SQL')
     for heading in sections:
         section = text.split(f'\n## {heading}\n', 1)[1].split('\n## ', 1)[0]
         commands = re.findall(r'```bash\n(.*?)\n```', section, re.S)
