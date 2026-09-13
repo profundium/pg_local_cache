@@ -12,12 +12,14 @@ DATA = sql/pg_local_cache--1.0.0.sql \
 	sql/pg_local_cache--1.3.0.sql \
 	sql/pg_local_cache--2.0.0.sql \
 	sql/pg_local_cache--2.0.1.sql \
+	sql/pg_local_cache--2.0.2.sql \
 	sql/pg_local_cache--1.0.0--1.1.0.sql \
 	sql/pg_local_cache--1.1.0--1.2.0.sql \
 	sql/pg_local_cache--1.2.0--1.2.1.sql \
 	sql/pg_local_cache--1.2.1--1.3.0.sql \
 	sql/pg_local_cache--1.3.0--2.0.0.sql \
-	sql/pg_local_cache--2.0.0--2.0.1.sql
+	sql/pg_local_cache--2.0.0--2.0.1.sql \
+	sql/pg_local_cache--2.0.1--2.0.2.sql
 PGFILEDESC = "pg_local_cache - transaction-aware primary-key row cache"
 EXTRA_CLEAN = tests/unit/resp_test tests/unit/resp_test_sanitized
 
