@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { demoConnection, getRows } from './queries.mjs';
 
-function integer(name, fallback, max) {
+export function integer(name, fallback, max) {
   const value = Number(process.env[name] || fallback);
   if (!Number.isInteger(value) || value < 1 || value > max) {
     throw new RangeError(`${name} must be an integer between 1 and ${max}`);
@@ -69,6 +69,8 @@ async function run(clients, admin, mode, workload, batch, requests) {
   const before = await counters(admin);
   const reads = [], writes = [];
   let next = 0, readKeys = 0, failure;
+  const cpuStart = process.cpuUsage();
+  const loopStart = performance.eventLoopUtilization();
   const started = performance.now();
   await Promise.all(clients.map(async client => {
     while (!failure) {
@@ -89,6 +91,8 @@ async function run(clients, admin, mode, workload, batch, requests) {
     }
   }));
   const seconds = (performance.now() - started) / 1000;
+  const cpu = process.cpuUsage(cpuStart);
+  const eventLoopUtilization = performance.eventLoopUtilization(loopStart).utilization;
   if (failure) throw failure;
   const after = await counters(admin);
   const stats = Object.fromEntries(['sql_cache_hits', 'sql_cache_misses', 'sql_cache_bypasses', 'sql_cache_fills']
@@ -103,6 +107,8 @@ async function run(clients, admin, mode, workload, batch, requests) {
     read_requests: reads.length, write_requests: writes.length,
     requested_read_keys: readKeys, requested_read_keys_s: readKeys / seconds,
     read_latency: latency(reads), write_latency: latency(writes), counters: stats,
+    client_cpu_cores: (cpu.user + cpu.system) / 1e6 / seconds,
+    event_loop_utilization: eventLoopUtilization,
   };
 }
 
