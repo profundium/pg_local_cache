@@ -13,7 +13,7 @@ def number(value):
 
 
 def summary(data):
-    if data.get("error"):
+    if "error" in data:
         raise ValueError(f"benchmark did not complete: {data['error']}")
     if data.get("schema") != 1 or not data.get("results"):
         raise ValueError("expected schema 1 and at least one recorded sample")

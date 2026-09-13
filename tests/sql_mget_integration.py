@@ -93,6 +93,60 @@ def stats() -> dict[str, int]:
     return json.loads(sql("SELECT local_cache.stats()::text"))
 
 
+def assert_mget_backend_memory_bounded(relation: str) -> None:
+    context_names = ("SPI Plan", "CachedPlanSource", "CachedPlanQuery")
+    values = ", ".join(f"('{name}')" for name in context_names)
+
+    def snapshot(label: str) -> str:
+        return (
+            "SELECT "
+            f"'{label}|' || wanted.name || '|' || "
+            "count(context.name)::text || '|' || "
+            "coalesce(sum(context.total_bytes), 0)::text "
+            f"FROM (VALUES {values}) AS wanted(name) "
+            "LEFT JOIN pg_backend_memory_contexts AS context "
+            "ON context.name = wanted.name "
+            "GROUP BY wanted.name ORDER BY wanted.name;"
+        )
+
+    probe = [
+        "BEGIN;",
+        "PREPARE pglc_mget_memory (bigint[]) AS "
+        f"SELECT local_cache.mget('{relation}'::regclass, $1);",
+        "EXECUTE pglc_mget_memory(ARRAY[1]::bigint[]);",
+        snapshot("before"),
+        "\\set ON_ERROR_STOP off",
+        "SAVEPOINT pglc_mget_memory_error;",
+        "EXECUTE pglc_mget_memory(ARRAY[" + ",".join(["1"] * 1025) + "]::bigint[]);",
+        "\\set ON_ERROR_STOP on",
+        "ROLLBACK TO SAVEPOINT pglc_mget_memory_error;",
+        *["EXECUTE pglc_mget_memory(ARRAY[1]::bigint[]);" for _ in range(200)],
+        snapshot("after"),
+        "DEALLOCATE pglc_mget_memory;",
+        "ROLLBACK;",
+    ]
+    output = sql("\n".join(probe), script=True)
+    assert "at most 1024 keys" in output.lower(), output
+
+    observed: dict[str, dict[str, tuple[int, int]]] = {"before": {}, "after": {}}
+    pattern = re.compile(
+        r"^(before|after)\|(SPI Plan|CachedPlanSource|CachedPlanQuery)\|"
+        r"(\d+)\|(\d+)$"
+    )
+    for line in output.splitlines():
+        match = pattern.fullmatch(line)
+        if match:
+            phase, name, count, total_bytes = match.groups()
+            observed[phase][name] = (int(count), int(total_bytes))
+    for name in context_names:
+        assert name in observed["before"], output
+        assert name in observed["after"], output
+        before_count, before_bytes = observed["before"][name]
+        after_count, after_bytes = observed["after"][name]
+        assert after_count <= before_count + 1, (name, observed)
+        assert after_bytes <= before_bytes + 64 * 1024, (name, observed)
+
+
 def main() -> None:
     suffix = str(os.getpid())
     relation = f"public.pglc_mget_{suffix}"
@@ -157,6 +211,7 @@ def main() -> None:
         )
         assert warm == expected[:2], warm
         assert stats()["sql_cache_hits"] > before["sql_cache_hits"]
+        assert_mget_backend_memory_bounded(relation)
 
         before = stats()
         plan = app_sql(
@@ -217,7 +272,10 @@ def main() -> None:
             f"SELECT local_cache.mget('{relation}'::regclass, ARRAY[1]::bigint[])",
             "permission denied",
         )
-        print("ok: mget order, duplicates, NULLs, cache, fallback, ACL, and composite keys")
+        print(
+            "ok: mget order, duplicates, NULLs, cache, fallback, ACL, "
+            "composite keys, and bounded backend memory"
+        )
     finally:
         subprocess.run(
             [
@@ -249,4 +307,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

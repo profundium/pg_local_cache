@@ -165,7 +165,7 @@ async function main() {
     } catch (error) { failure = error; }
     console.log(JSON.stringify({
       schema: 1, measured_at: new Date().toISOString(),
-      extension_ref: '8569a937abb9ba1859ffb9c2a4dbc34f076fbe20',
+      extension_ref: process.env.PGLC_EXTENSION_REF || '8569a937abb9ba1859ffb9c2a4dbc34f076fbe20',
       harness_ref: process.env.PGLC_HARNESS_REF || gitRevision(),
       environment: { ...setup, health, node: process.version, client_os: platform(), client_arch: arch(), cpu: cpus()[0]?.model, visible_cpus: cpus().length },
       workload: { concurrency, requests_per_sample: requests, repeats, batches, rows: 4096, hot_rows: 128, value_bytes: 128, protocol: 'prepared statements', transport: 'loopback TCP', closed_loop: true },

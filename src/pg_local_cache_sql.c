@@ -60,6 +60,7 @@ typedef struct PgLocalCacheSqlMeta
 typedef struct PgLocalCacheSqlMgetState
 {
 	MemoryContext context;
+	MemoryContextCallback cleanup;
 	Oid			relation_oid;
 	Oid			user_oid;
 	uint64		config_generation;
@@ -575,12 +576,22 @@ pglc_sql_source_visibility(TransactionId source_xmin,
 }
 
 static void
+pglc_sql_mget_plan_free(void *arg)
+{
+	PgLocalCacheSqlMgetState *state = arg;
+
+	if (state->source_plan != NULL)
+	{
+		SPI_freeplan(state->source_plan);
+		state->source_plan = NULL;
+	}
+}
+
+static void
 pglc_sql_mget_state_free(PgLocalCacheSqlMgetState *state)
 {
 	if (state == NULL)
 		return;
-	if (state->source_plan != NULL)
-		SPI_freeplan(state->source_plan);
 	MemoryContextDelete(state->context);
 	pfree(state);
 }
@@ -598,6 +609,7 @@ pglc_sql_mget_state(FunctionCallInfo fcinfo, Oid relation_oid)
 	char	   *qualified_relation;
 	char	   *query;
 	Oid			argument_types[PGLC_MAX_KEY_COLUMNS];
+	SPIPlanPtr	source_plan;
 	int			key_index;
 
 	if (state != NULL && state->relation_oid == relation_oid &&
@@ -630,6 +642,10 @@ pglc_sql_mget_state(FunctionCallInfo fcinfo, Oid relation_oid)
 	state->context = AllocSetContextCreate(function_context,
 											"pg_local_cache SQL mget",
 											ALLOCSET_DEFAULT_SIZES);
+	/* SPI_keepplan outlives fn_mcxt, including separate prepared executions. */
+	state->cleanup.func = pglc_sql_mget_plan_free;
+	state->cleanup.arg = state;
+	MemoryContextRegisterResetCallback(state->context, &state->cleanup);
 	MemoryContextSwitchTo(state->context);
 	state->relation_oid = relation_oid;
 	state->user_oid = GetUserId();
@@ -689,9 +705,10 @@ pglc_sql_mget_state(FunctionCallInfo fcinfo, Oid relation_oid)
 		qualified_relation, where_clause.data);
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "pg_local_cache SQL mget could not connect to SPI");
-	state->source_plan = SPI_prepare(query, meta.key_count, argument_types);
-	if (state->source_plan == NULL || SPI_keepplan(state->source_plan) != 0)
+	source_plan = SPI_prepare(query, meta.key_count, argument_types);
+	if (source_plan == NULL || SPI_keepplan(source_plan) != 0)
 		elog(ERROR, "pg_local_cache SQL mget could not retain its source plan");
+	state->source_plan = source_plan;
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "pg_local_cache SQL mget could not finish SPI setup");
 	table_close(relation, NoLock);
