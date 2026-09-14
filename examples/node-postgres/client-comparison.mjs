@@ -57,8 +57,11 @@ async function nodeWorker() {
 }
 
 async function runClient(admin, config) {
+  const clientContainer = process.env.PGLC_PGX_CONTAINER;
   const child = config.driver === 'go-pgx'
-    ? spawn(process.env.PGLC_PGX_BIN || '/tmp/pglc-go-pgx', [], { stdio: ['pipe', 'pipe', 'inherit'] })
+    ? (clientContainer
+      ? spawn('docker', ['exec', '-i', '-e', `GOMAXPROCS=${process.env.GOMAXPROCS || 8}`, clientContainer, 'timeout', String(config.seconds + 50), '/tmp/pglc-go-pgx'], { stdio: ['pipe', 'pipe', 'inherit'] })
+      : spawn(process.env.PGLC_PGX_BIN || '/tmp/pglc-go-pgx', [], { stdio: ['pipe', 'pipe', 'inherit'] }))
     : spawn(process.execPath, [workerFile, '--worker'], { stdio: ['pipe', 'pipe', 'inherit'] });
   const exited = new Promise((resolve, reject) => {
     child.once('error', reject);
@@ -74,7 +77,8 @@ async function runClient(admin, config) {
   const watchdog = setTimeout(() => child.kill(), (config.seconds + 60) * 1000);
   let finish;
   try {
-    child.stdin.write(JSON.stringify({ ...config, port: demoConnection().port, mget_sql: MGET_TEXT_SQL, any_sql: ANY_SQL }) + '\n');
+    child.stdin.write(JSON.stringify({ ...config, port: clientContainer ? 5432 : demoConnection().port, mget_sql: MGET_TEXT_SQL, any_sql: ANY_SQL,
+      resp_port: clientContainer ? 6380 : integer('PGLC_DEMO_RESP_PORT', 56379, 65535), resp_token: 'DemoRespToken_0123456789abcdef0123456789' }) + '\n');
     const ready = await message(); assert.equal(ready.ready, true);
     const before = (await admin.query('SELECT local_cache.stats() AS s')).rows[0].s;
     finish = await startResources(admin);
@@ -84,12 +88,18 @@ async function runClient(admin, config) {
     const stop = finish; finish = null;
     const server = await stop(result.requests);
     const after = (await admin.query('SELECT local_cache.stats() AS s')).rows[0].s;
-    const counters = Object.fromEntries(['sql_cache_hits', 'sql_cache_misses', 'sql_cache_fills', 'sql_cache_bypasses']
+    const counters = Object.fromEntries(['sql_cache_hits', 'sql_cache_misses', 'sql_cache_fills', 'sql_cache_bypasses',
+      'cache_hit', 'cache_miss', 'client_mget_keys', 'client_request_errors', 'client_limit_rejections', 'database_reads']
       .map(key => [key, Number(after[key]) - Number(before[key])]));
     for (const value of Object.values(counters)) assert.ok(Number.isFinite(value) && value >= 0);
     if (config.mode === 'mget') {
       assert.equal(counters.sql_cache_hits, result.requests * config.batch);
       assert.equal(counters.sql_cache_misses + counters.sql_cache_fills + counters.sql_cache_bypasses, 0);
+    }
+    if (config.mode === 'resp-mget') {
+      assert.equal(counters.cache_hit, result.requests * config.batch);
+      assert.equal(counters.client_mget_keys, result.requests * config.batch);
+      assert.equal(counters.cache_miss + counters.database_reads + counters.client_request_errors + counters.client_limit_rejections, 0);
     }
     child.stdin.end('done\n');
     await exited;
@@ -102,6 +112,8 @@ async function runClient(admin, config) {
 }
 
 async function main() {
+  const compareRESP = process.env.COMPARE_RESP === '1';
+  assert.ok(!process.env.PGLC_PGX_CONTAINER || compareRESP, 'container placement requires COMPARE_RESP=1');
   const seconds = integer('DURATION_SECONDS', 10, 120), repeats = integer('REPEATS', 3, 20);
   const connections = (process.env.CONNECTIONS || '4,64,256').split(',').map(Number);
   const batches = (process.env.BATCHES || '64').split(',').map(Number);
@@ -117,19 +129,27 @@ async function main() {
       current_setting('server_version') AS postgres_version, current_setting('max_connections')::int AS max_connections,
       current_setting('superuser_reserved_connections')::int AS reserved_connections,
       current_setting('shared_buffers') AS shared_buffers,
+      local_cache.health() AS health,
       (SELECT count(*)::int FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()) AS other_sessions`)).rows[0];
     assert.equal(environment.database, 'pglc_demo');
     assert.equal(environment.marker, 'pg_local_cache disposable demo');
     assert.match(environment.extension_version, /^2\.0\./);
     assert.equal(environment.other_sessions, 0);
     assert.ok(Math.max(...connections) + 1 < environment.max_connections - environment.reserved_connections);
+    if (compareRESP) {
+      assert.ok(environment.health.ready && environment.health.resp_enabled, 'start the RESP demo overlay first');
+      assert.ok(Math.max(...connections) < environment.health.max_clients, 'leave RESP connection headroom');
+      assert.equal(environment.health.active_clients, 0, 'other RESP clients are connected');
+    }
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM public.items')).rows[0].n, 4096);
     await admin.query('SELECT sum(octet_length(value)) FROM public.items');
     await getRows(admin, Array.from({ length: 128 }, (_, i) => i + 1));
-    const variants = [['node-json', 'postgres-any'], ['node-text', 'mget'], ['node-json', 'mget'], ['go-pgx', 'postgres-any'], ['go-pgx', 'mget']];
+    const variants = compareRESP ? [['go-pgx', 'postgres-any'], ['go-pgx', 'mget'], ['go-pgx', 'resp-mget']]
+      : [['node-json', 'postgres-any'], ['node-text', 'mget'], ['node-json', 'mget'], ['go-pgx', 'postgres-any'], ['go-pgx', 'mget']];
     for (let repeat = 1; repeat <= repeats; repeat++) {
       // Rotate the first client and reverse connection/batch order between repetitions.
-      const order = [...variants.slice(repeat - 1), ...variants.slice(0, repeat - 1)];
+      const first = (repeat - 1) % variants.length;
+      const order = [...variants.slice(first), ...variants.slice(0, first)];
       const levels = repeat % 2 ? connections : [...connections].reverse();
       const sizes = repeat % 2 ? batches : [...batches].reverse();
       for (const batch of sizes) for (const clients of levels) for (const [driver, mode] of order) {
@@ -144,10 +164,12 @@ async function main() {
   const pgVersion = JSON.parse(await readFile(new URL('./node_modules/pg/package.json', import.meta.url))).version;
   console.log(JSON.stringify({ schema: 1, measured_at: new Date().toISOString(), harness_ref: revision.trim(),
     extension_ref: environment?.extension_build_id === 'local' ? null : environment?.extension_build_id ?? null,
-    environment: { ...environment, node: process.version, pg: pgVersion },
+    environment: { ...environment, node: process.version, pg: pgVersion,
+      client_placement: process.env.PGLC_PGX_CONTAINER ? 'Linux VM, separate client container, server network namespace' : 'Mac/host through Docker published ports' },
     workload: { seconds, repeats, connections, batches, fixed_keys: true, persistent_connections: true,
-      protocol: 'prepared', all_clients_decode_json_and_restore_positions: true, server_sample_interval_ms: 500 },
-    queries: { mget_text: MGET_TEXT_SQL, mget_json: MGET_SQL, postgres_any: ANY_SQL },
+      protocol: compareRESP ? 'prepared SQL and RESP2 MGET, no pipelining' : 'prepared', all_clients_decode_json_and_restore_positions: true, server_sample_interval_ms: 500 },
+    queries: { mget_text: MGET_TEXT_SQL, mget_json: MGET_SQL, postgres_any: ANY_SQL,
+      ...(compareRESP ? { resp_mget: 'MGET CRUD:pglc_demo.public.items:{"id":1} ...' } : {}) },
     results, ...(failure ? { error: { message: failure.message } } : {}) }, null, 2));
   if (failure) throw failure;
 }

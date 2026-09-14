@@ -28,13 +28,15 @@ const (
 )
 
 type inputConfig struct {
-	Clients int    `json:"clients"`
-	Batch   int    `json:"batch"`
-	Seconds int    `json:"seconds"`
-	Mode    string `json:"mode"`
-	MgetSQL string `json:"mget_sql"`
-	AnySQL  string `json:"any_sql"`
-	Port    int    `json:"port"`
+	Clients   int    `json:"clients"`
+	Batch     int    `json:"batch"`
+	Seconds   int    `json:"seconds"`
+	Mode      string `json:"mode"`
+	MgetSQL   string `json:"mget_sql"`
+	AnySQL    string `json:"any_sql"`
+	Port      int    `json:"port"`
+	RespPort  int    `json:"resp_port"`
+	RespToken string `json:"resp_token"`
 }
 
 type readyMessage struct {
@@ -78,8 +80,11 @@ func validateConfig(cfg inputConfig) error {
 	if cfg.Seconds < 1 || cfg.Seconds > 120 {
 		return fmt.Errorf("seconds must be between 1 and 120")
 	}
-	if cfg.Mode != "mget" && cfg.Mode != "postgres-any" {
-		return fmt.Errorf("mode must be mget or postgres-any")
+	if cfg.Mode != "mget" && cfg.Mode != "postgres-any" && cfg.Mode != "resp-mget" {
+		return fmt.Errorf("mode must be mget, postgres-any, or resp-mget")
+	}
+	if cfg.Mode == "resp-mget" && (cfg.RespPort < 1 || cfg.RespPort > 65535 || len(cfg.RespToken) < 32) {
+		return fmt.Errorf("RESP requires a valid port and demo authentication token")
 	}
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
@@ -352,7 +357,7 @@ func latency(values []float64) (latencyResult, error) {
 	}, nil
 }
 
-func runTimed(cfg inputConfig, connections []*pgx.Conn, keys []*int64) (timedResult, error) {
+func runTimed(cfg inputConfig, requests []func(context.Context) error) (timedResult, error) {
 	var cpuStart syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &cpuStart); err != nil {
 		return timedResult{}, fmt.Errorf("get starting CPU usage: %w", err)
@@ -362,7 +367,7 @@ func runTimed(cfg inputConfig, connections []*pgx.Conn, keys []*int64) (timedRes
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	results := make(chan workerResult, len(connections))
+	results := make(chan workerResult, len(requests))
 	var waitGroup sync.WaitGroup
 	var errorMu sync.Mutex
 	var firstError error
@@ -374,14 +379,14 @@ func runTimed(cfg inputConfig, connections []*pgx.Conn, keys []*int64) (timedRes
 			cancel()
 		}
 	}
-	for _, conn := range connections {
+	for _, request := range requests {
 		waitGroup.Add(1)
-		go func(conn *pgx.Conn) {
+		go func(request func(context.Context) error) {
 			defer waitGroup.Done()
 			local := workerResult{latencies: make([]float64, 0, 128)}
 			for time.Now().Before(deadline) {
 				requestStarted := time.Now()
-				err := timedRequest(ctx, conn, cfg, keys)
+				err := request(ctx)
 				if err != nil {
 					errorMu.Lock()
 					hasFailure := firstError != nil
@@ -394,7 +399,7 @@ func runTimed(cfg inputConfig, connections []*pgx.Conn, keys []*int64) (timedRes
 				local.latencies = append(local.latencies, float64(time.Since(requestStarted))/float64(time.Millisecond))
 			}
 			results <- local
-		}(conn)
+		}(request)
 	}
 	waitGroup.Wait()
 	finished := time.Now()
@@ -467,6 +472,9 @@ func run(reader *bufio.Reader, writer *bufio.Writer) error {
 	}
 	setupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if cfg.Mode == "resp-mget" {
+		return runRESP(reader, writer, cfg, setupCtx)
+	}
 	connections, err := connectAll(setupCtx, cfg)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
@@ -497,7 +505,12 @@ func run(reader *bufio.Reader, writer *bufio.Writer) error {
 	if strings.TrimSpace(goLine) != "go" {
 		return fmt.Errorf("expected go command")
 	}
-	result, err := runTimed(cfg, connections, fixedKeys(cfg.Batch))
+	keys := fixedKeys(cfg.Batch)
+	requests := make([]func(context.Context) error, len(connections))
+	for i, conn := range connections {
+		requests[i] = func(ctx context.Context) error { return timedRequest(ctx, conn, cfg, keys) }
+	}
+	result, err := runTimed(cfg, requests)
 	if err != nil {
 		return err
 	}
