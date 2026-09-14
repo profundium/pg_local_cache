@@ -2,13 +2,13 @@ name: pglc-demo
 services:
   postgres:
     build:
-      # pg_local_cache 2.0.1; the demo does not track a moving branch.
-      context: https://github.com/profundium/pg_local_cache.git#8569a937abb9ba1859ffb9c2a4dbc34f076fbe20
+      # Build the checkout the user and CI are actually testing.
+      context: ..
       target: extension
       args:
         POSTGRES_MAJOR: "${PGLC_DEMO_PG:-16}"
         POSTGRES_VARIANT: bookworm
-        PGLC_BUILD_ID: 8569a937abb9ba1859ffb9c2a4dbc34f076fbe20
+        PGLC_BUILD_ID: "${PGLC_EXTENSION_REF:-local}"
     environment:
       PGDATA: /var/lib/postgresql/data
       POSTGRES_DB: pglc_demo

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 
 const exec = promisify(execFile);
 let container;
@@ -45,7 +46,7 @@ export function parseResources(stdout) {
 
 export async function startResources(admin) {
   if (!container) {
-    const { stdout } = await exec('docker', ['compose', '-f', 'examples/compose.yaml', 'ps', '-q', 'postgres']);
+    const { stdout } = await exec('docker', ['compose', '-f', fileURLToPath(new URL('../compose.yaml', import.meta.url)), 'ps', '-q', 'postgres']);
     container = stdout.trim(); assert.ok(container, 'start the disposable demo first');
   }
   const samples = [];

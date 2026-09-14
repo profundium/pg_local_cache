@@ -17,11 +17,17 @@ def summary(data):
         raise ValueError(f"benchmark did not complete: {data['error']}")
     if data.get("schema") != 1 or not data.get("results"):
         raise ValueError("expected schema 1 and at least one recorded sample")
+    if "driver" in data["results"][0]:
+        data = {**data, "results": [
+            {**row, "workload": f"{row['driver']} ({row['clients']} connections)",
+             "requested_read_keys_s": row["requests_s"] * row["batch"],
+             "read_latency": row["latency"], "write_latency": None}
+            for row in data["results"]]}
     environment = data["environment"]
     lines = ["# pg_local_cache benchmark", "",
              f"Measured: {data['measured_at']}",
              f"PostgreSQL: {environment['postgres_version']}; extension: {environment['extension_version']}",
-             f"Extension ref: `{data['extension_ref']}`; harness ref: `{data['harness_ref']}`", "",
+             f"Extension ref: `{data['extension_ref'] or 'unrecorded'}`; harness ref: `{data['harness_ref']}`", "",
              "Closed-loop client timings over loopback TCP. See the JSON for configuration and cache counters.", "",
              "| Repeat | Workload | Path | Batch | Requests/s | Requested read keys/s |",
              "|---:|---|---|---:|---:|---:|"]
