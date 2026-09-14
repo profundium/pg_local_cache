@@ -265,7 +265,7 @@ p, li { text-wrap: pretty; }
 .doc-content > p { max-width: 72ch; }
 .doc-content pre { overflow-x: auto; padding: 1.2rem; border: 1px solid var(--line-dark); color: var(--terminal-text); background: var(--terminal); font-size: .83rem; line-height: 1.65; }
 .doc-content :not(pre) > code { padding: .12rem .3rem; color: #003c9e; background: #edf3ff; font-size: .88em; }
-.table-scroll { max-width: 100%; overflow-x: auto; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+.table-scroll { max-width: 100%; overflow-x: auto; overflow-wrap: normal; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
 .doc-content table { width: 100%; border-collapse: collapse; font-size: .88rem; }
 .doc-content th, .doc-content td { padding: .7rem .8rem; border: 1px solid var(--line); text-align: left; }
 .doc-content th { background: var(--paper-alt); }
