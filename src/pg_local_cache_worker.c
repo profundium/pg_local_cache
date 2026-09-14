@@ -120,8 +120,9 @@ static bool cached_row_json(PgLocalCacheMapping *mapping,
 							MemoryContext result_context,
 							char **json, Size *json_length);
 static void ensure_mapping_current(const PgLocalCacheMapping *mapping);
-static char *command_mget_one(PgLocalCacheMapping *mapping, const char *raw_key,
-							  TimestampTz deadline, Size *response_length);
+static char *command_mget_one(PgLocalCacheMapping *mapping,
+								  const char *canonical, Datum *key_values,
+								  TimestampTz deadline, Size *response_length);
 static char *command_mget(PgLocalCacheRespArg *args, int argc,
 							  Size *response_length);
 static char *command_set(PgLocalCacheMapping *mapping, const char *raw_key,
@@ -1645,12 +1646,10 @@ note_resp_cache_lookup(bool hit, bool negative)
 }
 
 static char *
-command_mget_one(PgLocalCacheMapping *mapping, const char *raw_key,
-				 TimestampTz deadline, Size *response_length)
+command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
+					Datum *key_values, TimestampTz deadline,
+					Size *response_length)
 {
-	Datum		key_values[PGLC_MAX_KEY_COLUMNS];
-	char	   *canonical;
-	char	   *key_error = NULL;
 	char		cached_value[PGLC_VALUE_MAX];
 	Size		cached_length;
 	bool		negative;
@@ -1661,7 +1660,6 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *raw_key,
 	bool		waiter_counted = false;
 	uint64		load_id = 0;
 	TimestampTz wait_started;
-	Datum		values[PGLC_MAX_KEY_COLUMNS];
 	char	   *database_value = NULL;
 	Size		database_value_length = 0;
 	Size		database_payload_length = 0;
@@ -1669,16 +1667,9 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *raw_key,
 	TransactionId database_xmin = InvalidTransactionId;
 	MemoryContext result_context = CurrentMemoryContext;
 	int			statement_timeout_ms = pglc_statement_timeout_ms;
-	int			i;
 
 	if (deadline != 0 && GetCurrentTimestamp() >= deadline)
 		return pglc_resp_error("ERR MGET deadline exceeded", response_length);
-	if (!canonicalize_key(mapping, raw_key, key_values,
-						  &canonical, &key_error))
-		return pglc_resp_error(key_error, response_length);
-	(void) canonical;
-	for (i = 0; i < mapping->key_count; i++)
-		values[i] = key_values[i];
 
 	hit = pglc_cache_lookup_quiet(mapping, canonical,
 								 cached_value, sizeof(cached_value),
@@ -1798,7 +1789,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *raw_key,
 		begin_spi_transaction(statement_timeout_ms);
 		ensure_mapping_current(mapping);
 		pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
-		if (SPI_execute_plan(mapping->get_plan, values, NULL, true, 1) !=
+		if (SPI_execute_plan(mapping->get_plan, key_values, NULL, true, 1) !=
 			SPI_OK_SELECT)
 			elog(ERROR, "pg_local_cache MGET plan failed");
 		ensure_mapping_current(mapping);
@@ -1902,24 +1893,25 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 	TimestampTz deadline = TimestampTzPlusMilliseconds(
 		GetCurrentTimestamp(), pglc_statement_timeout_ms);
 	PgLocalCacheMapping **mappings;
-	char	  **raw_keys;
+	char	  **canonical_keys;
+	Datum	 (*key_values)[PGLC_MAX_KEY_COLUMNS];
 	int			key_index;
 	StringInfoData response;
 
 	mappings = palloc(mul_size(sizeof(*mappings), (Size) key_count));
-	raw_keys = palloc(mul_size(sizeof(*raw_keys), (Size) key_count));
+	canonical_keys = palloc(mul_size(sizeof(*canonical_keys), (Size) key_count));
+	key_values = palloc(mul_size(sizeof(*key_values), (Size) key_count));
 	for (key_index = 0; key_index < key_count; key_index++)
 	{
-		Datum		key_values[PGLC_MAX_KEY_COLUMNS];
-		char	   *canonical;
+		char	   *raw_key;
 		char	   *key_error = NULL;
 
 		if (!resolve_wire_key(&args[key_index + 1], &mappings[key_index],
-							  &raw_keys[key_index], &key_error) ||
-			!canonicalize_key(mappings[key_index], raw_keys[key_index],
-							  key_values, &canonical, &key_error))
+							  &raw_key, &key_error) ||
+			!canonicalize_key(mappings[key_index], raw_key,
+							  key_values[key_index], &canonical_keys[key_index],
+							  &key_error))
 			return pglc_resp_error(key_error, response_length);
-		(void) canonical;
 	}
 
 	pg_atomic_fetch_add_u64(&pglc_shared->client_mget_keys, (uint64) key_count);
@@ -1929,7 +1921,8 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 	{
 		Size		element_length;
 		char	   *element = command_mget_one(
-			mappings[key_index], raw_keys[key_index], deadline, &element_length);
+			mappings[key_index], canonical_keys[key_index],
+			key_values[key_index], deadline, &element_length);
 
 		if (element_length > 0 && element[0] == '-')
 		{
