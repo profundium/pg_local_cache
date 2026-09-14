@@ -5,14 +5,13 @@ seo_title: "Try a PostgreSQL Row Cache Locally | pg_local_cache"
 description: Run pg_local_cache 2.0 in disposable PostgreSQL, read sample rows, inspect cache hits, test updates, and remove the demo without changing an existing database.
 section: Quickstart
 permalink: /docs/QUICKSTART.html
-last_modified_at: "2026-09-14"
+last_modified_at: "2026-09-15"
 ---
 
 # Try pg_local_cache locally
 
-This demo creates a separate PostgreSQL 16 server with pg_local_cache 2.0.1.
-It does not install anything in your existing PostgreSQL server. The extension
-source is pinned to commit `8569a937abb9ba1859ffb9c2a4dbc34f076fbe20`.
+This demo builds pg_local_cache from your checkout in a separate PostgreSQL 16
+server. It does not install anything in your existing PostgreSQL server.
 
 You need Git, Docker, and Docker Compose with `up --wait` support. The image is
 built from source. Binary packages are tested on Linux amd64; a build on another
@@ -23,8 +22,12 @@ architecture does not establish equivalent performance or support.
 ```bash
 git clone https://github.com/profundium/pg_local_cache.git
 cd pg_local_cache
+export PGLC_EXTENSION_REF=$(git rev-parse HEAD)
 docker compose -f examples/compose.yaml up --build --wait
 ```
+
+The build records this clean checkout's revision. Rebuild after changing the
+extension source; use `PGLC_EXTENSION_REF=local` for uncommitted changes.
 
 The demo binds PostgreSQL to `127.0.0.1:55432`. It has no RESP listener and no
 persistent volume. Its data directory is a container-local tmpfs. Stopping the
@@ -95,13 +98,15 @@ See the [two-session SQL walkthrough](cache-invalidation.md) or the
 ## Compare with ordinary SQL
 
 ```bash
-npm --prefix examples/node-postgres run --silent benchmark > benchmark.json
+SERVER_RESOURCES=1 npm --prefix examples/node-postgres run --silent benchmark > benchmark.json
 python3 scripts/benchmark_report.py benchmark.json
 ```
 
 The benchmark resets the demo tables between samples. Do not use the demo to
 store data you need. Read the [methodology and limitations](BENCHMARKS.md)
-before interpreting the output.
+before interpreting the output. The JSON records the build ID read from the
+running server, along with PostgreSQL CPU, memory, and I/O. Builds without a
+source label report `local`, with an unknown extension revision.
 
 ## Remove the demo
 

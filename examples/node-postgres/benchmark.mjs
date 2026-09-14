@@ -133,6 +133,7 @@ async function main() {
       obj_description('public.items'::regclass) AS marker,
       obj_description('public.direct_items'::regclass) AS direct_marker,
       (SELECT extversion FROM pg_extension WHERE extname = 'pg_local_cache') AS extension_version,
+      current_setting('pg_local_cache.binary_build_id') AS extension_build_id,
       current_setting('server_version') AS postgres_version,
       current_setting('shared_buffers') AS shared_buffers,
       current_setting('pg_local_cache.cache_entries') AS cache_entries,
@@ -169,7 +170,7 @@ async function main() {
     } catch (error) { failure = error; }
     console.log(JSON.stringify({
       schema: 1, measured_at: new Date().toISOString(),
-      extension_ref: process.env.PGLC_EXTENSION_REF || '8569a937abb9ba1859ffb9c2a4dbc34f076fbe20',
+      extension_ref: setup.extension_build_id === 'local' ? null : setup.extension_build_id,
       harness_ref: process.env.PGLC_HARNESS_REF || gitRevision(),
       environment: { ...setup, health, node: process.version, client_os: platform(), client_arch: arch(), cpu: cpus()[0]?.model, visible_cpus: cpus().length },
       workload: { concurrency, requests_per_sample: requests, repeats, batches, rows: 4096, hot_rows: 128, value_bytes: 128, protocol: 'prepared statements', transport: 'loopback TCP', closed_loop: true },

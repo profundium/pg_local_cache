@@ -1,4 +1,5 @@
-# Optional overlay for measuring an exact local extension revision.
+# Compatibility with the recorded September 14 harness commands.
+# Current examples/compose.yaml already builds the local checkout.
 services:
   postgres:
     build:

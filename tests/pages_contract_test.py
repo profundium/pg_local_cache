@@ -216,6 +216,21 @@ class BenchmarkReportChecks(unittest.TestCase):
         self.assertIn('not process RSS', text)
         self.assertIn('| 2.000 | 25.000 | 128.000 | 1.000 / 2.000 |', text)
 
+    def test_application_client_report_keeps_driver_and_connections(self):
+        data = self.sample()
+        row = data['results'][0]
+        row.update(driver='go-pgx', clients=64, latency=row.pop('read_latency'))
+        del row['workload'], row['requested_read_keys_s'], row['write_latency']
+        text = report.summary(data)
+        self.assertIn('go-pgx (64 connections)', text)
+        self.assertIn('1,600.000', text)
+        self.assertNotIn('workload', row)
+
+    def test_unlabelled_build_does_not_invent_a_revision(self):
+        data = self.sample()
+        data['extension_ref'] = None
+        self.assertIn('Extension ref: `unrecorded`', report.summary(data))
+
 
 if __name__ == '__main__':
     unittest.main()

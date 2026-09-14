@@ -21,7 +21,7 @@ With Docker Compose, from this repository:
 docker compose -f examples/compose.yaml up --build --wait
 ```
 
-The demo builds extension 2.0.1 from a pinned commit. It binds PostgreSQL to
+The demo builds the extension from your checkout. It binds PostgreSQL to
 loopback port 55432, keeps disposable data in tmpfs, and mounts no host database.
 Follow the [quickstart](docs/QUICKSTART.md) to run queries and remove it.
 
@@ -40,13 +40,14 @@ whole-row objects, including duplicates and missing positions. It covers warm
 reads, cold cache fills, reads mixed with updates, and write overhead.
 
 ```bash
-npm --prefix examples/node-postgres run --silent benchmark > benchmark.json
+SERVER_RESOURCES=1 npm --prefix examples/node-postgres run --silent benchmark > benchmark.json
 python3 scripts/benchmark_report.py benchmark.json
 ```
 
-No reference speedup is claimed without a recorded run. The report includes
-requests/s, requested keys/s, read/write p50/p95/p99, cache counters, and the
-configuration. CI checks the harness; shared-runner timings are not a capacity
+The report includes requests/s, requested keys/s, read/write p50/p95/p99,
+cache counters, PostgreSQL CPU, memory and I/O, and the running binary's build ID.
+The benchmark page includes recorded Node.js and Go results. CI checks the
+checked-out extension; shared-runner timings are not a capacity
 estimate. See [row caching vs shared_buffers](docs/row-cache-vs-shared-buffers.md)
 for the work a hit can avoid and the work it still does.
 

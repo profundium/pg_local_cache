@@ -88,6 +88,7 @@ try {
   const environment = (await admin.query(`SELECT current_database() AS database,
     obj_description('public.items'::regclass) AS marker,
     (SELECT extversion FROM pg_extension WHERE extname = 'pg_local_cache') AS extension_version,
+    current_setting('pg_local_cache.binary_build_id') AS extension_build_id,
     current_setting('server_version') AS postgres_version,
     current_setting('max_connections')::int AS max_connections,
     current_setting('superuser_reserved_connections')::int AS superuser_reserved_connections,
@@ -138,7 +139,7 @@ try {
   const { stdout: revision } = await exec('git', ['rev-parse', 'HEAD']);
   const { stdout: version } = await exec('pgbench', ['--version']);
   console.log(JSON.stringify({ schema: 1, measured_at: new Date().toISOString(), harness_ref: revision.trim(),
-    extension_ref: process.env.PGLC_EXTENSION_REF || '8569a937abb9ba1859ffb9c2a4dbc34f076fbe20',
+    extension_ref: environment.extension_build_id === 'local' ? null : environment.extension_build_id,
     environment: { ...environment, node: process.version, pgbench: version.trim(), driver_version: JSON.parse(await readFile(new URL('./node_modules/pg/package.json', import.meta.url))).version },
     workload: { seconds, repeats, connections, batches, fixed_keys: true, persistent_connections: true,
       protocol: 'prepared', transport: `127.0.0.1:${connection.port}`, admin_connections: 1,
