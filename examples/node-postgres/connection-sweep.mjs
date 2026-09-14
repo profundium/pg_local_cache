@@ -138,6 +138,7 @@ try {
   const { stdout: revision } = await exec('git', ['rev-parse', 'HEAD']);
   const { stdout: version } = await exec('pgbench', ['--version']);
   console.log(JSON.stringify({ schema: 1, measured_at: new Date().toISOString(), harness_ref: revision.trim(),
+    extension_ref: process.env.PGLC_EXTENSION_REF || '8569a937abb9ba1859ffb9c2a4dbc34f076fbe20',
     environment: { ...environment, node: process.version, pgbench: version.trim(), driver_version: JSON.parse(await readFile(new URL('./node_modules/pg/package.json', import.meta.url))).version },
     workload: { seconds, repeats, connections, batches, fixed_keys: true, persistent_connections: true,
       protocol: 'prepared', transport: `127.0.0.1:${connection.port}`, admin_connections: 1,
