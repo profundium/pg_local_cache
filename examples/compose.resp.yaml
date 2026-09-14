@@ -1,0 +1,34 @@
+# Optional authenticated RESP listener for the same disposable demo dataset.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${PGLC_DEMO_RESP_PORT:-56379}:6380"
+    command:
+      - postgres
+      - -c
+      - max_connections=${PGLC_DEMO_MAX_CONNECTIONS:-300}
+      - -c
+      - max_worker_processes=16
+      - -c
+      - shared_preload_libraries=pg_local_cache
+      - -c
+      - pg_local_cache.database=pglc_demo
+      - -c
+      - pg_local_cache.bind_address=0.0.0.0
+      - -c
+      - pg_local_cache.port=6380
+      - -c
+      - pg_local_cache.workers=${PGLC_DEMO_RESP_WORKERS:-8}
+      - -c
+      - pg_local_cache.max_clients=512
+      - -c
+      - pg_local_cache.max_clients_per_worker=128
+      - -c
+      - pg_local_cache.cache_entries=1024
+      - -c
+      - pg_local_cache.memory_budget_mb=1024
+      - -c
+      - pg_local_cache.statement_timeout_ms=10000
+      - -c
+      # Public demo token, like the demo database password; loopback ports only.
+      - pg_local_cache.auth_token=DemoRespToken_0123456789abcdef0123456789
