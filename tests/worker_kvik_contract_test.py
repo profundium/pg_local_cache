@@ -103,7 +103,9 @@ class KvikWireContractTests(unittest.TestCase):
         self.assertNotIn("pglc_cache_lookup", mget)
         self.assertIn("TimestampTzPlusMilliseconds(", mget)
         self.assertIn("pglc_statement_timeout_ms", mget)
-        self.assertIn("raw_keys[key_index], deadline", mget)
+        self.assertIn("canonical_keys[key_index]", mget)
+        self.assertIn("key_values[key_index], deadline", mget)
+        self.assertEqual(mget.count("canonicalize_key("), 1)
         self.assertIn("ERR MGET deadline exceeded", mget)
 
         one = c_function(WORKER, "command_mget_one")
