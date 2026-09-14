@@ -5,6 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { demoConnection, getRows } from './queries.mjs';
+import { startResources } from './server-resources.mjs';
 
 export function integer(name, fallback, max) {
   const value = Number(process.env[name] || fallback);
@@ -67,6 +68,7 @@ async function run(clients, admin, mode, workload, batch, requests) {
     await getRows(clients[0], Array.from({ length: 128 }, (_, i) => i + 1));
   }
   const before = await counters(admin);
+  const finishResources = process.env.SERVER_RESOURCES === '1' ? await startResources(admin) : null;
   const reads = [], writes = [];
   let next = 0, readKeys = 0, failure;
   const cpuStart = process.cpuUsage();
@@ -93,6 +95,7 @@ async function run(clients, admin, mode, workload, batch, requests) {
   const seconds = (performance.now() - started) / 1000;
   const cpu = process.cpuUsage(cpuStart);
   const eventLoopUtilization = performance.eventLoopUtilization(loopStart).utilization;
+  const server = finishResources ? await finishResources(reads.length + writes.length) : null;
   if (failure) throw failure;
   const after = await counters(admin);
   const stats = Object.fromEntries(['sql_cache_hits', 'sql_cache_misses', 'sql_cache_bypasses', 'sql_cache_fills']
@@ -109,6 +112,7 @@ async function run(clients, admin, mode, workload, batch, requests) {
     read_latency: latency(reads), write_latency: latency(writes), counters: stats,
     client_cpu_cores: (cpu.user + cpu.system) / 1e6 / seconds,
     event_loop_utilization: eventLoopUtilization,
+    ...(server ? { server } : {}),
   };
 }
 

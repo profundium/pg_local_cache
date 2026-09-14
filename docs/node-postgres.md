@@ -2,7 +2,7 @@
 layout: doc
 title: Batch row lookups with node-postgres
 seo_title: "Batch PostgreSQL Row Lookups with node-postgres"
-description: Use pg_local_cache 2.0 from Node.js with a parameterized bigint array. Decode text[] results, preserve order and nulls, and compare with a prepared ANY query.
+description: Use pg_local_cache 2.0 from Node.js with a parameterized bigint array and JSON transport. Preserve order and nulls, and compare with a prepared ANY query.
 section: Node.js
 permalink: /docs/node-postgres.html
 last_modified_at: "2026-09-14"
@@ -27,7 +27,7 @@ Given a connected node-postgres client or pool:
 ```js
 const result = await client.query({
   name: 'items-mget',
-  text: "SELECT local_cache.mget('public.items'::regclass, $1::bigint[]) AS rows",
+  text: "SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows",
   values: [[42, 7, 42, null, 999999]],
 });
 const rows = result.rows[0].rows.map(row =>
@@ -35,10 +35,12 @@ const rows = result.rows[0].rows.map(row =>
 );
 ```
 
-There is one result record containing a `text[]`. Each non-null element is a
-serialized row, so the driver does not automatically decode it as a JSON
-object. The returned positions match the input positions. Missing keys and
-null inputs both produce `null`.
+`mget` returns `text[]`; `array_to_json` sends that outer array as JSON so
+node-postgres uses its JSON decoder instead of its PostgreSQL array parser.
+Each non-null element is still a serialized row and needs `JSON.parse`.
+The returned positions match the input positions. Missing keys and null
+inputs both produce `null`. The [local benchmark](BENCHMARKS.md) measures the
+extra server conversion cost as well as client throughput.
 
 Keep the table name fixed in application code. The array is a query parameter,
 not SQL assembled by joining IDs into a string. See node-postgres documentation

@@ -1,4 +1,6 @@
-export const MGET_SQL = "SELECT local_cache.mget('public.items'::regclass, $1::bigint[]) AS rows";
+export const MGET_TEXT_SQL = "SELECT local_cache.mget('public.items'::regclass, $1::bigint[]) AS rows";
+// Let V8 decode the outer array; pg's text[] parser walks every escaped character.
+export const MGET_SQL = "SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows";
 export const ANY_SQL = 'SELECT id::text AS key, row_to_json(i)::text AS row FROM public.items AS i WHERE id = ANY($1::bigint[])';
 
 // Both paths return one object (or null) per requested key.

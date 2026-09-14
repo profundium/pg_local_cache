@@ -45,3 +45,25 @@ test('cold requests visit each row once; warm requests fit in 128 rows', () => {
     assert.ok(keysFor(1000, batch).every(key => key >= 1 && key <= 128));
   }
 });
+
+const { parseResources } = await import('./server-resources.mjs');
+test('server resources distinguish CPU quota, memory classes, block I/O and network traffic', () => {
+  const snapshot = '\ncpu.stat\nusage_usec 2000000\nthrottled_usec 100000\n' +
+    '\nmemory.current\n1000\nmemory.stat\nanon 100\nfile 800\nshmem 600\n' +
+    '\nmemory.events\noom_kill 0\nio.stat\n8:0 rbytes=10 wbytes=20 rios=1 wios=2\n8:1 rbytes=30 wbytes=40 rios=3 wios=4\n' +
+    '\ncpu.max\n200000 100000\ncpuset.cpus.effective\n0-3,6\nmemory.max\nmax\n' +
+    '\nnetwork\n lo: 99 0 0 0 0 0 0 0 99 0 0 0 0 0 0 0\n eth0: 50 0 0 0 0 0 0 0 70 0 0 0 0 0 0 0\n';
+  const result = parseResources(snapshot);
+  assert.equal(result.cpu_seconds, 2);
+  assert.equal(result.cpu_capacity, 2);
+  assert.equal(result.throttled_seconds, 0.1);
+  assert.equal(result.memory_bytes, 1000);
+  assert.equal(result.shmem_bytes, 600);
+  assert.equal(result.memory_limit_bytes, null);
+  assert.equal(result.rbytes, 40);
+  assert.equal(result.wbytes, 60);
+  assert.equal(result.rx_bytes, 50);
+  assert.equal(result.tx_bytes, 70);
+  assert.equal(parseResources(snapshot.replace('200000 100000', 'max 100000')).cpu_capacity, 5);
+  assert.throws(() => parseResources(snapshot.replace('usage_usec 2000000', '')));
+});
