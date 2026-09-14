@@ -1,8 +1,8 @@
 ---
 layout: doc
 title: PostgreSQL primary-key cache benchmarks
-seo_title: "PostgreSQL Row Cache Benchmarks: Node.js, Go and SQL"
-description: Local Apple M3 Max measurements of pg_local_cache with Node.js and Go pgx, including decoded application results, connection counts, PostgreSQL CPU, memory, and I/O.
+seo_title: "PostgreSQL Cache Benchmarks: SQL, RESP, Node.js and Go"
+description: Apple M3 Max benchmarks of pg_local_cache over SQL and RESP with Go and Node.js, including connection scaling, PostgreSQL CPU, memory, and reproducible results.
 section: Benchmarks
 permalink: /docs/BENCHMARKS.html
 last_modified_at: "2026-09-15"
@@ -10,9 +10,156 @@ last_modified_at: "2026-09-15"
 
 # PostgreSQL primary-key cache benchmarks
 
-Compare `local_cache.mget` with one prepared, batched PostgreSQL query.
+Compare SQL `local_cache.mget` and RESP `MGET` with a prepared, batched
+PostgreSQL query.
 Every client below parses the returned JSON and restores input order,
-duplicates, and missing positions. Both paths return complete rows.
+duplicates, and missing positions. All paths return complete rows.
+
+## SQL and RESP on the same Mac: 15 September 2026
+
+With the Go client inside the Linux VM, one-key RESP `MGET` reached
+**839,678 requests/s versus 253,790 for prepared SQL (3.31×)** at 256
+connections. SQL `mget` was slower for one key. With 64 keys per request,
+RESP and SQL `mget` were close at 64 connections; RESP was 21% faster at 256.
+
+This uses the Apple M3 Max, PostgreSQL 16.15 and 4,096-row dataset described
+below. Go 1.27.1 / pgx 5.11.0 and a small standard-library RESP2 client
+decode every JSON row. Both build each request during timing. Connections,
+authentication, preparation and warmup finish before timing; neither path
+pipelines requests. The client runs in a separate container, sharing the
+server's network namespace and CPU hardware, but **not its cgroup**.
+
+The optional RESP overlay configures eight workers, a 1 GiB cache/buffer
+budget, 1,024 entries, 512 RESP clients and 300 SQL connections.
+The active extension build is `f03ed22169c3841c45f439bff5e1d693bb4808a5`;
+the previous build is `53dbb3c43505034888019fbde808b2e167c22f1d`.
+
+[Download all 129 samples](../assets/benchmarks/2026-09-15-m3-max-resp.json),
+including machine details, client source and binary hashes, both server
+images, resource snapshots, restart checks and prepared query plans.
+
+### Throughput inside the VM
+
+Numbers are median **requests/s** from three five-second samples per case.
+A request returns either one or 64 complete rows, as indicated.
+
+| Keys/request | Connections | Prepared SQL | SQL mget | RESP MGET |
+|---:|---:|---:|---:|---:|
+| 1 | 64 | 277,088 | 211,251 | 722,133 |
+| 1 | 256 | 253,790 | 186,296 | 839,678 |
+| 64 | 64 | 26,459 | 38,122 | 38,877 |
+| 64 | 256 | 27,615 | 43,647 | 52,774 |
+
+The initial optimized server boot delivered only 19–21k requests/s for
+64-key SQL. Restarting the **same binary** restored 26–28k with identical
+data, settings and prepared index plans. The table uses three repetitions
+after that restart for 64-key cases; all earlier samples remain in the JSON.
+The cause of this startup-dependent variation was not isolated. It is a
+reason to avoid precise capacity claims from this shared laptop.
+
+All timed cache reads hit: zero source reads, errors or connection-limit
+rejections for RESP; zero misses, fills or bypasses for SQL `mget`.
+Increasing connections from 64 to 256 helps RESP but slows single-key SQL.
+The harness checks connection headroom before each run. A separate
+`GOMAXPROCS=12` probe at 256 connections / 64 keys yielded 51,176 RESP
+requests/s versus 53,120 with eight threads in the same server boot; SQL
+`mget` rose from 44,057 to 46,877. More client threads did not improve RESP
+in that probe; this does not establish a driver-independent ceiling.
+
+### PostgreSQL resource cost
+
+At **256 connections**, medians across the same reference samples:
+
+| Keys/request | Path | Client CPU cores | Server CPU cores (% of VM) | Server µs/request | Sampled peak MiB |
+|---:|---|---:|---:|---:|---:|
+| 1 | SQL | 3.97 | 8.94 (63.9%) | 36.3 | 679.8 |
+| 1 | SQL mget | 3.36 | 9.93 (70.9%) | 54.4 | 684.2 |
+| 1 | RESP MGET | 5.98 | 6.11 (43.7%) | 7.8 | 263.7 |
+| 64 | SQL | 3.72 | 9.45 (67.5%) | 348.3 | 689.8 |
+| 64 | SQL mget | 5.12 | 4.99 (35.6%) | 116.0 | 707.7 |
+| 64 | RESP MGET | 5.76 | 4.97 (35.5%) | 95.8 | 266.7 |
+
+Server CPU is the PostgreSQL container's cgroup CPU time; one core means
+one CPU-second per second, and capacity is the VM's 14 visible CPUs.
+Memory is sampled cgroup `memory.current`, including shared memory and
+tmpfs, not process RSS. The client is measured separately. Resource windows
+include the short reporting gap and monitoring work.
+
+The raw file records block I/O, throttling, memory events and SQL session
+state/wait snapshots. Network counters exclude loopback, so they **do not
+measure the VM client's traffic**. The tmpfs dataset does not measure disk
+performance. SQL baselines use `items_pkey`, with zero block reads in the
+recorded plan checks.
+
+### What changed in the extension
+
+RESP MGET now parses and canonicalizes each key once, retaining the typed
+values for a possible PostgreSQL lookup. It still validates the whole
+request before reading, enforces one command deadline, and checks cached
+payloads and invalidation state.
+
+| Connections, 64 keys/request | RESP before | RESP after | Server µs/request, before → after |
+|---:|---:|---:|---:|
+| 64 | 36,018 | 38,877 | 107.9 → 88.3 |
+| 256 | 49,149 | 52,774 | 114.5 → 95.8 |
+
+Single-key throughput changed little: 843,382 → 839,678 requests/s at
+256 connections. The 3.31× SQL comparison comes mainly from using the
+existing RESP path, not from this small code change.
+
+### Why the host measurements showed a small gain
+
+The same Go code running on macOS through Docker's published ports gave:
+
+| Keys/request, 64 connections | Prepared SQL | SQL mget | RESP MGET |
+|---:|---:|---:|---:|
+| 1 | 49,194 | 48,010 | 52,426 |
+| 64 | 14,324 | 15,751 | 16,240 |
+
+Moving the client into the VM changes both its runtime placement and the
+network route. The large difference shows why the host-port run cannot
+establish server capacity; it does not isolate port-forwarder cost alone.
+
+[KVik](https://postgrespro.ru/docs/enterprise/current/proxima) also offers a
+RESP path. This benchmark tests pg_local_cache only; it does not reproduce
+KVik's [30× conference claim](https://pgconf.ru/talk/3118665).
+Use SQL `mget` when reads belong to a SQL transaction. RESP workers use their
+configured database role and do not inherit a caller's SQL session or snapshot;
+see the [technical contract](TECHNICAL.md#optional-resp2-endpoint).
+
+### Reproduce the SQL/RESP comparison
+
+From this branch, on an Apple Silicon Mac with Docker and Go 1.25 or newer:
+
+```bash
+npm --prefix examples/node-postgres ci --ignore-scripts
+go -C examples/go-pgx build -o /tmp/pglc-go-pgx .
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+  go -C examples/go-pgx build -o /tmp/pglc-go-pgx-linux .
+export PGLC_EXTENSION_REF="$(git rev-parse HEAD)"
+export PGLC_DEMO_PORT=55433
+docker compose -f examples/compose.yaml -f examples/compose.resp.yaml \
+  up -d --build --wait
+docker run -d --rm --name pglc-go-client \
+  --network container:pglc-demo-postgres-1 \
+  --mount type=bind,src=/tmp/pglc-go-pgx-linux,dst=/tmp/pglc-go-pgx,readonly \
+  pglc-demo-postgres sleep infinity
+
+COMPARE_RESP=1 PGLC_PGX_CONTAINER=pglc-go-client GOMAXPROCS=8 \
+  CONNECTIONS=64,256 BATCHES=1,64 REPEATS=3 DURATION_SECONDS=5 \
+  node examples/node-postgres/client-comparison.mjs > resp-vm.json
+COMPARE_RESP=1 PGLC_PGX_BIN=/tmp/pglc-go-pgx GOMAXPROCS=8 \
+  CONNECTIONS=64 BATCHES=1,64 REPEATS=3 DURATION_SECONDS=5 \
+  node examples/node-postgres/client-comparison.mjs > resp-host.json
+
+docker stop pglc-go-client
+docker compose -f examples/compose.yaml -f examples/compose.resp.yaml down
+```
+
+The public token and password belong to this disposable demo; both published
+ports bind to loopback. Recreate the client container after rebuilding its binary or
+recreating PostgreSQL. Keep all repetitions and rerun SQL controls after a
+server restart if throughput shifts. These timed comparisons do not run in CI.
 
 ## Local Mac run: 14 September 2026
 
@@ -157,7 +304,7 @@ rows once; at batch 64 it has only 64 latency observations, so its p99 is
 too sparse for a useful tail claim. Write timings use tmpfs with `fsync`,
 `full_page_writes`, and `synchronous_commit` enabled.
 
-## Reproduce the measurements
+## Reproduce the 14 September measurements
 
 Use a clean checkout of the recorded harness revision from the JSON.
 That historical harness uses the local Compose overlay; today's quickstart
