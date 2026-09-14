@@ -37,6 +37,20 @@ def summary(data):
                 values = " | ".join(number(measured[key]) for key in ("p50_ms", "p95_ms", "p99_ms"))
                 lines.append(f"| {row['repeat']} | {row['workload']} | {row['mode']} | {row['batch']} | {operation} | {measured['samples']} | {values} |")
     lines += ["", "Repetitions are separate samples. Small cold-fill samples do not give stable tail estimates.", ""]
+    if any("server" in row for row in data["results"]):
+        lines += ["## PostgreSQL container resources", "",
+                  "CPU includes the sampler and background server work. Memory is sampled cgroup usage, not process RSS.", "",
+                  "| Repeat | Workload | Path | Batch | CPU cores | CPU capacity % | Sampled peak MiB | Read / write KiB |",
+                  "|---:|---|---|---:|---:|---:|---:|---:|"]
+        for row in data["results"]:
+            if "server" not in row:
+                continue
+            server = row["server"]
+            lines.append(f"| {row['repeat']} | {row['workload']} | {row['mode']} | {row['batch']} | "
+                         f"{number(server['cpu_cores'])} | {number(server['cpu_percent_capacity'])} | "
+                         f"{number(server['memory_peak_bytes'] / 2**20)} | "
+                         f"{number(server['io_read_bytes'] / 1024)} / {number(server['io_write_bytes'] / 1024)} |")
+        lines.append("")
     return "\n".join(lines)
 
 

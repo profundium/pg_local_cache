@@ -206,6 +206,16 @@ class BenchmarkReportChecks(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'benchmark did not complete'):
                 report.summary(data)
 
+    def test_server_resource_units(self):
+        data = self.sample()
+        data['results'][0]['server'] = {
+            'cpu_cores': 2, 'cpu_percent_capacity': 25,
+            'memory_peak_bytes': 128 * 2**20, 'io_read_bytes': 1024, 'io_write_bytes': 2048,
+        }
+        text = report.summary(data)
+        self.assertIn('not process RSS', text)
+        self.assertIn('| 2.000 | 25.000 | 128.000 | 1.000 / 2.000 |', text)
+
 
 if __name__ == '__main__':
     unittest.main()
