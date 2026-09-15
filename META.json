@@ -2,7 +2,7 @@
   "name": "pg_local_cache",
   "abstract": "Transaction-aware cache for PostgreSQL primary-key reads",
   "description": "pg_local_cache keeps hot whole rows in bounded PostgreSQL shared memory for explicit SQL mget and RESP reads. PostgreSQL remains authoritative, and writes publish transaction-aware invalidation fences before commit visibility.",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "maintainer": [
     "Maksim Bronnikov"
   ],
@@ -18,9 +18,9 @@
   "provides": {
     "pg_local_cache": {
       "abstract": "Transaction-aware cache for SQL mget and RESP primary-key reads",
-      "file": "sql/pg_local_cache--2.0.2.sql",
+      "file": "sql/pg_local_cache--2.0.3.sql",
       "docfile": "README.md",
-      "version": "2.0.2"
+      "version": "2.0.3"
     }
   },
   "resources": {
