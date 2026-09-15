@@ -22,6 +22,9 @@ def exercise(browser, name, paths, base, canonical_base, out, width, height, dar
     context = browser.new_context(viewport={'width': width, 'height': height},
                                   color_scheme='dark' if dark else 'light',
                                   java_script_enabled=js, reduced_motion=motion)
+    # Keep local/CI visits out of real analytics and avoid an external dependency.
+    context.route('https://www.googletagmanager.com/gtag/js?*',
+                  lambda route: route.fulfill(status=200, content_type='application/javascript', body=''))
     context.tracing.start(screenshots=True, snapshots=True)
     page = context.new_page()
     page.set_default_timeout(10000)
@@ -43,6 +46,10 @@ def exercise(browser, name, paths, base, canonical_base, out, width, height, dar
             assert page.locator('link[rel=canonical]').get_attribute('href') == urljoin(canonical_base, relative)
             assert page.locator('script[type="application/ld+json"]').count() == 1
             json.loads(page.locator('script[type="application/ld+json"]').text_content())
+            expect(page.locator('head script[src="https://www.googletagmanager.com/gtag/js?id=G-MHQBYKWZ7W"]')).to_have_count(1)
+            if js:
+                assert page.evaluate('''window.dataLayer.filter(args =>
+                    args[0] === 'config' && args[1] === 'G-MHQBYKWZ7W').length''') == 1, f'{path}: analytics configuration missing or duplicated'
             for diagram in page.locator('.diagram svg').all():
                 expect(diagram).to_have_attribute('role', 'img')
                 assert diagram.locator('title').text_content().strip()
