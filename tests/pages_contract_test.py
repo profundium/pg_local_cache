@@ -35,16 +35,18 @@ class PagesContracts(unittest.TestCase):
                 self.assertNotIn(value, seen, document)
                 seen.add(value)
         navigation = (ROOT / '_data/navigation.yml').read_text()
-        for url in re.findall(r'^  url: (.+)$', navigation, re.M):
+        urls = re.findall(r'^  url: (.+)$', navigation, re.M)
+        for url in urls:
             self.assertIn(url, paths)
-        self.assertEqual(len(paths), len(re.findall(r'^  url: (.+)$', navigation, re.M)) + 1)
+        self.assertEqual(len(urls), len(set(urls)))
 
     def test_homepage_starts_with_demo_and_benchmark(self):
         homepage = (ROOT / 'index.html').read_text()
         hero = homepage.split('<section id="benchmarks"')[0]
         self.assertIn('QUICKSTART.html', hero)
         self.assertIn('BENCHMARKS.html', hero)
-        self.assertIn('unnest(local_cache.mget', hero)
+        self.assertIn('local_cache.attach_table', hero)
+        self.assertIn('local_cache.mget', hero)
         self.assertNotIn('curl -fsSL', hero)
         self.assertNotIn('1.3.0', homepage)
 

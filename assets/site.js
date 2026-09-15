@@ -1,4 +1,11 @@
 (() => {
+  const docMenu = document.querySelector('.doc-menu');
+  if (docMenu) {
+    const desktop = window.matchMedia('(min-width: 981px)');
+    const adaptMenu = () => { docMenu.open = desktop.matches; };
+    adaptMenu();
+    desktop.addEventListener('change', adaptMenu);
+  }
   const toggle = document.querySelector('.nav-toggle');
   const nav = document.querySelector('.site-nav');
   if (toggle && nav) {
@@ -58,18 +65,43 @@
     region.append(table);
   }
 
+  if (navigator.clipboard) {
+    document.querySelectorAll('.doc-content pre > code').forEach((code, index) => {
+      code.id ||= `doc-code-${index}`;
+      const wrapper = document.createElement('div');
+      wrapper.className = 'code-example';
+      code.parentElement.before(wrapper);
+      wrapper.append(code.parentElement);
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'copy-button';
+      button.dataset.copy = code.id;
+      button.textContent = 'Copy';
+      button.setAttribute('aria-label', 'Copy code');
+      button.setAttribute('aria-live', 'polite');
+      wrapper.prepend(button);
+    });
+  }
+
   for (const button of document.querySelectorAll('[data-copy]')) {
+    const label = button.textContent;
+    let resetLabel;
     button.addEventListener('click', async () => {
       const target = document.getElementById(button.dataset.copy);
       if (!target) return;
+      window.clearTimeout(resetLabel);
       try {
         await navigator.clipboard.writeText(target.textContent.trim());
+        button.textContent = 'Copied';
       } catch {
-        return;
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        button.textContent = 'Copy selected text';
       }
-      const previous = button.textContent;
-      button.textContent = 'Copied';
-      window.setTimeout(() => { button.textContent = previous; }, 1400);
+      resetLabel = window.setTimeout(() => { button.textContent = label; }, 1400);
     });
   }
 })();

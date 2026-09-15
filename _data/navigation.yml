@@ -12,7 +12,13 @@
   description: Commit, rollback, snapshots, and concurrent readers.
 - title: Node.js example
   url: /docs/node-postgres.html
-  description: Parameterized queries and the actual text[] result contract.
+  description: Read ordered rows with your existing node-postgres connection.
+- title: Go example
+  url: /docs/go.html
+  description: Connect with pgx and read a batch of rows.
+- title: RESP example
+  url: /docs/resp.html
+  description: Authenticate and read rows with redis-cli or Node.js.
 - title: Installation
   url: /docs/INSTALL_EXISTING.html
   description: Binaries, source builds, controlled restarts, and recovery.

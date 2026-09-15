@@ -20,12 +20,8 @@ async function nodeWorker() {
   assert.ok([1, 16, 64].includes(config.batch));
   assert.ok(Number.isInteger(config.seconds) && config.seconds >= 1 && config.seconds <= 120);
   assert.ok(['mget', 'postgres-any'].includes(config.mode));
-  assert.ok(['node-text', 'node-json'].includes(config.driver));
+  assert.equal(config.driver, 'node-json');
   const clients = Array.from({ length: config.clients }, () => new pg.Client({ ...demoConnection(), application_name: 'pglc-node-benchmark' }));
-  if (config.driver === 'node-text') for (const client of clients) {
-    const query = client.query.bind(client);
-    client.query = input => query(input.name === 'demo-mget' ? { ...input, text: MGET_TEXT_SQL } : input);
-  }
   try {
     await Promise.all(clients.map(client => client.connect()));
     const edge = [42, 7, 42, null, 999999];
@@ -78,7 +74,10 @@ async function runClient(admin, config) {
   let finish;
   try {
     child.stdin.write(JSON.stringify({ ...config, port: clientContainer ? 5432 : demoConnection().port, mget_sql: MGET_TEXT_SQL, any_sql: ANY_SQL,
-      resp_port: clientContainer ? 6380 : integer('PGLC_DEMO_RESP_PORT', 56379, 65535), resp_token: 'DemoRespToken_0123456789abcdef0123456789' }) + '\n');
+      ...(config.driver === 'go-pgx' ? {
+        resp_port: clientContainer ? 6380 : integer('PGLC_DEMO_RESP_PORT', 56379, 65535),
+        resp_token: 'DemoRespToken_0123456789abcdef0123456789',
+      } : {}) }) + '\n');
     const ready = await message(); assert.equal(ready.ready, true);
     const before = (await admin.query('SELECT local_cache.stats() AS s')).rows[0].s;
     finish = await startResources(admin);
@@ -112,8 +111,9 @@ async function runClient(admin, config) {
 }
 
 async function main() {
-  const compareRESP = process.env.COMPARE_RESP === '1';
-  assert.ok(!process.env.PGLC_PGX_CONTAINER || compareRESP, 'container placement requires COMPARE_RESP=1');
+  const benchmarkClient = process.env.BENCHMARK_CLIENT || 'node';
+  assert.ok(['node', 'go'].includes(benchmarkClient), 'BENCHMARK_CLIENT must be node or go');
+  assert.ok(!process.env.PGLC_PGX_CONTAINER || benchmarkClient === 'go', 'PGLC_PGX_CONTAINER requires BENCHMARK_CLIENT=go');
   const seconds = integer('DURATION_SECONDS', 10, 120), repeats = integer('REPEATS', 3, 20);
   const connections = (process.env.CONNECTIONS || '4,64,256').split(',').map(Number);
   const batches = (process.env.BATCHES || '64').split(',').map(Number);
@@ -136,7 +136,7 @@ async function main() {
     assert.match(environment.extension_version, /^2\.0\./);
     assert.equal(environment.other_sessions, 0);
     assert.ok(Math.max(...connections) + 1 < environment.max_connections - environment.reserved_connections);
-    if (compareRESP) {
+    if (benchmarkClient === 'go') {
       assert.ok(environment.health.ready && environment.health.resp_enabled, 'start the RESP demo overlay first');
       assert.ok(Math.max(...connections) < environment.health.max_clients, 'leave RESP connection headroom');
       assert.equal(environment.health.active_clients, 0, 'other RESP clients are connected');
@@ -144,8 +144,9 @@ async function main() {
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM public.items')).rows[0].n, 4096);
     await admin.query('SELECT sum(octet_length(value)) FROM public.items');
     await getRows(admin, Array.from({ length: 128 }, (_, i) => i + 1));
-    const variants = compareRESP ? [['go-pgx', 'postgres-any'], ['go-pgx', 'mget'], ['go-pgx', 'resp-mget']]
-      : [['node-json', 'postgres-any'], ['node-text', 'mget'], ['node-json', 'mget'], ['go-pgx', 'postgres-any'], ['go-pgx', 'mget']];
+    const variants = benchmarkClient === 'go'
+      ? [['go-pgx', 'postgres-any'], ['go-pgx', 'mget'], ['go-pgx', 'resp-mget']]
+      : [['node-json', 'postgres-any'], ['node-json', 'mget']];
     for (let repeat = 1; repeat <= repeats; repeat++) {
       // Rotate the first client and reverse connection/batch order between repetitions.
       const first = (repeat - 1) % variants.length;
@@ -167,9 +168,9 @@ async function main() {
     environment: { ...environment, node: process.version, pg: pgVersion,
       client_placement: process.env.PGLC_PGX_CONTAINER ? 'Linux VM, separate client container, server network namespace' : 'Mac/host through Docker published ports' },
     workload: { seconds, repeats, connections, batches, fixed_keys: true, persistent_connections: true,
-      protocol: compareRESP ? 'prepared SQL and RESP2 MGET, no pipelining' : 'prepared', all_clients_decode_json_and_restore_positions: true, server_sample_interval_ms: 500 },
+      protocol: benchmarkClient === 'go' ? 'prepared SQL and RESP2 MGET, no pipelining' : 'prepared', all_clients_decode_json_and_restore_positions: true, server_sample_interval_ms: 500 },
     queries: { mget_text: MGET_TEXT_SQL, mget_json: MGET_SQL, postgres_any: ANY_SQL,
-      ...(compareRESP ? { resp_mget: 'MGET CRUD:pglc_demo.public.items:{"id":1} ...' } : {}) },
+      ...(benchmarkClient === 'go' ? { resp_mget: 'MGET CRUD:pglc_demo.public.items:{"id":1} ...' } : {}) },
     results, ...(failure ? { error: { message: failure.message } } : {}) }, null, 2));
   if (failure) throw failure;
 }

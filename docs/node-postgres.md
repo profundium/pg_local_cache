@@ -5,15 +5,15 @@ seo_title: "Batch PostgreSQL Row Lookups with node-postgres"
 description: Use pg_local_cache 2.0 from Node.js with a parameterized bigint array and JSON transport. Preserve order and nulls, and compare with a prepared ANY query.
 section: Node.js
 permalink: /docs/node-postgres.html
-last_modified_at: "2026-09-14"
+last_modified_at: "2026-09-15"
 ---
 
 # Batch row lookups with node-postgres
 
-The extension exposes a SQL function that works with existing PostgreSQL clients.
+Read rows by primary key using your existing node-postgres connection or pool.
 
-Start the [demo](QUICKSTART.md), install the example's pinned dependency, and
-run its integration assertions:
+Start the [demo](QUICKSTART.md), install dependencies, and run its integration
+assertions:
 
 ```bash
 npm --prefix examples/node-postgres ci --ignore-scripts
@@ -35,23 +35,19 @@ const rows = result.rows[0].rows.map(row =>
 );
 ```
 
-`mget` returns `text[]`; `array_to_json` sends that outer array as JSON so
-node-postgres uses its JSON decoder instead of its PostgreSQL array parser.
-Each non-null element is still a serialized row and needs `JSON.parse`.
-The returned positions match the input positions. Missing keys and null
-inputs both produce `null`. The [local benchmark](BENCHMARKS.md) measures the
-extra server conversion cost as well as client throughput.
+`mget` returns `text[]`. `array_to_json` sends the outer array as JSON, so
+node-postgres applies its JSON decoder. Each non-null element is a serialized
+row and needs `JSON.parse`; positions match the input positions, and missing
+keys or null inputs produce `null`.
 
-Keep the table name fixed in application code. The array is a query parameter,
-not SQL assembled by joining IDs into a string. See node-postgres documentation
+Keep the table name fixed in application code. Pass IDs as query parameters,
+not SQL assembled from strings. See node-postgres documentation
 for [parameters and named prepared statements](https://node-postgres.com/features/queries).
 
 The runnable helper rejects batches over 1,024 keys and returns `[]` without a
 query for an empty batch. It uses safe integer demo IDs. PostgreSQL `bigint` and
-numeric fields in JSON can exceed JavaScript's exact numeric range; choose a
-lossless JSON parser or an explicit serialization contract before using such
-values. Merely passing a key as a string does not fix precision in the returned
-JSON payload.
+numeric fields in JSON can exceed JavaScript's exact numeric range; use a
+lossless JSON parser or an explicit serialization contract for such values.
 
 ## Compare with the existing batch query
 
@@ -65,21 +61,18 @@ WHERE id = ANY($1::bigint[]);
 
 `ANY` does not preserve input order or duplicate requested positions. The
 example restores them on the client and supplies null for missing rows before
-comparing results. Both that work and JSON parsing are included in the
-[benchmark](BENCHMARKS.md).
+comparing results.
 
-The implementation and unit tests are in
+The runnable implementation is in
 [examples/node-postgres](https://github.com/profundium/pg_local_cache/tree/master/examples/node-postgres).
 The helper takes an existing client rather than creating a pool per call.
 
 ## Transactions and application boundaries
 
-Use one acquired client throughout a transaction. `mget` does not change that
-rule. Reads after writes in the same transaction use PostgreSQL's source-table
-path. The demo checks this with separate reader and writer connections; see
+Use one acquired client throughout a transaction. Reads after writes in the same
+transaction use PostgreSQL's source-table path. The demo checks this with
+separate reader and writer connections; see
 [cache invalidation](cache-invalidation.md).
 
-This example does not patch an ORM, transparently intercept SELECT, provide an
-application cache, or replace a connection pool. To decide where to integrate
-it, measure a specific repeated whole-row lookup first. An endpoint dominated
-by joins or network latency is a different problem.
+For a Redis-compatible connection, use the [Node.js RESP example](resp.md#nodejs).
+[Recorded Node.js results](benchmarks-node.md) include batch reads and concurrent updates.
