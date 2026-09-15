@@ -110,6 +110,11 @@ def exercise(browser, name, paths, base, canonical_base, out, width, height, dar
                 expect(page).to_have_url(urljoin(base, 'docs/QUICKSTART.html'))
             elif path == 'docs/QUICKSTART.html':
                 if js:
+                    menu = page.locator('.doc-menu')
+                    if width <= 980:
+                        expect(page.locator('.doc-nav')).to_be_hidden()
+                        menu.locator('summary').click()
+                    expect(page.locator('.doc-nav')).to_be_visible()
                     toc = page.locator('[data-doc-toc-list] a')
                     assert toc.count() >= 2
                     target = toc.first.get_attribute('href')

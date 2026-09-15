@@ -11,28 +11,23 @@ last_modified_at: "2026-09-15"
 # Try pg_local_cache locally
 
 This demo builds pg_local_cache from your checkout in a separate PostgreSQL 16
-server. It does not install anything in your existing PostgreSQL server.
+server. It does not install into an existing PostgreSQL server.
 
-You need Git, Docker, and Docker Compose with `up --wait` support. The image is
-built from source. Binary packages are tested on Linux amd64; a build on another
-architecture does not establish equivalent performance or support.
+You need Git, Docker, and Docker Compose with `up --wait` support. The image
+builds from source.
 
 ## Start the database
 
 ```bash
 git clone https://github.com/profundium/pg_local_cache.git
 cd pg_local_cache
-export PGLC_EXTENSION_REF=$(git rev-parse HEAD)
 docker compose -f examples/compose.yaml up --build --wait
 ```
 
-The build records this clean checkout's revision. Rebuild after changing the
-extension source; use `PGLC_EXTENSION_REF=local` for uncommitted changes.
-
-The demo binds PostgreSQL to `127.0.0.1:55432`. It has no RESP listener and no
-persistent volume. Its data directory is a container-local tmpfs. Stopping the
-container discards the data. The password `demo-only` is for this loopback-only
-demo. Use your own credentials for production.
+The demo binds PostgreSQL to `127.0.0.1:55432`, has no RESP listener or
+persistent volume, and stores data in container-local tmpfs. Stopping the
+container discards its data. `demo-only` is for this loopback demo; use your own
+credentials in production.
 
 If port 55432 is occupied, set `PGLC_DEMO_PORT` before starting Compose and keep
 it set when running the Node.js example:
@@ -60,12 +55,12 @@ SELECT unnest(local_cache.mget(
 SQL
 ```
 
-Both calls return the same ordered rows. The first and third positions refer
-to row 42. The last two positions are SQL `NULL`: one input is null, and key
-999999 does not exist. In psql, SQL nulls appear blank by default.
+Both calls return the same ordered rows. The first and third positions refer to
+row 42. The last two positions are SQL `NULL`: one input is null, and key 999999
+does not exist. In psql, SQL nulls appear blank by default.
 
-The function returns **`text[]`**, not a set of rows and not `jsonb[]`.
-`unnest` above is only for displaying one array entry per line.
+The function returns **`text[]`**. `unnest` above displays one array entry per
+line.
 
 Inspect counters as the database administrator:
 
@@ -77,7 +72,7 @@ docker compose -f examples/compose.yaml exec -T postgres \
 ```
 
 Look at `sql_cache_hits`, `sql_cache_misses`, `sql_cache_fills`, and
-`sql_cache_bypasses`. A call succeeding is not proof that it used the cache.
+`sql_cache_bypasses`.
 
 ## Check commit and rollback
 
@@ -95,18 +90,13 @@ rollback, and a committed update. It exits nonzero on a failed assertion.
 See the [two-session SQL walkthrough](cache-invalidation.md) or the
 [Node.js query explanation](node-postgres.md).
 
-## Compare with ordinary SQL
+## Connect your application
 
-```bash
-SERVER_RESOURCES=1 npm --prefix examples/node-postgres run --silent benchmark > benchmark.json
-python3 scripts/benchmark_report.py benchmark.json
-```
+- [Node.js](node-postgres.md): use your existing `pg` connection or pool.
+- [Go](go.md): connect with `pgx` and decode the returned rows.
+- [RESP](resp.md): enable the optional endpoint and connect with a Redis client.
 
-The benchmark resets the demo tables between samples. Do not use the demo to
-store data you need. Read the [methodology and limitations](BENCHMARKS.md)
-before interpreting the output. The JSON records the build ID read from the
-running server, along with PostgreSQL CPU, memory, and I/O. Builds without a
-source label report `local`, with an unknown extension revision.
+[Benchmark results](BENCHMARKS.md) include throughput and PostgreSQL resource use.
 
 ## Remove the demo
 

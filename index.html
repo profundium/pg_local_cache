@@ -12,7 +12,7 @@ permalink: /
   <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
     <div class="hero-copy">
       <h1 id="hero-title">A row cache<br>inside <span>PostgreSQL.</span></h1>
-      <p>Read frequently requested rows by primary key with <code>local_cache.mget</code>. Writes stay in PostgreSQL; the extension invalidates affected cache entries.</p>
+      <p>Read rows by primary key with one SQL call. PostgreSQL writes automatically invalidate affected cache entries.</p>
       <div class="hero-actions">
         <a class="button primary" href="{{ '/docs/QUICKSTART.html' | relative_url }}">Try locally <span aria-hidden="true">→</span></a>
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | relative_url }}">Compare with SQL <span aria-hidden="true">→</span></a>
@@ -29,25 +29,14 @@ permalink: /
     <div class="read-path-grid">
     <div class="terminal" aria-label="PostgreSQL mget example">
       <div class="terminal-bar"><strong>psql</strong> │ primary-key reads</div>
-      <pre><code><span class="sql">CREATE TABLE</span> public.items (
-  id bigint PRIMARY KEY, value text
-);
-<span class="sql">INSERT INTO</span> public.items VALUES
-  (42, 'cached'), (7, 'cached');
-<span class="sql">SELECT</span> local_cache.attach_table(
-  'public.items'::regclass
-);
+      <pre><code><span class="comment">-- Attach your table once.</span>
+<span class="sql">SELECT</span> local_cache.attach_table('public.items');
 
-<span class="comment">-- mget returns text[]; unnest shows each entry.</span>
-<span class="sql">SELECT</span> unnest(local_cache.mget(
-  'public.items'::regclass,
-  ARRAY[42, 7, 42, NULL]::bigint[]
-));
-
-<span class="hit">{"id":42,"value":"cached"}
-{"id":7,"value":"cached"}
-{"id":42,"value":"cached"}</span>
-<span class="comment">-- final row is SQL NULL</span></code></pre>
+<span class="comment">-- Read rows by primary key.</span>
+<span class="sql">SELECT</span> local_cache.mget(
+  'public.items', ARRAY[42, 7]::bigint[]
+);</code></pre>
+      <p class="terminal-links"><a href="{{ '/docs/node-postgres.html' | relative_url }}">Node.js example</a><a href="{{ '/docs/go.html' | relative_url }}">Go example</a><a href="{{ '/docs/resp.html' | relative_url }}">RESP example</a></p>
     </div>
     {% include diagrams/read-path.html id="home-read" %}
     </div>
@@ -64,13 +53,12 @@ permalink: /
   <section id="benchmarks" class="band" aria-labelledby="benchmark-title">
     <div class="page-section section-grid">
       <div class="section-intro">
-        <h2 id="benchmark-title">Compare before installing.</h2>
-        <p>Measure against a warm primary-key index and a batched query.</p>
+        <h2 id="benchmark-title">Measured on Apple M3 Max.</h2>
+        <p>SQL and RESP results with PostgreSQL CPU and memory usage.</p>
       </div>
       <div>
-        <p>The benchmark uses the same Node.js driver and returns the same ordered rows through <code>mget</code> and <code>WHERE id = ANY($1)</code>. It measures warm reads, cold cache fills, reads mixed with updates, and the write cost of an attached table.</p>
-        <p>Record throughput, p50/p95/p99 latency, cache counters, and the test configuration. Run the comparison on your hardware before deciding whether to use the cache.</p>
-        <a class="button" href="{{ '/docs/BENCHMARKS.html' | relative_url }}">Commands and methodology <span aria-hidden="true">→</span></a>
+        <p>Node.js returned 16,616 requests/s for 64-key SQL batches. Go reached 839,678 requests/s for single-key RESP reads. Each result has its own client configuration and SQL baseline.</p>
+        <a class="button" href="{{ '/docs/BENCHMARKS.html' | relative_url }}">See results <span aria-hidden="true">→</span></a>
       </div>
     </div>
   </section>
@@ -91,7 +79,7 @@ permalink: /
 
   <section id="quick-start" class="page-section quick-start" aria-labelledby="quick-start-title">
     <h2 id="quick-start-title">Run a local demo.</h2>
-    <p class="quick-start-lead">The Docker demo builds pg_local_cache 2.0.1 from a pinned commit. It creates its own PostgreSQL data directory in memory and binds only to loopback. No host database is mounted or restarted.</p>
+    <p class="quick-start-lead">Build the extension from your checkout and start a disposable PostgreSQL server with sample rows. Docker keeps the demo separate from your databases.</p>
     <div class="install-command">
       <div class="command-label">From the repository root; Docker Compose required</div>
       <button class="copy-button" type="button" data-copy="demo-command" aria-live="polite">Copy</button>

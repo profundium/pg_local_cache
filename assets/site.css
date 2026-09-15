@@ -247,6 +247,10 @@ p, li { text-wrap: pretty; }
   align-items: start;
 }
 .doc-sidebar { position: sticky; top: 7rem; display: grid; gap: 2rem; }
+.doc-menu > summary { display: none; cursor: pointer; font-weight: 650; }
+.doc-menu .doc-toc { margin-top: 2rem; }
+.terminal-links { display: flex; flex-wrap: wrap; gap: 1rem; margin: 0; padding: 1rem 1.3rem; border-top: 1px solid var(--terminal-line); }
+.terminal-links a { color: var(--terminal-text); font-size: .85rem; }
 .doc-nav { display: grid; gap: .6rem; padding-right: 2rem; border-right: 1px solid var(--line); }
 .doc-nav p, .doc-toc p { margin: 0 0 .6rem; color: var(--muted); font-family: var(--mono); font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; }
 .doc-nav a { color: var(--ink); font-size: .9rem; text-decoration: none; }
@@ -264,6 +268,11 @@ p, li { text-wrap: pretty; }
 .doc-content p, .doc-content li { color: #303a44; }
 .doc-content > p { max-width: 72ch; }
 .doc-content pre { overflow-x: auto; padding: 1.2rem; border: 1px solid var(--line-dark); color: var(--terminal-text); background: var(--terminal); font-size: .83rem; line-height: 1.65; }
+.code-example { position: relative; }
+.code-example pre { padding-top: 3rem; }
+.code-example .copy-button { color: var(--terminal-text); background: var(--terminal); min-height: 2rem; padding-inline: .5rem; }
+.doc-content details > summary { padding-block: .7rem; cursor: pointer; font-weight: 650; }
+.doc-content details { border-block: 1px solid var(--line); }
 .doc-content :not(pre) > code { padding: .12rem .3rem; color: #003c9e; background: #edf3ff; font-size: .88em; }
 .table-scroll { max-width: 100%; overflow-x: auto; overflow-wrap: normal; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
 .doc-content table { width: 100%; border-collapse: collapse; font-size: .88rem; }
@@ -277,8 +286,11 @@ p, li { text-wrap: pretty; }
   .terminal { min-height: 0; }
   .proof-rail { grid-template-columns: repeat(2, 1fr); }
   .proof-item:nth-child(2) { border-right: 0; }
-  .doc-shell { grid-template-columns: 1fr; }
+  .doc-shell { grid-template-columns: 1fr; padding-top: 1.5rem; gap: 1.5rem; }
+  .doc-heading { margin-bottom: 1.5rem; }
   .doc-sidebar { position: static; gap: 1.5rem; }
+  .doc-menu > summary { display: list-item; padding-block: .5rem; }
+  .doc-menu[open] > summary { margin-bottom: 1rem; }
   .doc-nav { grid-template-columns: repeat(2, 1fr); padding: 0 0 1.5rem; border-right: 0; border-bottom: 1px solid var(--line); }
   .doc-nav p { grid-column: 1 / -1; }
   .doc-toc { padding: 0 0 1.5rem; border-bottom: 1px solid var(--line); }

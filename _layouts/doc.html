@@ -3,6 +3,8 @@ layout: default
 ---
 <main id="main-content" class="doc-shell">
   <aside class="doc-sidebar">
+    <details class="doc-menu" open>
+    <summary>Documentation</summary>
     <nav class="doc-nav" aria-label="Documentation sections">
       <p>pg_local_cache {{ site.release_series }}</p>
       {% for item in site.data.navigation %}
@@ -13,6 +15,7 @@ layout: default
       <p>On this page</p>
       <ol data-doc-toc-list></ol>
     </nav>
+    </details>
   </aside>
   <article class="doc-content">
     <nav class="doc-heading" aria-label="Breadcrumb">

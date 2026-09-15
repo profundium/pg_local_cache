@@ -2,11 +2,17 @@
   "name": "pg-local-cache-example",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "demo": "node demo.mjs",
+    "resp": "node resp.mjs",
     "benchmark": "node benchmark.mjs",
     "test": "node --test queries.test.mjs"
   },
-  "dependencies": { "pg": "8.16.3" }
+  "dependencies": {
+    "pg": "8.16.3",
+    "@redis/client": "6.2.1"
+  }
 }

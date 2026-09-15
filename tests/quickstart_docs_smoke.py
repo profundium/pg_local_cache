@@ -30,8 +30,6 @@ def main():
     # Startup and teardown are owned by Actions, so cleanup also runs on failure.
     # These are the commands a reader runs after `compose up --wait`.
     sections = ['Read as an application role', 'Check commit and rollback']
-    if not args.skip_benchmark:
-        sections.append('Compare with ordinary SQL')
     for heading in sections:
         section = text.split(f'\n## {heading}\n', 1)[1].split('\n## ', 1)[0]
         commands = re.findall(r'```bash\n(.*?)\n```', section, re.S)
@@ -41,6 +39,10 @@ def main():
             subprocess.run(['bash', '-euo', 'pipefail', '-c', command], cwd=ROOT, check=True, timeout=300)
         print(f'PASS documented commands: {heading}', flush=True)
     if not args.skip_benchmark:
+        with (ROOT / 'benchmark.json').open('w') as output:
+            subprocess.run(['node', 'examples/node-postgres/benchmark.mjs'], cwd=ROOT,
+                           env=dict(os.environ, SERVER_RESOURCES='1'), stdout=output,
+                           check=True, timeout=300)
         result = json.loads((ROOT / 'benchmark.json').read_text())
         assert result['environment']['extension_build_id'] == binary['build_id'], result['environment']
         assert result['extension_ref'] == (None if binary['build_id'] == 'local' else binary['build_id'])

@@ -22,7 +22,7 @@ docker compose -f examples/compose.yaml up --build --wait
 ```
 
 The demo builds the extension from your checkout. It binds PostgreSQL to
-loopback port 55432, keeps disposable data in tmpfs, and mounts no host database.
+loopback port 55432, stores disposable data in tmpfs, and mounts no host database.
 Follow the [quickstart](docs/QUICKSTART.md) to run queries and remove it.
 
 With Node.js 20 or later, check the result contract and concurrent writes:
@@ -31,25 +31,6 @@ With Node.js 20 or later, check the result contract and concurrent writes:
 npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
-
-## Measure before adopting
-
-The [benchmark](docs/BENCHMARKS.md) compares `mget` with a prepared
-`WHERE id = ANY($1)` query through the same driver. Both paths return ordered
-whole-row objects, including duplicates and missing positions. It covers warm
-reads, cold cache fills, reads mixed with updates, and write overhead.
-
-```bash
-SERVER_RESOURCES=1 npm --prefix examples/node-postgres run --silent benchmark > benchmark.json
-python3 scripts/benchmark_report.py benchmark.json
-```
-
-The report includes requests/s, requested keys/s, read/write p50/p95/p99,
-cache counters, PostgreSQL CPU, memory and I/O, and the running binary's build ID.
-The benchmark page includes recorded Node.js and Go results. CI checks the
-checked-out extension; shared-runner timings are not a capacity
-estimate. See [row caching vs shared_buffers](docs/row-cache-vs-shared-buffers.md)
-for the work a hit can avoid and the work it still does.
 
 ## Read whole rows by primary key
 
@@ -95,9 +76,9 @@ Writes remain ordinary PostgreSQL:
 UPDATE public.items SET value = 'new' WHERE id = 42;
 ```
 
-See the [Node.js example](docs/node-postgres.md) for parameter binding and result
-decoding, and the [invalidation walkthrough](docs/cache-invalidation.md) for
-commit, rollback, and read-your-writes.
+Connection examples: [Node.js](docs/node-postgres.md), [Go](docs/go.md),
+[RESP](docs/resp.md). See [benchmark results](docs/BENCHMARKS.md) for throughput
+and server resource use.
 
 ## Consistency and workload fit
 
