@@ -119,6 +119,7 @@ gh repo edit profundium/pg_local_cache \
   --add-topic shared-memory --add-topic performance
 ```
 
-There is no added visitor tracking or extension telemetry. Use Search Console
-and GitHub traffic to see discovery; use workload reports to establish actual
-trials. Downloads and copied commands are not confirmed installations.
+The public site uses Google Analytics (`G-MHQBYKWZ7W`); browser tests stub its
+loader so local/CI visits are not recorded. The extension has no telemetry.
+Use Analytics, Search Console and GitHub traffic to see discovery, and workload
+reports to establish actual trials. Visits and downloads are not confirmed installations.
