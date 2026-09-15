@@ -13,6 +13,23 @@ queries are not rewritten. An optional, limited RESP2 endpoint shares the cache.
 [Installation](docs/INSTALL_EXISTING.md) |
 [Technical reference](docs/TECHNICAL.md)
 
+## Measured: 839,678 single-key RESP requests/s
+
+**3.31× the prepared SQL throughput in one local comparison:** 839,678 vs
+253,790 requests/s. Apple M3 Max, PostgreSQL 16, Go, 256 connections, warm
+cache; median of three five-second samples on 15 September 2026. SQL `mget`
+was slower for this case at 186,296 requests/s; batch results differ.
+[Conditions and raw data](docs/benchmarks-go.md).
+
+Run the [same SQL/RESP matrix on Node.js and Go](docs/BENCHMARKS.md#run-the-same-comparison-on-every-client):
+
+```bash
+./examples/benchmark.sh all > comparison.json
+```
+
+Requires Docker, Node.js 20+ and Go 1.25+. Measures a disposable demo, not your
+existing database; use your own workload before choosing a cache.
+
 ## Try without changing an existing database
 
 With Docker Compose, from this repository:
@@ -96,6 +113,10 @@ entries fall back to an indexed source-table read.
 
 The extension is not a Redis replacement. It provides no TTL, pub/sub, or
 distributed coordination. SQL mget still uses a PostgreSQL connection.
+
+Choosing a design? Start with the [PostgreSQL caching guide](docs/postgresql-caching.md),
+[PostgreSQL and Redis cache-aside](docs/postgresql-redis-cache.md), or
+[batch primary-key lookups](docs/batch-primary-key-lookups.md).
 
 ## Install on an existing server
 

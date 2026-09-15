@@ -1,7 +1,8 @@
 # Maintaining the docs and examples
 
-Public documentation describes the 2.0 SQL mget contract. Keep historical
-benchmarks and migration narratives out of these pages.
+Public documentation describes the 2.0 SQL mget contract. Keep benchmark
+results with their recorded versions and conditions; do not present an older
+API as the current contract.
 
 ## Checks before merging
 
@@ -15,7 +16,8 @@ Check the latest commit before merging.
 
 The examples execute shell blocks from QUICKSTART.md and SQL/configuration
 from INSTALL_EXISTING.md on fresh databases, including a non-default port.
-The full default benchmark and Node unit tests run once, on PostgreSQL 16;
+The default workload benchmark, common SQL/RESP launcher smoke and Node unit
+tests run once, on PostgreSQL 16;
 other versions run the functional examples. Throughput is never a pass/fail
 threshold. Benchmark records and browser screenshots/traces are retained for
 14 days as `demo-benchmark-pg16` and `browser` artifacts.
@@ -24,6 +26,7 @@ Quick local checks:
 
 ```bash
 make verify-static source-test source-sanitize
+npm --prefix examples/node-postgres ci --ignore-scripts
 node --test examples/node-postgres/queries.test.mjs
 ```
 

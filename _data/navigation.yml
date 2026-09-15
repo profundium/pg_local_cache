@@ -4,6 +4,15 @@
 - title: Benchmarks
   url: /docs/BENCHMARKS.html
   description: Compare mget with batched SQL, including misses and writes.
+- title: PostgreSQL caching guide
+  url: /docs/postgresql-caching.html
+  description: Choose between page caching, prepared SQL, rows, views, and Redis.
+- title: PostgreSQL and Redis
+  url: /docs/postgresql-redis-cache.html
+  description: Cache-aside, stale-read races, and transaction-aware row caching.
+- title: Batch primary-key lookups
+  url: /docs/batch-primary-key-lookups.html
+  description: Avoid N+1 reads and preserve input order, duplicates, and nulls.
 - title: Row cache vs shared_buffers
   url: /docs/row-cache-vs-shared-buffers.html
   description: What another cache can avoid and what it still costs.

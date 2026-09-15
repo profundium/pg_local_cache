@@ -5,7 +5,7 @@ seo_title: "Batch PostgreSQL Row Lookups with node-postgres"
 description: Use pg_local_cache 2.0 from Node.js with a parameterized bigint array and JSON transport. Preserve order and nulls, and compare with a prepared ANY query.
 section: Node.js
 permalink: /docs/node-postgres.html
-last_modified_at: "2026-09-15"
+last_modified_at: "2026-09-16"
 ---
 
 # Batch row lookups with node-postgres
@@ -74,5 +74,16 @@ transaction use PostgreSQL's source-table path. The demo checks this with
 separate reader and writer connections; see
 [cache invalidation](cache-invalidation.md).
 
-For a Redis-compatible connection, use the [Node.js RESP example](resp.md#nodejs).
+## Prepared statements and result caching
+
+A named node-postgres query reuses a prepared statement on each connection.
+It does not cache returned rows. `local_cache.mget` adds a separate shared
+whole-row cache inside PostgreSQL; the client still sends a query and decodes
+its result. See the [caching decision guide](postgresql-caching.md) to compare
+the layers and the [batch lookup guide](batch-primary-key-lookups.md) for a
+SQL-only alternative that preserves requested positions.
+
+For RESP2, use the [Node.js RESP example](resp.md#nodejs).
 [Recorded Node.js results](benchmarks-node.md) include batch reads and concurrent updates.
+The [common benchmark](BENCHMARKS.md#run-the-same-comparison-on-every-client)
+runs Node.js and Go through the same SQL and RESP scenarios.

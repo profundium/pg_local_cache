@@ -5,7 +5,7 @@ seo_title: "Try a PostgreSQL Row Cache Locally | pg_local_cache"
 description: Run pg_local_cache 2.0 in disposable PostgreSQL, read sample rows, inspect cache hits, test updates, and remove the demo without changing an existing database.
 section: Quickstart
 permalink: /docs/QUICKSTART.html
-last_modified_at: "2026-09-15"
+last_modified_at: "2026-09-16"
 ---
 
 # Try pg_local_cache locally
@@ -71,8 +71,11 @@ docker compose -f examples/compose.yaml exec -T postgres \
   -c 'SELECT local_cache.stats();'
 ```
 
-Look at `sql_cache_hits`, `sql_cache_misses`, `sql_cache_fills`, and
-`sql_cache_bypasses`.
+On this fresh demo, `local_cache.health()` should report `ready: true`, and
+repeating the reads should increase `sql_cache_hits`. Together with the
+matching rows, this confirms the cache path works; it does not establish a
+speedup. If hits stay at zero, inspect `sql_cache_misses`, `sql_cache_fills`
+and `sql_cache_bypasses` using the [invalidation guide](cache-invalidation.md#inspect-the-cause-of-a-miss).
 
 ## Check commit and rollback
 
@@ -96,7 +99,10 @@ See the [two-session SQL walkthrough](cache-invalidation.md) or the
 - [Go](go.md): connect with `pgx` and decode the returned rows.
 - [RESP](resp.md): enable the optional endpoint and connect with a Redis client.
 
-[Benchmark results](BENCHMARKS.md) include throughput and PostgreSQL resource use.
+Next, [compare the same SQL and RESP workload](BENCHMARKS.md#run-the-same-comparison-on-every-client)
+before changing your application. To share a result or a setup blocker, open a
+[workload report](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml)
+with your environment and benchmark JSON or error log. Slower results are useful too.
 
 ## Remove the demo
 

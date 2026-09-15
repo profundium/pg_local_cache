@@ -1,32 +1,69 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { getRows } from './queries.mjs';
+import { getRespRows } from './resp.mjs';
 
 const a = '{"id":1,"value":"one"}';
 const b = '{"id":2,"value":"two"}';
 const expected = [JSON.parse(b), JSON.parse(a), JSON.parse(b), null, null];
 
 test('mget preserves positions and decodes each row', async () => {
+  const seen = [];
   const client = { query: async query => {
-    assert.deepEqual(query.values, [[2, 1, 2, null, 9]]);
     assert.match(query.text, /\$1::bigint\[\]/);
-    return { rows: [{ rows: [b, a, b, null, null] }] };
+    const keys = query.values[0];
+    seen.push(keys);
+    return { rows: [{ rows: keys.map(key => key === 1 ? a : key === 2 ? b : null) }] };
   } };
+  assert.deepEqual(await getRows(client, []), []);
+  assert.deepEqual(await getRows(client, [null, null]), [null, null]);
   assert.deepEqual(await getRows(client, [2, 1, 2, null, 9]), expected);
+  assert.deepEqual(seen, [[null, null], [2, 1, 2, null, 9]]);
 });
 
 test('ANY baseline restores order, duplicates and nulls', async () => {
-  const client = { query: async () => ({ rows: [{ key: '1', row: a }, { key: '2', row: b }] }) };
+  const seen = [];
+  const client = { query: async query => {
+    assert.match(query.text, /id = ANY/);
+    seen.push(query.values[0]);
+    return { rows: [{ key: '1', row: a }, { key: '2', row: b }] };
+  } };
+  assert.deepEqual(await getRows(client, [], false), []);
+  assert.deepEqual(await getRows(client, [null, null], false), [null, null]);
   assert.deepEqual(await getRows(client, [2, 1, 2, null, 9], false), expected);
+  assert.deepEqual(seen, [[null, null], [2, 1, 2, null, 9]]);
 });
 
-test('invalid keys do not reach the database', async () => {
-  const client = { query: () => { throw new Error('unexpected query'); } };
-  assert.deepEqual(await getRows(client, []), []);
+test('RESP MGET restores order, duplicates and nulls', async () => {
+  let calls = 0;
+  const client = { mGet: async keys => {
+    calls++;
+    assert.deepEqual(keys, [
+      'CRUD:pglc_demo.public.items:{"id":2}',
+      'CRUD:pglc_demo.public.items:{"id":1}',
+      'CRUD:pglc_demo.public.items:{"id":2}',
+      'CRUD:pglc_demo.public.items:{"id":9}',
+    ]);
+    return [b, a, b, null];
+  } };
+  assert.deepEqual(await getRespRows(client, []), []);
+  assert.deepEqual(await getRespRows(client, [null, null]), [null, null]);
+  assert.deepEqual(await getRespRows(client, [2, 1, 2, null, 9]), expected);
+  assert.equal(calls, 1);
+});
+
+test('invalid keys do not reach any database path', async () => {
+  const sql = { query: () => { throw new Error('unexpected query'); } };
+  const resp = { mGet: () => { throw new Error('unexpected MGET'); } };
   for (const keys of [[1.5], ['1'], [undefined], Array(1), [Number.MAX_SAFE_INTEGER + 1]]) {
-    await assert.rejects(getRows(client, keys), TypeError);
+    await assert.rejects(getRows(sql, keys), TypeError);
+    await assert.rejects(getRows(sql, keys, false), TypeError);
+    await assert.rejects(getRespRows(resp, keys), TypeError);
   }
-  await assert.rejects(getRows(client, Array(1025).fill(1)), RangeError);
+  const tooMany = Array(1025).fill(1);
+  await assert.rejects(getRows(sql, tooMany), RangeError);
+  await assert.rejects(getRows(sql, tooMany, false), RangeError);
+  await assert.rejects(getRespRows(resp, tooMany), RangeError);
 });
 
 const { latency, keysFor } = await import('./benchmark.mjs');

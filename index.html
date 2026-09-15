@@ -4,7 +4,7 @@ title: "PostgreSQL row cache extension | pg_local_cache"
 seo_title: "PostgreSQL Row Cache Extension | pg_local_cache"
 description: Cache PostgreSQL primary-key rows in shared memory with explicit SQL mget and transaction-aware invalidation. Try the local demo and compare it with batched SQL.
 image: /assets/social-card.png
-last_modified_at: "2026-09-14"
+last_modified_at: "2026-09-16"
 home: true
 permalink: /
 ---
@@ -12,13 +12,24 @@ permalink: /
   <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
     <div class="hero-copy">
       <h1 id="hero-title">A row cache<br>inside <span>PostgreSQL.</span></h1>
-      <p>Read rows by primary key with one SQL call. PostgreSQL writes automatically invalidate affected cache entries.</p>
+      <p>Read rows by primary key with SQL <code>mget</code> or RESP. PostgreSQL writes automatically invalidate affected cache entries.</p>
       <div class="hero-actions">
         <a class="button primary" href="{{ '/docs/QUICKSTART.html' | relative_url }}">Try locally <span aria-hidden="true">→</span></a>
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | relative_url }}">Compare with SQL <span aria-hidden="true">→</span></a>
       </div>
       <p class="hero-note">Explicit SQL API · PostgreSQL 14–18 · Open source</p>
     </div>
+    <figure class="hero-benchmark" aria-label="Local single-key benchmark: RESP compared with SQL">
+      <p class="benchmark-label">Measured locally · 15 Sep 2026</p>
+      <p class="benchmark-number"><strong>839,678</strong><span>requests/s · RESP MGET</span></p>
+      <p class="benchmark-gain"><strong>3.31×</strong> the prepared SQL throughput<br>in this single-key comparison</p>
+      <dl class="benchmark-baselines">
+        <div><dt>Prepared SQL</dt><dd>253,790 <span>req/s</span></dd></div>
+        <div><dt>SQL mget</dt><dd>186,296 <span>req/s</span></dd></div>
+      </dl>
+      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 connections.<br>Warm cache, 1 key/request. Median of 3 × 5 seconds.<br>SQL mget was slower here; batch results differ.</figcaption>
+      <a href="{{ '/docs/benchmarks-go.html' | relative_url }}">Results, raw data &amp; conditions <span aria-hidden="true">→</span></a>
+    </figure>
   </section>
 
   <section id="read-path" class="page-section read-path" aria-labelledby="read-path-title">
@@ -53,18 +64,18 @@ permalink: /
   <section id="benchmarks" class="band" aria-labelledby="benchmark-title">
     <div class="page-section section-grid">
       <div class="section-intro">
-        <h2 id="benchmark-title">Measured on Apple M3 Max.</h2>
-        <p>SQL and RESP results with PostgreSQL CPU and memory usage.</p>
+        <h2 id="benchmark-title">Run the same test.<br>On every client.</h2>
+        <p>Node.js and Go. Prepared SQL, SQL mget, and RESP MGET.</p>
       </div>
       <div>
-        <p>Node.js returned 16,616 requests/s for 64-key SQL batches. Go reached 839,678 requests/s for single-key RESP reads. Each result has its own client configuration and SQL baseline.</p>
-        <a class="button" href="{{ '/docs/BENCHMARKS.html' | relative_url }}">See results <span aria-hidden="true">→</span></a>
+        <p>One runner uses the same keys, batch sizes, connection counts, duration, and result checks. Compare throughput, latency, and PostgreSQL CPU and memory on your machine.</p>
+        <a class="button" href="{{ '/docs/BENCHMARKS.html#run-the-same-comparison-on-every-client' | relative_url }}">Run the comparison <span aria-hidden="true">→</span></a>
       </div>
     </div>
   </section>
 
   <section id="fit" class="page-section section-grid" aria-labelledby="fit-title">
-    <div class="section-intro"><h2 id="fit-title">Is this your workload?</h2></div>
+    <div class="section-intro"><h2 id="fit-title">Is this your workload?</h2><p>Choosing a cache? <a href="{{ '/docs/postgresql-caching.html' | relative_url }}">Compare PostgreSQL pages, rows, materialized views, and Redis</a>.</p></div>
     <div class="fit-columns">
       <section class="fit-group">
         <h3>Worth measuring</h3>
@@ -79,13 +90,15 @@ permalink: /
 
   <section id="quick-start" class="page-section quick-start" aria-labelledby="quick-start-title">
     <h2 id="quick-start-title">Run a local demo.</h2>
-    <p class="quick-start-lead">Build the extension from your checkout and start a disposable PostgreSQL server with sample rows. Docker keeps the demo separate from your databases.</p>
+    <p class="quick-start-lead">Clone the repository and start a disposable PostgreSQL server with sample rows. Docker builds the extension and keeps the demo separate from your databases.</p>
     <div class="install-command">
-      <div class="command-label">From the repository root; Docker Compose required</div>
+      <div class="command-label">Git and Docker Compose required</div>
       <button class="copy-button" type="button" data-copy="demo-command" aria-live="polite">Copy</button>
-      <pre id="demo-command"><code>docker compose -f examples/compose.yaml up --build --wait</code></pre>
+      <pre id="demo-command"><code>git clone https://github.com/profundium/pg_local_cache.git
+cd pg_local_cache
+docker compose -f examples/compose.yaml up --build --wait</code></pre>
     </div>
-    <p class="quick-start-more"><a href="{{ '/docs/QUICKSTART.html' | relative_url }}">Get the files, run the queries, and remove the demo</a>. For an existing server, use the <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">installation guide</a>.</p>
+    <p class="quick-start-more"><a href="{{ '/docs/QUICKSTART.html#read-as-an-application-role' | relative_url }}">Read sample rows and check cache hits</a>. Already cloned the repository? Run the last command from its root. For an existing server, use the <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">installation guide</a>.</p>
     <p class="quick-start-more">Installing on an existing server requires a PostgreSQL restart.</p>
   </section>
 
@@ -103,7 +116,7 @@ permalink: /
     <div class="faq-list">
       <details><summary>Does this replace shared_buffers?</summary><p>No. PostgreSQL caches database pages. This extension separately caches serialized whole rows by primary key. See the <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | relative_url }}">read-path comparison</a>.</p></details>
       <details><summary>Does it cache ordinary SELECT queries?</summary><p>No. Only explicit <code>local_cache.mget</code> calls use the SQL cache. Your existing queries keep PostgreSQL's normal execution path.</p></details>
-      <details><summary>Does it replace Redis?</summary><p>No. The optional RESP2 endpoint is limited. There is no general-purpose Redis command set, TTL, pub/sub, or distributed coordination.</p></details>
+      <details><summary>Does it replace Redis?</summary><p>No. The optional RESP2 endpoint is limited. There is no general-purpose Redis command set, TTL, pub/sub, or distributed coordination. Compare the <a href="{{ '/docs/postgresql-redis-cache.html' | relative_url }}">PostgreSQL and Redis cache-aside paths</a>.</p></details>
       <details><summary>How do I check updates and rollback?</summary><p>The <a href="{{ '/docs/cache-invalidation.html' | relative_url }}">invalidation guide</a> includes a two-session test. The runnable example checks uncommitted writes, read-your-writes, rollback, and committed updates.</p></details>
     </div>
   </section>

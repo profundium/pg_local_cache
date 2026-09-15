@@ -3,8 +3,7 @@ export const MGET_TEXT_SQL = "SELECT local_cache.mget('public.items'::regclass, 
 export const MGET_SQL = "SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows";
 export const ANY_SQL = 'SELECT id::text AS key, row_to_json(i)::text AS row FROM public.items AS i WHERE id = ANY($1::bigint[])';
 
-// Both paths return one object (or null) per requested key.
-export async function getRows(client, keys, cached = true) {
+export function validateKeys(keys) {
   if (!Array.isArray(keys) || keys.length > 1024) {
     throw new RangeError('Expected an array of at most 1024 keys');
   }
@@ -13,6 +12,11 @@ export async function getRows(client, keys, cached = true) {
       throw new TypeError('This example accepts safe integer keys or null');
     }
   }
+}
+
+// Both paths return one object (or null) per requested key.
+export async function getRows(client, keys, cached = true) {
+  validateKeys(keys);
   if (!keys.length) return [];
 
   if (cached) {

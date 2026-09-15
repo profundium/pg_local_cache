@@ -4,7 +4,7 @@ title: PostgreSQL cache benchmarks
 description: Measured pg_local_cache results with Node.js, Go and RESP on Apple M3 Max. Includes the machine, PostgreSQL CPU, memory and methodology.
 section: Benchmarks
 permalink: /docs/BENCHMARKS.html
-last_modified_at: "2026-09-15"
+last_modified_at: "2026-09-16"
 ---
 
 # PostgreSQL cache benchmarks
@@ -12,19 +12,73 @@ last_modified_at: "2026-09-15"
 Recorded on an Apple M3 Max with PostgreSQL 16. Each comparison uses the same
 client, dataset and decoded row results for cached and ordinary SQL reads.
 
-## Results by client
+## Where the cache helped—and where it did not
 
-**[Node.js / node-postgres](benchmarks-node.md)**: 16,616 requests/s for
-64-key batches through SQL `mget`, versus 15,577 for prepared SQL at 64
-connections. Client on macOS, PostgreSQL in Docker.
+- **Single-key SQL:** prepared SQL beat SQL `mget` in both published client
+  setups. At 256 Go connections it returned 253,790 requests/s versus 186,296
+  for `mget`. Adding a row cache did not improve this SQL workload.
+- **64-key SQL batches:** Go at 256 connections returned 43,647 requests/s
+  through `mget` versus 27,615 for prepared SQL, about 1.58× throughput.
+  Node.js at 64 connections showed a smaller gain: 16,616 versus 15,577.
+  Batch size and client overhead matter; check CPU and latency as well.
+- **Single-key RESP:** Go at 256 connections reached 839,678 requests/s versus
+  the 253,790 SQL baseline. RESP workers use a configured database role and
+  do not share the caller's SQL transaction or snapshot. This result alone
+  does not make RESP a substitute for your SQL connection.
 
-**[Go / pgx and RESP](benchmarks-go.md)**: 839,678 single-key requests/s
-through RESP, versus 253,790 for prepared SQL at 256 connections. Both client
-and PostgreSQL inside the Docker VM.
-
-The pages include batch scaling and server resource costs. These are separate
-setups, not a ranking of languages. For connection examples, see
+The [Node.js measurements](benchmarks-node.md) use a macOS client and Docker
+server; [Go and RESP measurements](benchmarks-go.md) put both inside the Docker
+VM. Each page links raw repetitions, exact versions and server resource costs.
+These separate setups do not rank languages. For connection examples, see
 [Node.js](node-postgres.md), [Go](go.md) or [RESP](resp.md).
+
+## Run the same comparison on every client
+
+From the repository root, with Docker, Node.js 20+ and Go 1.25+:
+
+```bash
+./examples/benchmark.sh all > comparison.json
+python3 scripts/benchmark_report.py comparison.json
+```
+
+The runner builds a disposable PostgreSQL server and runs this common matrix:
+
+| Setting | Every client and read path |
+|---|---|
+| Clients | Node.js with node-postgres / node-redis; Go with pgx / standard-library RESP2 |
+| Read paths | Prepared SQL `ANY`, SQL `mget`, RESP `MGET` |
+| Keys per request | 1, 16, 64; the same fixed keys starting at 1 |
+| Connections | 4, 64, 256; persistent, one outstanding request per connection |
+| Samples | Three five-second repetitions per case; order rotates |
+| Placement | Same separate Linux client container, sharing PostgreSQL's network namespace |
+| Before timing | Connect, compare decoded rows, then warm each connection |
+| Result contract | Full JSON rows, input order, duplicates, nulls, missing keys, empty and all-null input |
+| Measurements | Requests/s, latency percentiles, client CPU, server CPU/memory, cache counters |
+
+There are 162 samples by default, about 14 minutes of timed work plus setup.
+The script removes its containers after success or failure. For a short
+correctness run, without treating the numbers as a performance result:
+
+```bash
+CONNECTIONS=4 BATCHES=1,16,64 REPEATS=1 DURATION_SECONDS=1 \
+  ./examples/benchmark.sh all > smoke.json
+```
+
+Use `node` or `go` instead of `all` to select one client with the same defaults.
+`CONNECTIONS`, `BATCHES`, `REPEATS`, `DURATION_SECONDS` and Go's `GOMAXPROCS`
+can be overridden. Node.js uses one event-loop thread; Go defaults to eight
+threads. Node's SQL mget wraps the returned array in JSON, while pgx decodes
+the PostgreSQL text array. Those client costs stay inside timing.
+
+Identical workloads do not make the protocols interchangeable: RESP workers
+use their configured database role and do not join a caller's SQL transaction
+or snapshot. See the [RESP contract](TECHNICAL.md#optional-resp2-endpoint).
+The common comparison measures warm reads. Cold, mixed-read/write and
+write-overhead diagnostics remain separate in `node-workload`.
+
+The published 14–15 September results below predate this common launcher.
+Their original environments and source revisions remain attached to the
+data; they are not new measurements from the unified matrix.
 
 ## Test environment
 

@@ -7,7 +7,7 @@ import subprocess
 
 root = Path(__file__).resolve().parents[1]
 env = dict(os.environ, CONNECTIONS='4', CLIENTS='4', REQUESTS='100',
-           BATCHES='1,64', REPEATS='1', DURATION_SECONDS='1')
+           BATCHES='1,16,64', REPEATS='1', DURATION_SECONDS='1')
 
 
 def containers():
@@ -17,16 +17,19 @@ def containers():
 
 
 before = containers()
-for mode in ('node', 'go', 'node-workload'):
+for mode in ('all', 'node-workload'):
     result = subprocess.run(['./examples/benchmark.sh', mode], cwd=root,
                             env=env, text=True, stdout=subprocess.PIPE, check=True)
     data = json.loads(result.stdout)
     assert 'error' not in data, data.get('error')
     assert data['results'], mode
-    if mode != 'node-workload':
-        assert {r['driver'] for r in data['results']} == {'go-pgx' if mode == 'go' else 'node-json'}
-        assert {r['mode'] for r in data['results']} == (
-            {'postgres-any', 'mget', 'resp-mget'} if mode == 'go' else {'postgres-any', 'mget'})
+    if mode == 'all':
+        assert {(r['driver'], r['mode'], r['batch'], r['clients'], r['repeat']) for r in data['results']} == {
+            (driver, variant, batch, 4, 1)
+            for driver in ('node-json', 'go-pgx')
+            for variant in ('postgres-any', 'mget', 'resp-mget')
+            for batch in (1, 16, 64)
+        }
     for row in data['results']:
         assert row['requests_s'] > 0
         assert row['server']['cpu_cores'] > 0

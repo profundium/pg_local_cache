@@ -4,7 +4,7 @@ title: Connect over RESP
 description: Read PostgreSQL rows over RESP2 with redis-cli or Node.js. Includes authentication, client settings, runnable examples and cleanup.
 section: RESP
 permalink: /docs/resp.html
-last_modified_at: "2026-09-15"
+last_modified_at: "2026-09-16"
 ---
 
 # Connect over RESP
@@ -37,7 +37,9 @@ npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run resp
 ```
 
-The example uses the official `@redis/client` package and checks duplicates and missing rows.
+The example uses the official `@redis/client` package and checks order,
+duplicates, null input positions and missing rows. Its helper omits null keys
+on the wire and restores their positions after decoding.
 To connect from your application:
 
 ```js
@@ -69,6 +71,15 @@ Use token-only authentication, without a username or Redis database number.
 RESP workers use the configured PostgreSQL role. For reads within a SQL
 transaction, use [Node.js SQL](node-postgres.md) or [Go SQL](go.md).
 See the [RESP reference](TECHNICAL.md#optional-resp2-endpoint) for commands and limits.
+
+## Compare with SQL
+
+The [common benchmark](BENCHMARKS.md#run-the-same-comparison-on-every-client)
+runs RESP `MGET`, SQL `mget` and prepared SQL with the same keys and decoded
+results in both Node.js and Go. Matching results in this read-only test does
+not give RESP the transaction or permissions contract of a SQL connection.
+For broader application caching, read the
+[PostgreSQL and Redis cache-aside guide](postgresql-redis-cache.md).
 
 ## Stop the demo
 

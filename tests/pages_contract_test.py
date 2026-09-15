@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import statistics
 import tempfile
 import unittest
 
@@ -60,6 +61,21 @@ class PagesContracts(unittest.TestCase):
                 if path and not (document.parent / path).resolve().exists():
                     failures.append(f'{document.name} -> {target}')
         self.assertEqual(failures, [])
+
+    def test_hero_benchmark_matches_recorded_medians(self):
+        data = json.loads((ROOT / 'assets/benchmarks/2026-09-15-m3-max-resp.json').read_text())
+        rows = data['runs']['initial_optimized_vm']['results']
+        medians = {
+            mode: statistics.median(row['requests_s'] for row in rows
+                                    if row['batch'] == 1 and row['clients'] == 256 and row['mode'] == mode)
+            for mode in ('postgres-any', 'mget', 'resp-mget')
+        }
+        hero = (ROOT / 'index.html').read_text().split('</section>', 1)[0]
+        for value in medians.values():
+            self.assertIn(f'{value:,.0f}', hero)
+        self.assertIn(f'{medians["resp-mget"] / medians["postgres-any"]:.2f}×', hero)
+        self.assertIn('SQL mget was slower', hero)
+        self.assertIn('benchmarks-go.html', hero)
 
     def test_sitemap_and_workflow_cover_the_built_pages(self):
         self.assertIn('site.pages', (ROOT / 'sitemap.xml').read_text())

@@ -2,13 +2,13 @@
 set -euo pipefail
 
 case "${1:-}" in
-  node|go|node-workload) mode=$1 ;;
-  *) echo "Usage: $0 node|go|node-workload > benchmark.json" >&2; exit 2 ;;
+  all|node|go|node-workload) mode=$1 ;;
+  *) echo "Usage: $0 all|node|go|node-workload > benchmark.json" >&2; exit 2 ;;
 esac
 
 cd "$(dirname "$0")/.."
 for tool in docker node npm; do command -v "$tool" >/dev/null; done
-if [[ $mode == go ]]; then command -v go >/dev/null; fi
+if [[ $mode == go || $mode == all ]]; then command -v go >/dev/null; fi
 docker info >/dev/null
 npm --prefix examples/node-postgres ci --ignore-scripts >&2
 
@@ -19,13 +19,13 @@ if git diff --quiet HEAD -- src sql Makefile Dockerfile pg_local_cache.control; 
   PGLC_EXTENSION_REF=$(git rev-parse HEAD)
 fi
 compose=(docker compose -f examples/compose.yaml)
-if [[ $mode == go ]]; then compose+=(-f examples/compose.resp.yaml); fi
+if [[ $mode != node-workload ]]; then compose+=(-f examples/compose.resp.yaml); fi
 client="$COMPOSE_PROJECT_NAME-client"
 temp=$(mktemp -d)
 cleanup() {
   status=$?
   trap - EXIT
-  if [[ $mode == go ]]; then docker rm -f "$client" >/dev/null 2>&1 || true; fi
+  if [[ $mode != node-workload ]]; then docker rm -f "$client" >/dev/null 2>&1 || true; fi
   "${compose[@]}" down >&2 || status=1
   rm -rf "$temp"
   exit "$status"
@@ -38,20 +38,21 @@ trap 'exit 143' TERM
 address=$("${compose[@]}" port postgres 5432)
 export PGLC_DEMO_PORT=${address##*:}
 export BENCHMARK_CLIENT=$mode SERVER_RESOURCES=1 REPEATS=${REPEATS:-3}
-export BATCHES=${BATCHES:-1,64}
+export BATCHES=${BATCHES:-1,16,64}
 
-if [[ $mode == go ]]; then
+if [[ $mode != node-workload ]]; then
   server=$("${compose[@]}" ps -q postgres)
   image=$(docker inspect --format '{{.Image}}' "$server")
   arch=$(docker image inspect --format '{{.Architecture}}' "$image")
-  GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go -C examples/go-pgx build -o "$temp/pglc-go-pgx" .
+  if [[ $mode == go || $mode == all ]]; then
+    GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go -C examples/go-pgx build -o "$temp/pglc-go-pgx" .
+  fi
   docker run -d --name "$client" --network "container:$server" \
-    --mount "type=bind,src=$temp/pglc-go-pgx,dst=/tmp/pglc-go-pgx,readonly" \
-    "$image" sleep infinity >&2
-  export PGLC_PGX_CONTAINER=$client GOMAXPROCS=${GOMAXPROCS:-8}
-  export CONNECTIONS=${CONNECTIONS:-64,256} DURATION_SECONDS=${DURATION_SECONDS:-5}
-elif [[ $mode == node ]]; then
-  export CONNECTIONS=${CONNECTIONS:-4,64,256} DURATION_SECONDS=${DURATION_SECONDS:-10}
+    --mount "type=bind,src=$temp,dst=/bench-bin,readonly" \
+    --mount "type=bind,src=$PWD/examples/node-postgres,dst=/bench,readonly" \
+    node:24-bookworm-slim sleep infinity >&2
+  export PGLC_CLIENT_CONTAINER=$client GOMAXPROCS=${GOMAXPROCS:-8}
+  export CONNECTIONS=${CONNECTIONS:-4,64,256} DURATION_SECONDS=${DURATION_SECONDS:-5}
 fi
 
 if [[ $mode == node-workload ]]; then

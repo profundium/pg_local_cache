@@ -295,6 +295,18 @@ func verifyParity(ctx context.Context, conn *pgx.Conn) (map[string][]string, err
 	if !reflect.DeepEqual(mgetRows, anyRows) {
 		return nil, fmt.Errorf("empty result mismatch")
 	}
+	allNull := []*int64{nil, nil}
+	mgetRows, _, err = queryMget(ctx, conn, allNull)
+	if err != nil {
+		return nil, fmt.Errorf("mget all-null query: %w", err)
+	}
+	anyRows, _, err = queryAny(ctx, conn, allNull)
+	if err != nil {
+		return nil, fmt.Errorf("postgres-any all-null query: %w", err)
+	}
+	if !reflect.DeepEqual(mgetRows, anyRows) {
+		return nil, fmt.Errorf("all-null result mismatch")
+	}
 	formats["mget"] = mgetFormats
 	formats["postgres-any"] = anyFormats
 	return formats, nil
