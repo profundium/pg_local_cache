@@ -95,12 +95,12 @@ p, li { text-wrap: pretty; }
   margin-inline: auto;
   padding: clamp(4rem, 8vw, 7.5rem) var(--gutter);
 }
-.hero { padding-top: clamp(4rem, 8vw, 7.5rem); padding-bottom: clamp(4rem, 7vw, 6rem); }
-.hero-copy { text-align: center; }
+.hero { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: center; gap: clamp(2rem, 4vw, 4rem); padding-block: clamp(3rem, 6vw, 5rem); }
+.hero-copy { text-align: left; }
 .hero h1 {
   max-width: 70rem;
-  margin: 0 auto;
-  font-size: clamp(3rem, 7.5vw, 6rem);
+  margin: 0;
+  font-size: clamp(3rem, 5.7vw, 5rem);
   font-weight: 500;
   line-height: 1.04;
   letter-spacing: -.04em;
@@ -113,8 +113,21 @@ p, li { text-wrap: pretty; }
   font-size: clamp(1.05rem, 1.6vw, 1.25rem);
   line-height: 1.65;
 }
-.hero-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: .9rem; }
+.hero-actions { display: flex; flex-wrap: wrap; gap: .9rem; }
 .hero-copy > .hero-note { margin: 1.5rem auto 0; font-family: var(--mono); font-size: .78rem; }
+.hero-benchmark { margin: 0; padding: clamp(1.25rem, 3vw, 2.5rem); border-top: .4rem solid var(--lime); border-radius: .4rem; color: var(--terminal-text); background: var(--terminal); }
+.benchmark-label { margin: 0; color: #aebcc5; font-family: var(--mono); font-size: .75rem; }
+.benchmark-number { margin: 1rem 0; }
+.benchmark-number strong { display: block; color: var(--lime); font-family: var(--display); font-size: clamp(3.25rem, 6vw, 5.25rem); font-weight: 600; line-height: 1.1; letter-spacing: -.04em; }
+.benchmark-number span { font-size: 1.05rem; }
+.benchmark-gain { margin: 1rem 0 1.5rem; }
+.benchmark-gain strong { color: var(--lime); font-size: 1.6rem; }
+.benchmark-baselines { margin: 0; border-top: 1px solid var(--terminal-line); }
+.benchmark-baselines > div { display: flex; justify-content: space-between; gap: 1rem; padding-block: .5rem; border-bottom: 1px solid var(--terminal-line); }
+.benchmark-baselines dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 650; }
+.benchmark-baselines dd span { font-weight: 400; font-size: .8rem; }
+.hero-benchmark figcaption { margin: 1rem 0; color: #aebcc5; font-size: .78rem; line-height: 1.6; }
+.hero-benchmark > a { color: var(--terminal-text); font-size: .9rem; }
 .button {
   display: inline-flex;
   min-height: 3.5rem;
@@ -282,6 +295,9 @@ p, li { text-wrap: pretty; }
 .doc-content img { max-width: 100%; }
 
 @media (max-width: 980px) {
+  .hero { grid-template-columns: minmax(0, 1fr); }
+  .hero-copy > p { margin-inline: 0; }
+  .hero-benchmark { max-width: 42rem; width: 100%; }
   .section-grid { grid-template-columns: 1fr; }
   .terminal { min-height: 0; }
   .proof-rail { grid-template-columns: repeat(2, 1fr); }

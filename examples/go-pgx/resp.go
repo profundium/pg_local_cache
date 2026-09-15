@@ -164,7 +164,7 @@ func runRESP(reader *bufio.Reader, writer *bufio.Writer, cfg inputConfig, ctx co
 	if err := prepareAll(ctx, conns, cfg); err != nil {
 		return err
 	}
-	for _, keys := range [][]*int64{edgeKeys(), {}} {
+	for _, keys := range [][]*int64{edgeKeys(), {}, {nil, nil}} {
 		expected, _, err := queryAny(ctx, conns[0], keys)
 		if err != nil {
 			return err

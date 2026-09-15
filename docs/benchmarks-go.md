@@ -4,7 +4,7 @@ title: "Go benchmarks: SQL and RESP"
 description: Local pgx and RESP2 results on Apple M3 Max, with PostgreSQL CPU, memory and connection scaling.
 section: Benchmarks
 permalink: /docs/benchmarks-go.html
-last_modified_at: "2026-09-15"
+last_modified_at: "2026-09-16"
 ---
 
 # Go benchmarks: SQL and RESP
@@ -84,7 +84,11 @@ From the repository root, with Docker, Node.js 20+ and Go 1.25+:
 The script builds a disposable PostgreSQL server and the Go client, runs each
 case three times, records server resources, then removes its containers.
 The client runs in the Docker VM, in a separate cgroup from PostgreSQL.
-Defaults: 64/256 connections, 1/64 keys and five seconds per sample.
+Current defaults: 4/64/256 connections, 1/16/64 keys and five seconds per sample.
+Use `all` to run Node.js and Go against the same server with the
+[common matrix](BENCHMARKS.md#run-the-same-comparison-on-every-client).
+These defaults were unified after the historical measurements above;
+use the recorded JSON revisions to reproduce the original harness.
 
 Optional overrides: `CONNECTIONS`, `BATCHES`, `REPEATS`, `DURATION_SECONDS`
 and `GOMAXPROCS`. The JSON records the running extension's build ID.

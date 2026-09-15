@@ -4,7 +4,7 @@ title: Node.js benchmarks
 description: "Local node-postgres results on Apple M3 Max: batch reads, concurrent updates, PostgreSQL CPU and memory."
 section: Benchmarks
 permalink: /docs/benchmarks-node.html
-last_modified_at: "2026-09-15"
+last_modified_at: "2026-09-16"
 ---
 
 # Node.js benchmarks
@@ -77,10 +77,14 @@ From the repository root, with Docker and Node.js 20+:
 ./examples/benchmark.sh node > node.json
 ```
 
-Defaults: 4/64/256 connections, 1/64 keys, three ten-second samples per case.
-Only node-postgres runs queries. The script creates its own disposable server,
-records PostgreSQL resources, then removes the container.
+Current defaults: 4/64/256 connections, 1/16/64 keys, three five-second samples
+per case. Node.js now runs all three paths: prepared SQL, SQL `mget`, and RESP
+`MGET`, inside the Docker VM. The script creates a disposable server and
+separate client container, records resources, then removes both.
 Optional overrides: `CONNECTIONS`, `BATCHES`, `REPEATS`, `DURATION_SECONDS`.
+Use `all` to include Go in the [same matrix](BENCHMARKS.md#run-the-same-comparison-on-every-client).
+These defaults were unified after the historical measurements above;
+use the recorded JSON revisions for the original host-based setup.
 
 For reads mixed with writes:
 
