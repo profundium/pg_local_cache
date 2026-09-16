@@ -72,9 +72,8 @@ docker compose -f examples/compose.yaml exec -T postgres \
 ```
 
 On this fresh demo, `local_cache.health()` should report `ready: true`, and
-repeating the reads should increase `sql_cache_hits`. Together with the
-matching rows, this confirms the cache path works; it does not establish a
-speedup. If hits stay at zero, inspect `sql_cache_misses`, `sql_cache_fills`
+repeating the reads should increase `sql_cache_hits`.
+If hits stay at zero, inspect `sql_cache_misses`, `sql_cache_fills`
 and `sql_cache_bypasses` using the [invalidation guide](cache-invalidation.md#inspect-the-cause-of-a-miss).
 
 ## Check commit and rollback
@@ -99,10 +98,10 @@ See the [two-session SQL walkthrough](cache-invalidation.md) or the
 - [Go](go.md): connect with `pgx` and decode the returned rows.
 - [RESP](resp.md): enable the optional endpoint and connect with a Redis client.
 
-Next, [compare the same SQL and RESP workload](BENCHMARKS.md#run-the-same-comparison-on-every-client)
-before changing your application. To share a result or a setup blocker, open a
+Next, [compare the same SQL and RESP workload](BENCHMARKS.md#run-the-same-comparison-on-every-client).
+For results or setup issues, open a
 [workload report](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml)
-with your environment and benchmark JSON or error log. Slower results are useful too.
+with your environment and benchmark JSON or error log.
 
 ## Remove the demo
 

@@ -5,7 +5,7 @@ seo_title: "PostgreSQL Cache Invalidation: Commit and Rollback | pg_local_cache"
 description: Test pg_local_cache 2.0 invalidation with concurrent PostgreSQL sessions. Check uncommitted updates, read-your-writes, rollback, committed reads, and fallback rules.
 section: Cache invalidation
 permalink: /docs/cache-invalidation.html
-last_modified_at: "2026-09-14"
+last_modified_at: "2026-09-16"
 ---
 
 # Transaction-aware cache invalidation in PostgreSQL
@@ -66,9 +66,7 @@ switch to a snapshot taken after it started. PostgreSQL documents that behavior
 under [Read Committed](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED).
 
 The executable [Node.js test](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/demo.mjs)
-asserts these observations with separate connections. It is a regression example,
-not an exhaustive proof of concurrent correctness. Broader integration tests
-remain in the repository's `tests` directory.
+asserts these observations with separate connections.
 
 ## Cases that deliberately bypass the cache
 
@@ -78,8 +76,7 @@ be returned successfully without being cached. A cache hit rate near zero is
 not necessarily a failed installation: check the workload and bypass counters.
 
 When the application needs `SELECT ... FOR UPDATE`, use the ordinary PostgreSQL
-operation; `mget` does not replace row locking. This example does not test
-replica failover, custom trigger configurations, or untested extension combinations.
+operation; `mget` does not replace row locking.
 
 ## Inspect the cause of a miss
 

@@ -34,8 +34,7 @@ constructs the result. A [prepared statement](https://www.postgresql.org/docs/18
 can avoid repeated parse and analysis work in one session. It still executes
 against the current database state, and its plan can be generic or custom.
 
-These are often enough. Compare them first, especially when a query returns a
-small projection or joins several tables. The [row cache comparison](row-cache-vs-shared-buffers.md)
+The [row cache comparison](row-cache-vs-shared-buffers.md)
 shows the work that remains on each path.
 
 ### Whole rows by primary key
@@ -61,7 +60,5 @@ cache.
 
 An external cache such as Redis suits application objects shared by multiple
 processes or services. The application owns keys, serialization, TTL, and
-invalidation. Follow the [Redis cache-aside guide](postgresql-redis-cache.md)
-before adding this coordination path. Use the [quickstart](QUICKSTART.md) to
-test `pg_local_cache` on `public.items`; do not infer a speedup until your
-workload's hit rate, row size, writes, and end-to-end latency support it.
+invalidation. See the [Redis cache-aside guide](postgresql-redis-cache.md).
+The [quickstart](QUICKSTART.md) runs `pg_local_cache` on `public.items`.

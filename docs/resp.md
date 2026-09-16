@@ -68,16 +68,15 @@ requests. These [client settings](https://github.com/redis/node-redis/blob/maste
 select RESP2 and skip Redis-specific client metadata commands.
 Use token-only authentication, without a username or Redis database number.
 
-RESP workers use the configured PostgreSQL role. For reads within a SQL
-transaction, use [Node.js SQL](node-postgres.md) or [Go SQL](go.md).
+RESP workers use one configured PostgreSQL role for all clients. For reads
+within a SQL transaction, use [Node.js SQL](node-postgres.md) or [Go SQL](go.md).
 See the [RESP reference](TECHNICAL.md#optional-resp2-endpoint) for commands and limits.
 
 ## Compare with SQL
 
 The [common benchmark](BENCHMARKS.md#run-the-same-comparison-on-every-client)
 runs RESP `MGET`, SQL `mget` and prepared SQL with the same keys and decoded
-results in both Node.js and Go. Matching results in this read-only test does
-not give RESP the transaction or permissions contract of a SQL connection.
+results in both Node.js and Go.
 For broader application caching, read the
 [PostgreSQL and Redis cache-aside guide](postgresql-redis-cache.md).
 

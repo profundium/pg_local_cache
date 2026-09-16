@@ -87,8 +87,7 @@ The client runs in the Docker VM, in a separate cgroup from PostgreSQL.
 Current defaults: 4/64/256 connections, 1/16/64 keys and five seconds per sample.
 Use `all` to run Node.js and Go against the same server with the
 [common matrix](BENCHMARKS.md#run-the-same-comparison-on-every-client).
-These defaults were unified after the historical measurements above;
-use the recorded JSON revisions to reproduce the original harness.
+To reproduce the recorded run, use the revisions in the measurements JSON.
 
 Optional overrides: `CONNECTIONS`, `BATCHES`, `REPEATS`, `DURATION_SECONDS`
 and `GOMAXPROCS`. The JSON records the running extension's build ID.
