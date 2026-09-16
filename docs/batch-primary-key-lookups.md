@@ -79,14 +79,14 @@ an unbounded batch.
 [DataLoader](https://github.com/graphql/dataloader#batching) combines individual
 loads into a batch. Its batch function must return one value per input key in
 the same order; the restoration above provides that shape even for missing
-rows. Start with the ordinary SQL batch before measuring an additional cache.
+rows.
 
 DataLoader's [per-request memoization](https://github.com/graphql/dataloader#caching-per-request)
 is separate from PostgreSQL's shared row cache. Create loaders for each
 request, and clear affected loader entries after mutations in that request.
 PostgreSQL invalidation cannot clear values already stored in a JavaScript
-loader. Keep application authorization checks; this is not a GraphQL adapter,
-and `pg_local_cache` does not support RLS tables.
+loader. Keep application authorization checks; `pg_local_cache` does not
+support RLS tables.
 
 Run the [quickstart](QUICKSTART.md), then compare both read paths in the
 [benchmarks](BENCHMARKS.md). The [technical reference](TECHNICAL.md#sql-mget-api)

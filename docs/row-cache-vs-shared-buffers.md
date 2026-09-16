@@ -5,7 +5,7 @@ seo_title: "PostgreSQL Row Cache vs shared_buffers | pg_local_cache"
 description: Compare PostgreSQL page caching with pg_local_cache 2.0 whole-row caching. See what a row-cache hit avoids, what it still costs, and when not to add another cache.
 section: Read paths
 permalink: /docs/row-cache-vs-shared-buffers.html
-last_modified_at: "2026-09-14"
+last_modified_at: "2026-09-16"
 ---
 
 # PostgreSQL row cache vs shared_buffers
@@ -18,7 +18,7 @@ tuples. A row-cache hit can return the stored payload after eligibility and
 snapshot checks.
 
 The operating system may also cache file contents. Use a warm database as the
-baseline; data fitting in memory alone does not justify a second cache.
+baseline.
 
 {% include diagrams/read-path.html id="buffers-read" %}
 
@@ -39,9 +39,8 @@ not cache arbitrary SELECT results or rewrite existing queries. The
 | Eligible SQL mget cache hit | Protocol handling, SQL function execution, key conversion, cache synchronization, snapshot checks, and returning the stored payload |
 | SQL mget miss or bypass | The function's checks plus a source-table query; a successful eligible fill can populate the cache |
 
-The expected opportunity is avoiding repeated source-table execution and
-whole-row serialization. That is a mechanism to test, not a guaranteed
-speedup. Cache checks and synchronization also consume CPU, and a hit still
+A row-cache hit avoids repeated source-table execution and whole-row
+serialization. Cache checks and synchronization also consume CPU, and a hit still
 uses a PostgreSQL connection and backend. This SQL API does not eliminate
 connection limits or connection-pool queueing.
 
@@ -67,7 +66,6 @@ not evidence of a gain from caching.
 
 pg_local_cache 2.0 requires explicit `mget` calls, extension installation,
 and a startup preload. It rejects RLS, partitioned, and inherited tables.
-Account for these constraints before adopting it.
 
 ## Row cache or an external cache?
 
@@ -76,7 +74,6 @@ invalidation on the database write path and avoids maintaining an application
 cache-aside protocol. It does not provide general Redis semantics. The optional
 RESP2 endpoint has a limited command set and a separate security model.
 
-Choose based on the operations and failure behavior you need. A PostgreSQL
-row cache cannot stand in for TTL-based application state, pub/sub, or
+A PostgreSQL row cache cannot stand in for TTL-based application state, pub/sub, or
 distributed coordination. See the [technical contract](TECHNICAL.md) and
-[transaction examples](cache-invalidation.md), then measure your read path.
+[transaction examples](cache-invalidation.md).

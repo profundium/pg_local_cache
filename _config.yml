@@ -6,7 +6,7 @@ repository: profundium/pg_local_cache
 release_series: "2.0"
 social_image: /assets/social-card.png
 lang: en
-# Add the property owner's real token; empty values emit no verification tag.
+# Empty values emit no verification tag.
 google_site_verification: ""
 bing_site_verification: ""
 markdown: kramdown

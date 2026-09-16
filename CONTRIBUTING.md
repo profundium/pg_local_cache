@@ -1,8 +1,6 @@
 # Maintaining the docs and examples
 
-Public documentation describes the 2.0 SQL mget contract. Keep benchmark
-results with their recorded versions and conditions; do not present an older
-API as the current contract.
+Documentation and executable examples target the 2.0 SQL mget API.
 
 ## Checks before merging
 
@@ -12,7 +10,6 @@ Pages checks; executable-example changes also run PostgreSQL 14–18 smoke tests
 Package inputs retain their separate archive validation. Manual workflow
 dispatch remains available. The examples matrix is not repeated on a push to
 `master`; direct pushes that bypass PR checks need a manual examples run.
-Check the latest commit before merging.
 
 The examples execute shell blocks from QUICKSTART.md and SQL/configuration
 from INSTALL_EXISTING.md on fresh databases, including a non-default port.
@@ -67,7 +64,6 @@ Forks can validate pull requests but do not publish a preview automatically.
 Enable **Settings → Pages → Source: GitHub Actions** before deploying.
 If deployment fails after validation, rerun the failed job while its Pages
 artifact exists. After its 14-day retention period, rerun the workflow.
-Local checks cannot verify account permissions or GitHub's deployment service.
 
 ## Publishing a result
 
@@ -83,43 +79,12 @@ is generated from the public pages; adding a document does not require a
 second URL list. Set `last_modified_at` only after a substantive content edit.
 Do not replace it with the build date.
 
-Keep each guide focused on a reader's task: trying the extension, installing
-it, comparing read paths, testing transaction behavior, or calling the API.
-Use a descriptive title and answer the main question in the opening paragraphs.
-Link to the next relevant guide in context. Google's guidance covers
-[title links](https://developers.google.com/search/docs/appearance/title-link),
-[snippets](https://developers.google.com/search/docs/appearance/snippet), and
-[crawlable internal links](https://developers.google.com/search/docs/crawling-indexing/links-crawlable).
-A Lighthouse SEO score checks basic technical signals; it does not establish
-index coverage, search demand, rankings, or traffic.
+Search Console and Bing verification tokens go in `google_site_verification`
+and `bing_site_verification` in `_config.yml`. Empty values emit no tags.
+Sitemap: `https://profundium.github.io/pg_local_cache/sitemap.xml`.
 
-A property owner must verify that URL-prefix property in Google Search Console.
-Add the real HTML verification token to `google_site_verification` in
-`_config.yml`, deploy, then submit
-`https://profundium.github.io/pg_local_cache/sitemap.xml`. Inspect the home and
-guide URLs and review non-brand impressions and clicks. An empty token emits
-no tag. `bing_site_verification` works the same way for Bing Webmaster Tools.
-A PR cannot verify ownership or submit a sitemap from an unconnected account.
-
-The project's `/pg_local_cache/robots.txt` does not control the host. A crawler
-uses `https://profundium.github.io/robots.txt`; manage that in the organization
-site repository if needed. The absence of a robots file does not disallow
-crawling. See Google's [robots guidance](https://developers.google.com/search/docs/crawling-indexing/robots/create-robots-txt)
-and [sitemap guidance](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap).
-
-Repository description and topics are settings, not files changed by merging
-a PR. A repository administrator can apply:
-
-```bash
-gh repo edit profundium/pg_local_cache \
-  --description 'PostgreSQL extension for shared-memory primary-key row caching with explicit SQL mget and transaction-aware invalidation.' \
-  --homepage https://profundium.github.io/pg_local_cache/ \
-  --add-topic postgresql --add-topic postgresql-extension \
-  --add-topic caching --add-topic cache-invalidation \
-  --add-topic shared-memory --add-topic performance
-```
+Crawlers use the host-level `https://profundium.github.io/robots.txt`, managed
+in the organization site repository.
 
 The public site uses Google Analytics (`G-MHQBYKWZ7W`); browser tests stub its
 loader so local/CI visits are not recorded. The extension has no telemetry.
-Use Analytics, Search Console and GitHub traffic to see discovery, and workload
-reports to establish actual trials. Visits and downloads are not confirmed installations.

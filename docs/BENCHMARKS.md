@@ -23,8 +23,7 @@ client, dataset and decoded row results for cached and ordinary SQL reads.
   Batch size and client overhead matter; check CPU and latency as well.
 - **Single-key RESP:** Go at 256 connections reached 839,678 requests/s versus
   the 253,790 SQL baseline. RESP workers use a configured database role and
-  do not share the caller's SQL transaction or snapshot. This result alone
-  does not make RESP a substitute for your SQL connection.
+  do not share the caller's SQL transaction or snapshot.
 
 The [Node.js measurements](benchmarks-node.md) use a macOS client and Docker
 server; [Go and RESP measurements](benchmarks-go.md) put both inside the Docker
@@ -57,7 +56,7 @@ The runner builds a disposable PostgreSQL server and runs this common matrix:
 
 There are 162 samples by default, about 14 minutes of timed work plus setup.
 The script removes its containers after success or failure. For a short
-correctness run, without treating the numbers as a performance result:
+correctness run:
 
 ```bash
 CONNECTIONS=4 BATCHES=1,16,64 REPEATS=1 DURATION_SECONDS=1 \
@@ -119,13 +118,9 @@ counters exclude loopback and therefore omit the VM client's traffic.
 
 These short, warm-cache runs on a shared laptop are not production-capacity
 estimates. Data and WAL use tmpfs with `fsync`, `full_page_writes` and
-`synchronous_commit` enabled; disk performance is untested. Use your own
-row sizes, query projections, key distribution and write rate for sizing.
+`synchronous_commit` enabled; disk performance is untested.
 
 A failed run exits nonzero and preserves completed samples; the Markdown
 renderer rejects partial results. For exact recorded code, use each JSON's
 `harness_ref` and `extension_ref`. Reproduction commands are on the client
 pages; results are written to JSON files such as `benchmark.json`.
-
-To report another workload, attach its JSON to a
-[workload report](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml).

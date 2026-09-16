@@ -27,8 +27,7 @@ Run the [same SQL/RESP matrix on Node.js and Go](docs/BENCHMARKS.md#run-the-same
 ./examples/benchmark.sh all > comparison.json
 ```
 
-Requires Docker, Node.js 20+ and Go 1.25+. Measures a disposable demo, not your
-existing database; use your own workload before choosing a cache.
+Requires Docker, Node.js 20+ and Go 1.25+. Runs against a disposable demo database.
 
 ## Try without changing an existing database
 
@@ -114,7 +113,7 @@ entries fall back to an indexed source-table read.
 The extension is not a Redis replacement. It provides no TTL, pub/sub, or
 distributed coordination. SQL mget still uses a PostgreSQL connection.
 
-Choosing a design? Start with the [PostgreSQL caching guide](docs/postgresql-caching.md),
+Related guides: [PostgreSQL caching](docs/postgresql-caching.md),
 [PostgreSQL and Redis cache-aside](docs/postgresql-redis-cache.md), or
 [batch primary-key lookups](docs/batch-primary-key-lookups.md).
 

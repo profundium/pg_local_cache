@@ -42,8 +42,7 @@ key expires or another write deletes it.
 Possible mitigations include deleting again after a loader finishes, storing a
 database version and rejecting older values, serializing loads per key, or
 publishing committed changes through an outbox or CDC consumer. Each adds
-coordination and failure cases. A short TTL limits duration; it does not prove
-freshness. Keep the ordering and failure behavior in an integration test. The
+coordination and failure cases. The
 [cache invalidation guide](cache-invalidation.md) demonstrates the analogous
 late-fill problem inside PostgreSQL.
 
@@ -63,9 +62,9 @@ limited authenticated command set over the same mappings and has its own
 security model; it has no TLS. Use it when PostgreSQL-local transaction-aware
 whole-row reads are the problem. Use Redis when several application instances
 need shared objects, TTL-based freshness, or Redis data structures. Combining
-both can be valid, but each layer needs its own key, invalidation, and metrics.
+both requires separate keys, invalidation, and metrics for each layer.
 
 Run the [quickstart](QUICKSTART.md), compare against the ordinary client query
 in the [node-postgres example](node-postgres.md), and inspect the separate
-SQL and RESP counters before choosing a design. The [caching decision guide](postgresql-caching.md)
+SQL and RESP counters. The [caching decision guide](postgresql-caching.md)
 lists the other PostgreSQL options.

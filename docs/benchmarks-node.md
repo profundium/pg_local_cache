@@ -83,8 +83,7 @@ per case. Node.js now runs all three paths: prepared SQL, SQL `mget`, and RESP
 separate client container, records resources, then removes both.
 Optional overrides: `CONNECTIONS`, `BATCHES`, `REPEATS`, `DURATION_SECONDS`.
 Use `all` to include Go in the [same matrix](BENCHMARKS.md#run-the-same-comparison-on-every-client).
-These defaults were unified after the historical measurements above;
-use the recorded JSON revisions for the original host-based setup.
+For the recorded host-based setup, use the revisions in the measurements JSON.
 
 For reads mixed with writes:
 
