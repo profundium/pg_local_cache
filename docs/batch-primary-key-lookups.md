@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: batch-primary-key-lookups
 title: Batch PostgreSQL primary-key lookups
 seo_title: "Batch PostgreSQL Primary-Key Lookups with ANY and mget"
 description: Replace N+1 primary-key reads with one parameterized PostgreSQL query, preserve input positions when needed, and compare the explicit pg_local_cache mget path.
@@ -8,7 +10,7 @@ permalink: /docs/batch-primary-key-lookups.html
 last_modified_at: "2026-09-16"
 ---
 
-# Batch PostgreSQL primary-key lookups
+# Batch PostgreSQL primary-key lookups {#batch-postgresql-primary-key-lookups}
 
 If application code sends one query per ID, network round trips and query
 overhead can dominate a small row read. First try one parameterized statement:
@@ -24,7 +26,7 @@ statement; do not build SQL from ID strings. PostgreSQL evaluates `ANY` by
 comparing the left expression with array elements, as described in its
 [row and array comparison docs](https://www.postgresql.org/docs/18/functions-comparisons.html#FUNCTIONS-COMPARISONS-ANY-SOME).
 
-## Know the result contract
+## Know the result contract {#know-the-result-contract}
 
 The query above returns a set. It does not promise the input order, and a
 duplicate ID normally matches one table row once. Missing IDs produce no row.
@@ -54,7 +56,7 @@ returns a null `row` for a missing key. This is a useful baseline for a client
 that needs explicit alignment. See the [node-postgres example](node-postgres.md)
 for client-side restoration of the same contract.
 
-## When `mget` is the right alternative
+## When `mget` is the right alternative {#when-mget-is-the-right-alternative}
 
 For complete rows by primary key, `pg_local_cache` offers an explicit bounded
 batch API:
@@ -74,7 +76,7 @@ the result contract. It returns whole serialized rows, so use `ANY` or the
 ordinality query when you need a projection, joins, filters beyond the key, or
 an unbounded batch.
 
-## GraphQL, DataLoader, and N+1 reads
+## GraphQL, DataLoader, and N+1 reads {#graphql-dataloader-and-n1-reads}
 
 [DataLoader](https://github.com/graphql/dataloader#batching) combines individual
 loads into a batch. Its batch function must return one value per input key in

@@ -1,0 +1,53 @@
+skip: Zum Inhalt springen
+menu: Menü
+primary_nav: Hauptnavigation
+language: Sprache
+try_locally: Lokal ausprobieren
+benchmarks: Benchmarks
+reference: Referenz
+blog: Blog
+releases: Versionen
+docs: Dokumentation
+docs_sections: Dokumentationsbereiche
+on_this_page: Auf dieser Seite
+breadcrumb: Navigationspfad
+updated: Aktualisiert
+published: Veröffentlicht
+contributors: Mitwirkende von pg_local_cache
+copy: Kopieren
+copy_code: Code kopieren
+copied: Kopiert
+copy_selected: Ausgewählten Text kopieren
+scroll_table: Scrollbare Datentabelle
+social_alt: PostgreSQL-Zeilen-Cache-Datenpfad von pg_local_cache
+blog_intro: Praxisnotizen zum PostgreSQL-Caching
+blog_description: Lesepfad messen, Invalidation verstehen und Batch-Lesevorgänge berechenbar machen. Praxisnotizen mit SQL, Abwägungen und reproduzierbaren Prüfungen.
+read_article: Artikel lesen
+all_articles: Alle Artikel
+related_articles: Weiterlesen
+feed: Über Atom abonnieren
+topics:
+  performance: Performance
+  correctness: Korrektheit
+  application: Anwendungsdesign
+read_diagram:
+  title: Lesepfad von SQL mget
+  description: Die Anwendung ruft local_cache.mget in PostgreSQL auf. Nach Eignungs- und Snapshot-Prüfungen gibt ein Cache-Treffer die gespeicherte vollständige Zeile zurück. Ein Fehltreffer oder Bypass liest die Quelltabelle. Beide Pfade geben Zeilen über dieselbe PostgreSQL-Verbindung zurück.
+  application: Anwendung
+  checks: Eignung + Snapshot
+  hit: Treffer
+  miss: Kein Treffer
+  stored: Gespeichert
+  row: Zeile
+  source: Quelle
+  table: Tabelle
+  caption: Beide Pfade geben serialisierte vollständige Zeilen über dieselbe PostgreSQL-Verbindung zurück. Ein geeigneter Lesevorgang aus der Quelltabelle kann den Cache füllen.
+transaction_diagram:
+  title: Was Leser während einer Änderung sehen
+  description: Unter READ COMMITTED starten wir mit Revision null. Eine Transaktion ändert sie auf eins. Der Schreiber sieht eins über einen Lesevorgang aus der Quelltabelle, während eine andere Sitzung weiterhin null sieht. Nach COMMIT sieht eine neue Anweisung in der anderen Sitzung eins. Nach ROLLBACK sieht sie weiterhin null.
+  committed: Bestätigte Zeile
+  open: Transaktion offen
+  writer: Schreiber liest 1
+  other: Andere Sitzung liest 0
+  next: Nächste Abfrage
+  caption: READ COMMITTED, beginnend mit Revision 0. „Nächster Lesevorgang“ bedeutet eine neue Anweisung in der anderen Sitzung nach COMMIT oder ROLLBACK. Der Schreiber liest seine eigene Änderung über die Quelltabelle.

@@ -1,0 +1,53 @@
+skip: 跳转到正文
+menu: 菜单
+primary_nav: 主导航
+language: 语言
+try_locally: 本地试用
+benchmarks: 基准测试
+reference: 技术参考
+blog: 博客
+releases: 发布版本
+docs: 文档
+docs_sections: 文档章节
+on_this_page: 本页内容
+breadcrumb: 当前位置
+updated: 更新于
+published: 发布于
+contributors: pg_local_cache 贡献者
+copy: 复制
+copy_code: 复制代码
+copied: 已复制
+copy_selected: 复制选中文本
+scroll_table: 可滚动数据表
+social_alt: pg_local_cache PostgreSQL 行缓存数据路径
+blog_intro: PostgreSQL 缓存实践笔记
+blog_description: 测量读取路径，理解失效机制，让批量读取结果可预期。提供 SQL、取舍说明与可复现检查。
+read_article: 阅读文章
+all_articles: 全部文章
+related_articles: 继续阅读
+feed: 通过 Atom 订阅
+topics:
+  performance: 性能
+  correctness: 正确性
+  application: 应用设计
+read_diagram:
+  title: SQL mget 读取路径
+  description: 应用在 PostgreSQL 内调用 local_cache.mget。经过适用性与快照检查后，缓存命中返回已存整行载荷。未命中或绕过缓存时读取源表。两条路径均通过同一 PostgreSQL 连接返回行。
+  application: 应用
+  checks: 适用性与快照
+  hit: 命中
+  miss: 未命中 / 绕过
+  stored: 已缓存
+  row: 行
+  source: 源
+  table: 表
+  caption: 两条路径均通过同一 PostgreSQL 连接返回序列化整行。符合条件的源表读取可以填充缓存。
+transaction_diagram:
+  title: 更新过程中读者看到什么
+  description: 在 READ COMMITTED 下，从 revision 0 开始。一个事务将其更新为 1。写者通过源表读取看到 1，另一个会话仍看到 0。COMMIT 后，另一个会话的新语句看到 1；ROLLBACK 后，它仍看到 0。
+  committed: 已提交行
+  open: 事务尚未结束
+  writer: 写者读取 1
+  other: 另一个会话读取 0
+  next: 下一次读取
+  caption: READ COMMITTED，从 revision 0 开始。“下一次读取”指另一个会话在 COMMIT 或 ROLLBACK 之后执行的新语句。写者通过源表读取自己的改动。

@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: cache-invalidation
 title: Transaction-aware cache invalidation in PostgreSQL
 seo_title: "PostgreSQL Cache Invalidation: Commit and Rollback | pg_local_cache"
 description: Test pg_local_cache 2.0 invalidation with concurrent PostgreSQL sessions. Check uncommitted updates, read-your-writes, rollback, committed reads, and fallback rules.
@@ -8,7 +10,7 @@ permalink: /docs/cache-invalidation.html
 last_modified_at: "2026-09-16"
 ---
 
-# Transaction-aware cache invalidation in PostgreSQL
+# Transaction-aware cache invalidation in PostgreSQL {#transaction-aware-cache-invalidation-in-postgresql}
 
 Deleting a cache entry is not enough if an earlier read can refill it after
 the deletion. Suppose a reader starts loading an old row, a writer commits a
@@ -23,7 +25,7 @@ An ineligible entry falls back to a source-table read. See the
 
 {% include diagrams/transaction.html id="invalidation-transaction" %}
 
-## Test with two sessions
+## Test with two sessions {#test-with-two-sessions}
 
 Start the [local demo](QUICKSTART.md). Open this command in two terminals:
 
@@ -68,7 +70,7 @@ under [Read Committed](https://www.postgresql.org/docs/16/transaction-iso.html#X
 The executable [Node.js test](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/demo.mjs)
 asserts these observations with separate connections.
 
-## Cases that deliberately bypass the cache
+## Cases that deliberately bypass the cache {#cases-that-deliberately-bypass-the-cache}
 
 `REPEATABLE READ`, `SERIALIZABLE`, recovery, parallel execution, and transactions
 that have written mapped data use the source-table path. An oversized row may
@@ -78,7 +80,7 @@ not necessarily a failed installation: check the workload and bypass counters.
 When the application needs `SELECT ... FOR UPDATE`, use the ordinary PostgreSQL
 operation; `mget` does not replace row locking.
 
-## Inspect the cause of a miss
+## Inspect the cause of a miss {#inspect-the-cause-of-a-miss}
 
 Use `local_cache.stats()` and `local_cache.health()` as an administrator. Compare
 counter snapshots before and after a controlled test. Keep SQL `mget` counters

@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: row-cache-vs-shared-buffers
 title: PostgreSQL row cache vs shared_buffers
 seo_title: "PostgreSQL Row Cache vs shared_buffers | pg_local_cache"
 description: Compare PostgreSQL page caching with pg_local_cache 2.0 whole-row caching. See what a row-cache hit avoids, what it still costs, and when not to add another cache.
@@ -8,7 +10,7 @@ permalink: /docs/row-cache-vs-shared-buffers.html
 last_modified_at: "2026-09-16"
 ---
 
-# PostgreSQL row cache vs shared_buffers
+# PostgreSQL row cache vs shared_buffers {#postgresql-row-cache-vs-shared_buffers}
 
 PostgreSQL's [`shared_buffers`](https://www.postgresql.org/docs/16/runtime-config-resource.html#GUC-SHARED-BUFFERS)
 contains database pages. pg_local_cache separately stores serialized whole-row
@@ -22,7 +24,7 @@ baseline.
 
 {% include diagrams/read-path.html id="buffers-read" %}
 
-## Does PostgreSQL cache SELECT results?
+## Does PostgreSQL cache SELECT results? {#does-postgresql-cache-select-results}
 
 `shared_buffers` caches pages used by a query, rather than its final result set.
 A [prepared statement](https://www.postgresql.org/docs/18/sql-prepare.html)
@@ -31,7 +33,7 @@ pg_local_cache adds whole-row caching through explicit `mget` calls; it does
 not cache arbitrary SELECT results or rewrite existing queries. The
 [Node.js example](node-postgres.md) shows the two read APIs side by side.
 
-## Compare the work, not just the storage medium
+## Compare the work, not just the storage medium {#compare-the-work-not-just-the-storage-medium}
 
 | Read | Work remaining |
 |---|---|
@@ -44,7 +46,7 @@ serialization. Cache checks and synchronization also consume CPU, and a hit stil
 uses a PostgreSQL connection and backend. This SQL API does not eliminate
 connection limits or connection-pool queueing.
 
-## Costs to include
+## Costs to include {#costs-to-include}
 
 A cached row takes additional shared memory even when its source page is
 already in memory. The extension also maintains mapping and invalidation
@@ -56,7 +58,7 @@ The default demo deliberately compares a 128-row hot set with 1,024 cache slots,
 then a first pass over 4,096 rows. The [benchmark guide](BENCHMARKS.md) explains
 both cases and measures attached-table writes separately.
 
-## When to leave the application alone
+## When to leave the application alone {#when-to-leave-the-application-alone}
 
 Keep the existing query when its end-to-end latency is already acceptable,
 when the application needs only a small projection of a large row, or when
@@ -67,7 +69,7 @@ not evidence of a gain from caching.
 pg_local_cache 2.0 requires explicit `mget` calls, extension installation,
 and a startup preload. It rejects RLS, partitioned, and inherited tables.
 
-## Row cache or an external cache?
+## Row cache or an external cache? {#row-cache-or-an-external-cache}
 
 For data that remains authoritative in PostgreSQL, this design keeps
 invalidation on the database write path and avoids maintaining an application

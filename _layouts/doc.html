@@ -1,28 +1,34 @@
 ---
 layout: default
 ---
+{% assign lang = page.lang | default: 'en' %}
+{% assign locale = site.data.locales[lang] %}
+{% assign ui = site.data[lang] %}
+{% assign localized_docs = site.pages | where: 'lang', lang %}
 <main id="main-content" class="doc-shell">
   <aside class="doc-sidebar">
     <details class="doc-menu" open>
-    <summary>Documentation</summary>
-    <nav class="doc-nav" aria-label="Documentation sections">
+    <summary>{{ ui.docs }}</summary>
+    <nav class="doc-nav" aria-label="{{ ui.docs_sections | escape }}">
       <p>pg_local_cache {{ site.release_series }}</p>
       {% for item in site.data.navigation %}
-      <a href="{{ item.url | relative_url }}"{% if page.url == item.url %} aria-current="page"{% endif %}>{{ item.title }}</a>
+      {% assign key = item.url | split: '/' | last | remove: '.html' %}
+      {% assign target = localized_docs | where: 'translation_key', key | first %}
+      <a href="{{ target.url | relative_url }}"{% if page.url == target.url %} aria-current="page"{% endif %}>{{ target.nav_title | default: target.title }}</a>
       {% endfor %}
     </nav>
-    <nav class="doc-toc" aria-label="On this page" data-doc-toc hidden>
-      <p>On this page</p>
+    <nav class="doc-toc" aria-label="{{ ui.on_this_page | escape }}" data-doc-toc hidden>
+      <p>{{ ui.on_this_page }}</p>
       <ol data-doc-toc-list></ol>
     </nav>
     </details>
   </aside>
   <article class="doc-content">
-    <nav class="doc-heading" aria-label="Breadcrumb">
-      <a href="{{ '/' | relative_url }}">pg_local_cache {{ site.release_series }}</a>
+    <nav class="doc-heading" aria-label="{{ ui.breadcrumb | escape }}">
+      <a href="{{ '/' | prepend: locale.prefix | relative_url }}">pg_local_cache {{ site.release_series }}</a>
       <span aria-hidden="true">/</span><span aria-current="page">{{ page.section | default: page.title }}</span>
     </nav>
     {{ content }}
-    {% if page.last_modified_at %}<p>Updated <time datetime="{{ page.last_modified_at | date: '%Y-%m-%d' }}">{{ page.last_modified_at | date: '%B %-d, %Y' }}</time>.</p>{% endif %}
+    {% if page.last_modified_at %}<p>{{ ui.updated }} <time datetime="{{ page.last_modified_at | date: '%Y-%m-%d' }}">{{ page.last_modified_at | date: '%Y-%m-%d' }}</time>.</p>{% endif %}
   </article>
 </main>

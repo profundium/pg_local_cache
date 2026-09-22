@@ -1,0 +1,53 @@
+skip: Passer au contenu
+menu: Menu
+primary_nav: Navigation principale
+language: Langue
+try_locally: Essayer localement
+benchmarks: Benchmarks
+reference: Référence
+blog: Blog
+releases: Versions
+docs: Documentation
+docs_sections: Sections de la documentation
+on_this_page: Sur cette page
+breadcrumb: Fil d'Ariane
+updated: Mis à jour
+published: Publié
+contributors: Contributeurs de pg_local_cache
+copy: Copier
+copy_code: Copier le code
+copied: Copié
+copy_selected: Copier le texte sélectionné
+scroll_table: Tableau déroulant
+social_alt: Chemin des données du cache de lignes PostgreSQL de pg_local_cache
+blog_intro: Notes pratiques sur la mise en cache PostgreSQL
+blog_description: Mesurez le chemin de lecture, comprenez l'invalidation et rendez les lectures par lots prévisibles. Notes de terrain avec SQL, compromis et vérifications reproductibles.
+read_article: Lire l'article
+all_articles: Tous les articles
+related_articles: Poursuivre la lecture
+feed: S'abonner via Atom
+topics:
+  performance: Performances
+  correctness: Cohérence
+  application: Conception d'application
+read_diagram:
+  title: Chemin de lecture SQL mget
+  description: L'application appelle local_cache.mget dans PostgreSQL. Après les vérifications d'éligibilité et de snapshot, un hit du cache renvoie la charge utile stockée de la ligne complète. Un miss ou un contournement lit la table source. Les deux chemins renvoient les lignes via la même connexion PostgreSQL.
+  application: Application
+  checks: Éligibilité + snapshot
+  hit: Trouvé
+  miss: Absent / ignoré
+  stored: Stockée
+  row: ligne
+  source: Source
+  table: table
+  caption: Les deux chemins renvoient des lignes complètes sérialisées via la même connexion PostgreSQL. Une lecture éligible de la table source peut remplir le cache.
+transaction_diagram:
+  title: Ce que voient les lecteurs pendant une mise à jour
+  description: Sous READ COMMITTED, commencez avec la révision zéro. Une transaction la met à jour à un. L'écrivain voit un par une lecture de la table source, tandis qu'une autre session voit encore zéro. Après COMMIT, une nouvelle instruction de l'autre session voit un. Après ROLLBACK, elle voit toujours zéro.
+  committed: Ligne validée
+  open: Transaction ouverte
+  writer: L'écrivain lit 1
+  other: L'autre session lit 0
+  next: Lecture suivante
+  caption: READ COMMITTED, à partir de la révision 0. « Lecture suivante » désigne une nouvelle instruction dans l'autre session après COMMIT ou ROLLBACK. L'écrivain lit sa propre modification via la table source.

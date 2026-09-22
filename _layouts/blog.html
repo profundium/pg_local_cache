@@ -1,0 +1,13 @@
+---
+layout: default
+---
+{% assign lang = page.lang | default: 'en' %}
+{% assign locale = site.data.locales[lang] %}
+{% assign ui = site.data[lang] %}
+<main id="main-content" class="page-section blog-index">
+  <div class="blog-heading doc-content">
+    {{ content }}
+    <a class="text-link" href="{{ '/feed.xml' | prepend: locale.prefix | relative_url }}">{{ ui.feed }} <span aria-hidden="true">↗</span></a>
+  </div>
+  {% include blog-list.html %}
+</main>

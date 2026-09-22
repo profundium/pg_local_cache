@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def blocks(document: str, heading: str, language: str) -> list[str]:
-    section = document.split(f"\n## {heading}\n", 1)[1].split("\n## ", 1)[0]
+    section = re.split(r"\n## " + re.escape(heading) + r"(?: \{#[^}]+\})?\n", document, maxsplit=1)[1].split("\n## ", 1)[0]
     result = re.findall(rf"```{language}\n(.*?)\n```", section, re.DOTALL)
     if not result:
         raise ValueError(f"No {language} block under {heading}")

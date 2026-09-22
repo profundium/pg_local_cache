@@ -1,0 +1,12 @@
+{% assign articles = site.pages | where: 'layout', 'post' | where: 'lang', lang | sort: 'translation_key' %}
+{% assign heading = 'h3' %}{% if page.layout == 'blog' %}{% assign heading = 'h2' %}{% endif %}
+<div class="blog-list">
+{% for article in articles %}{% unless article.translation_key == page.translation_key %}
+<article class="blog-entry">
+  <p class="article-meta"><span>{{ ui.topics[article.topic] }}</span> · <time datetime="{{ article.date | date: '%Y-%m-%d' }}">{{ article.date | date: '%Y-%m-%d' }}</time></p>
+  <{{ heading }}><a href="{{ article.url | relative_url }}">{{ article.title }}</a></{{ heading }}>
+  <p>{{ article.description }}</p>
+  <a class="text-link" href="{{ article.url | relative_url }}">{{ ui.read_article }} <span aria-hidden="true">→</span></a>
+</article>
+{% endunless %}{% endfor %}
+</div>

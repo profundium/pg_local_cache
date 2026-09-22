@@ -1,0 +1,132 @@
+---
+layout: default
+lang: ru
+translation_key: home
+title: "Кэш строк PostgreSQL | pg_local_cache"
+seo_title: "Расширение кэша строк PostgreSQL | pg_local_cache"
+description: Кэшируйте строки PostgreSQL по первичному ключу в общей памяти с явным SQL mget и инвалидацией с учётом транзакций. Запустите локальную демонстрацию и сравните её с пакетным SQL.
+image: /assets/social-card.png
+last_modified_at: "2026-09-22"
+home: true
+permalink: /ru/
+---
+{% assign lang = page.lang | default: 'en' %}
+{% assign locale = site.data.locales[lang] %}
+{% assign ui = site.data[lang] %}
+<main id="main-content">
+  <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
+    <div class="hero-copy">
+      <h1 id="hero-title">Кэш строк<br>внутри <span>PostgreSQL.</span></h1>
+      <p>Читайте строки по первичному ключу через SQL <code>mget</code> или RESP. Записи PostgreSQL автоматически инвалидируют затронутые записи кэша.</p>
+      <div class="hero-actions">
+        <a class="button primary" href="{{ '/docs/QUICKSTART.html' | prepend: locale.prefix | relative_url }}">Запустить локально <span aria-hidden="true">→</span></a>
+        <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Сравнить с SQL <span aria-hidden="true">→</span></a>
+      </div>
+      <p class="hero-note">Явный SQL API · PostgreSQL 14–18 · Открытый исходный код</p>
+    </div>
+    <figure class="hero-benchmark" aria-label="Локальный бенчмарк одного ключа: RESP в сравнении с SQL">
+      <p class="benchmark-label">Измерено локально · 15 сентября 2026</p>
+      <p class="benchmark-number"><strong>839,678</strong><span>запросов/с · RESP MGET</span></p>
+      <p class="benchmark-gain"><strong>3.31×</strong> пропускной способности подготовленного SQL<br>в этом сравнении одного ключа</p>
+      <dl class="benchmark-baselines">
+        <div><dt>Подготовленный SQL</dt><dd>253,790 <span>запросов/с</span></dd></div>
+        <div><dt>SQL mget</dt><dd>186,296 <span>запросов/с</span></dd></div>
+      </dl>
+      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 соединений.<br>Прогретый кэш, 1 ключ/запрос. Медиана для 3 × 5 секунд.<br>Здесь SQL mget оказался медленнее; результаты пакетного чтения отличаются.</figcaption>
+      <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">Результаты, исходные данные и условия <span aria-hidden="true">→</span></a>
+    </figure>
+  </section>
+
+  <section id="read-path" class="page-section read-path" aria-labelledby="read-path-title">
+    <div class="read-path-heading">
+      <h2 id="read-path-title">Один вызов. Два пути чтения.</h2>
+      <p>Подходящее попадание возвращает сохранённую строку. Промах или обход кэша читает исходную таблицу. Ваши обычные запросы <code>SELECT</code> сохраняют существующий путь.</p>
+    </div>
+    <div class="read-path-grid">
+    <div class="terminal" aria-label="Пример PostgreSQL mget">
+      <div class="terminal-bar"><strong>psql</strong> │ чтение по первичному ключу</div>
+      <pre><code><span class="comment">-- Attach your table once.</span>
+<span class="sql">SELECT</span> local_cache.attach_table('public.items');
+
+<span class="comment">-- Read rows by primary key.</span>
+<span class="sql">SELECT</span> local_cache.mget(
+  'public.items', ARRAY[42, 7]::bigint[]
+);</code></pre>
+      <p class="terminal-links"><a href="{{ '/docs/node-postgres.html' | prepend: locale.prefix | relative_url }}">Пример Node.js</a><a href="{{ '/docs/go.html' | prepend: locale.prefix | relative_url }}">Пример Go</a><a href="{{ '/docs/resp.html' | prepend: locale.prefix | relative_url }}">Пример RESP</a></p>
+    </div>
+    {% include diagrams/read-path.html id="home-read" %}
+    </div>
+    <a class="text-link" href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">Что предотвращает попадание в кэш строк <span aria-hidden="true">→</span></a>
+  </section>
+
+  <section class="proof-rail" aria-label="Требования и поведение">
+    <div class="proof-item"><strong>SQL mget</strong><p>До 1 024 ключей за вызов. Порядок, дубликаты и позиции NULL сохраняются.</p></div>
+    <div class="proof-item"><strong>Обычные записи</strong><p>INSERT, UPDATE и DELETE инвалидируют затронутые записи.</p></div>
+    <div class="proof-item"><strong>Фиксированная ёмкость</strong><p>Выделяйте кэш строк в общей памяти при запуске PostgreSQL.</p></div>
+    <div class="proof-item"><strong>Проверки снимка</strong><p>Недопустимые чтения используют исходную таблицу с учётом правил видимости PostgreSQL.</p></div>
+  </section>
+
+  <section id="benchmarks" class="band" aria-labelledby="benchmark-title">
+    <div class="page-section section-grid">
+      <div class="section-intro">
+        <h2 id="benchmark-title">Запустите один тест.<br>На каждом клиенте.</h2>
+        <p>Node.js и Go. Подготовленный SQL, SQL mget и RESP MGET.</p>
+      </div>
+      <div>
+        <p>Один запуск использует одинаковые ключи, размеры пакетов, число соединений, длительность и проверки результатов. Сравнивайте пропускную способность, задержку, а также CPU и память PostgreSQL на своей машине.</p>
+        <a class="button" href="{{ '/docs/BENCHMARKS.html#run-the-same-comparison-on-every-client' | prepend: locale.prefix | relative_url }}">Запустить сравнение <span aria-hidden="true">→</span></a>
+      </div>
+    </div>
+  </section>
+
+  <section id="fit" class="page-section section-grid" aria-labelledby="fit-title">
+    <div class="section-intro"><h2 id="fit-title">Это ваш тип нагрузки?</h2><p>Выбираете кэш? <a href="{{ '/docs/postgresql-caching.html' | prepend: locale.prefix | relative_url }}">Сравните страницы PostgreSQL, строки, материализованные представления и Redis</a>.</p></div>
+    <div class="fit-columns">
+      <section class="fit-group">
+        <h3>Стоит измерить</h3>
+        <ul><li>Повторяющиеся полные чтения по первичному ключу.</li><li>Небольшой горячий набор целых строк.</li><li>READ COMMITTED на одном доступном для записи основном сервере.</li><li>Приложение, способное вызывать явный SQL API.</li></ul>
+      </section>
+      <section class="fit-group">
+        <h3>Оставьте обычный SQL</h3>
+        <ul><li>Соединения, диапазоны, агрегаты или произвольные результаты запросов.</li><li>RLS, секционированные или унаследованные таблицы.</li><li>База данных, в которую нельзя установить нативное расширение.</li><li>Нагрузки без измеренной выгоды.</li></ul>
+      </section>
+    </div>
+  </section>
+
+  <section id="quick-start" class="page-section quick-start" aria-labelledby="quick-start-title">
+    <h2 id="quick-start-title">Запустите локальную демонстрацию.</h2>
+    <p class="quick-start-lead">Клонируйте репозиторий и запустите временный сервер PostgreSQL с демонстрационными строками. Docker соберёт расширение и отделит демонстрацию от ваших баз данных.</p>
+    <div class="install-command">
+      <div class="command-label">Нужны Git и Docker Compose</div>
+      <button class="copy-button" type="button" data-copy="demo-command" aria-live="polite">Копировать</button>
+      <pre id="demo-command"><code>git clone https://github.com/profundium/pg_local_cache.git
+cd pg_local_cache
+docker compose -f examples/compose.yaml up --build --wait</code></pre>
+    </div>
+    <p class="quick-start-more"><a href="{{ '/docs/QUICKSTART.html#read-as-an-application-role' | prepend: locale.prefix | relative_url }}">Прочитайте демонстрационные строки и проверьте попадания в кэш</a>. Уже клонировали репозиторий? Запустите последнюю команду из его корня. Для существующего сервера используйте <a href="{{ '/docs/INSTALL_EXISTING.html' | prepend: locale.prefix | relative_url }}">руководство по установке</a>.</p>
+    <p class="quick-start-more">Установка на существующий сервер требует перезапуска PostgreSQL.</p>
+  </section>
+
+  <section class="band"><div class="page-section docs-index">
+    <h2>Документация</h2>
+    <div class="docs-list">
+      {% include docs-list.html %}
+    </div>
+  </div></section>
+
+  <section class="page-section blog-preview" aria-labelledby="blog-title">
+    <h2 id="blog-title">{{ ui.blog_intro }}</h2>
+    {% include blog-list.html %}
+    <a class="text-link" href="{{ '/blog/' | prepend: locale.prefix | relative_url }}">{{ ui.all_articles }} →</a>
+  </section>
+
+  <section class="page-section faq" aria-labelledby="faq-title">
+    <h2 id="faq-title">Перед началом</h2>
+    <div class="faq-list">
+      <details><summary>Заменяет ли это shared_buffers?</summary><p>Нет. PostgreSQL кэширует страницы базы данных. Это расширение отдельно кэширует сериализованные целые строки по первичному ключу. См. <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">сравнение путей чтения</a>.</p></details>
+      <details><summary>Кэширует ли оно обычные запросы SELECT?</summary><p>Нет. Кэш SQL используют только явные вызовы <code>local_cache.mget</code>. Ваши существующие запросы сохраняют обычный путь выполнения PostgreSQL.</p></details>
+      <details><summary>Заменяет ли это Redis?</summary><p>Нет. Необязательная конечная точка RESP2 ограничена. Здесь нет универсального набора команд Redis, TTL, pub/sub или распределённой координации. Сравните <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">пути cache-aside для PostgreSQL и Redis</a>.</p></details>
+      <details><summary>Как проверить обновления и откат?</summary><p>В <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">руководстве по инвалидации</a> есть тест в двух сеансах. Выполняемый пример проверяет незакоммиченные записи, чтение собственных изменений, откат и зафиксированные обновления.</p></details>
+    </div>
+  </section>
+</main>

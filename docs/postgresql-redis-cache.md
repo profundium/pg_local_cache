@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: postgresql-redis-cache
 title: PostgreSQL and Redis cache-aside
 seo_title: "PostgreSQL and Redis Cache-Aside: Invalidation and Race Conditions"
 description: Use PostgreSQL as the source of truth with a Redis cache-aside path, understand stale-read races, and see where pg_local_cache fits.
@@ -8,7 +10,7 @@ permalink: /docs/postgresql-redis-cache.html
 last_modified_at: "2026-09-16"
 ---
 
-# PostgreSQL and Redis cache-aside
+# PostgreSQL and Redis cache-aside {#postgresql-and-redis-cache-aside}
 
 Redis cache-aside puts the application between a read and its authoritative
 store. On a miss, read PostgreSQL, return that value, and write it to Redis;
@@ -32,7 +34,7 @@ Use parameterized SQL and a key namespace. A TTL limits how long a stored value
 remains in Redis; it does not prove freshness relative to a PostgreSQL commit.
 Explicit deletion handles ordinary writes but does not remove every race.
 
-## The invalidation race
+## The invalidation race {#the-invalidation-race}
 
 Consider two requests. Reader R1 misses Redis and reads the old row from
 PostgreSQL. Writer W commits a new row and deletes `item:42`. R1 then resumes
@@ -46,7 +48,7 @@ coordination and failure cases. The
 [cache invalidation guide](cache-invalidation.md) demonstrates the analogous
 late-fill problem inside PostgreSQL.
 
-## Where pg_local_cache fits
+## Where pg_local_cache fits {#where-pg_local_cache-fits}
 
 `pg_local_cache` is a narrower PostgreSQL-local option for complete rows keyed
 by primary key. `local_cache.mget` is explicit; a normal `SELECT` and an

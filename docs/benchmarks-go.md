@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: benchmarks-go
 title: "Go benchmarks: SQL and RESP"
 description: Local pgx and RESP2 results on Apple M3 Max, with PostgreSQL CPU, memory and connection scaling.
 section: Benchmarks
@@ -7,7 +9,7 @@ permalink: /docs/benchmarks-go.html
 last_modified_at: "2026-09-16"
 ---
 
-# Go benchmarks: SQL and RESP
+# Go benchmarks: SQL and RESP {#go-benchmarks-sql-and-resp}
 
 [Overview](BENCHMARKS.md) · [Node.js](benchmarks-node.md) · [Go and RESP](benchmarks-go.md)
 
@@ -41,7 +43,7 @@ rejections. The harness checks SQL and RESP connection headroom. A separate
 256-connection, 64-key probe with 12 Go threads did not improve RESP;
 SQL `mget` gained 6% over eight threads.
 
-### Server resources
+### Server resources {#server-resources}
 
 At **256 connections**, medians across the same samples:
 
@@ -54,7 +56,7 @@ At **256 connections**, medians across the same samples:
 | 64 | SQL mget | 5.12 | 4.99 (35.6%) | 116.0 | 707.7 |
 | 64 | RESP MGET | 5.76 | 4.97 (35.5%) | 95.8 | 266.7 |
 
-### Go client on macOS
+### Go client on macOS {#go-client-on-macos}
 
 Through Docker's published ports, at **64 connections**; medians of three
 five-second samples, in requests/s:
@@ -70,7 +72,7 @@ RESP also has a different session contract: workers use a configured database
 role and do not inherit a caller's SQL transaction or snapshot. See the
 [RESP reference](TECHNICAL.md#optional-resp2-endpoint).
 
-## Reproduce
+## Reproduce {#reproduce}
 
 <details markdown="1">
 <summary>Run the Go benchmark</summary>

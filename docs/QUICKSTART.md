@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: QUICKSTART
 title: Try pg_local_cache locally
 seo_title: "Try a PostgreSQL Row Cache Locally | pg_local_cache"
 description: Run pg_local_cache 2.0 in disposable PostgreSQL, read sample rows, inspect cache hits, test updates, and remove the demo without changing an existing database.
@@ -8,7 +10,7 @@ permalink: /docs/QUICKSTART.html
 last_modified_at: "2026-09-16"
 ---
 
-# Try pg_local_cache locally
+# Try pg_local_cache locally {#try-pg_local_cache-locally}
 
 This demo builds pg_local_cache from your checkout in a separate PostgreSQL 16
 server. It does not install into an existing PostgreSQL server.
@@ -16,7 +18,7 @@ server. It does not install into an existing PostgreSQL server.
 You need Git, Docker, and Docker Compose with `up --wait` support. The image
 builds from source.
 
-## Start the database
+## Start the database {#start-the-database}
 
 ```bash
 git clone https://github.com/profundium/pg_local_cache.git
@@ -36,7 +38,7 @@ it set when running the Node.js example:
 export PGLC_DEMO_PORT=55433
 ```
 
-## Read as an application role
+## Read as an application role {#read-as-an-application-role}
 
 The setup creates 4,096 rows in `public.items`. Only that table is attached to
 the cache. The `demo` role is not a superuser.
@@ -76,7 +78,7 @@ repeating the reads should increase `sql_cache_hits`.
 If hits stay at zero, inspect `sql_cache_misses`, `sql_cache_fills`
 and `sql_cache_bypasses` using the [invalidation guide](cache-invalidation.md#inspect-the-cause-of-a-miss).
 
-## Check commit and rollback
+## Check commit and rollback {#check-commit-and-rollback}
 
 With Node.js 20 or later:
 
@@ -92,7 +94,7 @@ rollback, and a committed update. It exits nonzero on a failed assertion.
 See the [two-session SQL walkthrough](cache-invalidation.md) or the
 [Node.js query explanation](node-postgres.md).
 
-## Connect your application
+## Connect your application {#connect-your-application}
 
 - [Node.js](node-postgres.md): use your existing `pg` connection or pool.
 - [Go](go.md): connect with `pgx` and decode the returned rows.
@@ -103,7 +105,7 @@ For results or setup issues, open a
 [workload report](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml)
 with your environment and benchmark JSON or error log.
 
-## Remove the demo
+## Remove the demo {#remove-the-demo}
 
 ```bash
 docker compose -f examples/compose.yaml down

@@ -4,6 +4,7 @@ import argparse
 from html.parser import HTMLParser
 import json
 from pathlib import Path
+import re
 from urllib.parse import unquote, urljoin, urlsplit
 import xml.etree.ElementTree as ET
 
@@ -15,6 +16,10 @@ class Page(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.ids, self.links, self.meta, self.copies = set(), [], {}, []
         self.anchors = []
+        self.content_anchors = []
+        self.lang = None
+        self.alternates = {}
+        self.feed_url = None
         self.h1 = 0
         self.canonical = None
         self.title = ""
@@ -26,6 +31,16 @@ class Page(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        if tag == "html":
+            self.lang = attrs.get("lang")
+        if tag == "link" and attrs.get("rel") == "alternate":
+            if "hreflang" in attrs:
+                language = attrs["hreflang"]
+                if language in self.alternates:
+                    self.errors.append(f"duplicate hreflang: {language}")
+                self.alternates[language] = attrs.get("href")
+            if attrs.get("type") == "application/atom+xml":
+                self.feed_url = attrs.get("href")
         if "id" in attrs:
             if attrs["id"] in self.ids:
                 self.errors.append(f"duplicate id: {attrs['id']}")
@@ -46,6 +61,8 @@ class Page(HTMLParser):
             self.links.append(attrs["href"])
             if tag == "a":
                 self.anchors.append(attrs["href"])
+                if not attrs.get("hreflang"):
+                    self.content_anchors.append(attrs["href"])
         if "src" in attrs:
             self.links.append(attrs["src"])
         if "data-copy" in attrs:
@@ -72,7 +89,7 @@ class Page(HTMLParser):
             self.in_json = False
 
 
-def check(root, base=BASE):
+def check(root, base=BASE, languages=None):
     base = base.rstrip("/") + "/"
     errors, pages, titles, descriptions = [], {}, set(), set()
     for path in root.rglob("*.html"):
@@ -136,6 +153,68 @@ def check(root, base=BASE):
                 errors.append(f"{url}: missing local target: {target}")
             if parsed.fragment and path_url in pages and unquote(parsed.fragment) not in pages[path_url].ids:
                 errors.append(f"{url}: missing fragment: {target}")
+    if languages:
+        expected_languages = set(languages)
+        for url, page in pages.items():
+            if page.lang not in expected_languages:
+                errors.append(f"{url}: wrong HTML language: {page.lang}")
+            if set(page.alternates) != expected_languages | {"x-default"}:
+                errors.append(f"{url}: incomplete hreflang translations")
+            if page.alternates.get(page.lang) != url:
+                errors.append(f"{url}: hreflang must include self")
+            if page.alternates.get("x-default") != page.alternates.get("en"):
+                errors.append(f"{url}: wrong x-default")
+            for language, target in page.alternates.items():
+                other = pages.get(target)
+                if not target or not target.startswith(base) or other is None:
+                    errors.append(f"{url}: invalid hreflang target: {target}")
+                elif other.alternates != page.alternates or (language != "x-default" and other.lang != language):
+                    errors.append(f"{url}: nonreciprocal hreflang or wrong target language: {language}")
+            for target in page.content_anchors:
+                destination = urlsplit(urljoin(url, target))._replace(query="", fragment="").geturl()
+                other = pages.get(destination)
+                if other and other.lang != page.lang:
+                    errors.append(f"{url}: content link changes locale: {target}")
+            nodes = [node for block in page.structured for node in block.get("@graph", [block])]
+            article = next((node for node in nodes if node.get("@type") != "BreadcrumbList"), {})
+            if article.get("inLanguage") != page.lang:
+                errors.append(f"{url}: wrong structured-data language")
+            if article.get("@type") == "BlogPosting":
+                for key in ("datePublished", "dateModified", "author", "publisher", "headline"):
+                    if not article.get(key):
+                        errors.append(f"{url}: missing BlogPosting {key}")
+            prefix = "" if page.lang == "en" else f"{page.lang}/"
+            if urljoin(url, page.feed_url or "") != base + prefix + "feed.xml":
+                errors.append(f"{url}: wrong locale feed")
+        for language in languages:
+            prefix = "" if language == "en" else language + "/"
+            feed_url = base + prefix + "feed.xml"
+            try:
+                feed = ET.parse(root / prefix / "feed.xml").getroot()
+                ns = {"a": "http://www.w3.org/2005/Atom"}
+                if feed.tag != "{http://www.w3.org/2005/Atom}feed" or feed.get("{http://www.w3.org/XML/1998/namespace}lang") != language:
+                    errors.append(f"{feed_url}: wrong Atom language or root")
+                entries = feed.findall("a:entry", ns)
+                ids = [entry.findtext("a:id", namespaces=ns) for entry in entries]
+                expected = {url for url, page in pages.items() if page.lang == language
+                            and any(node.get("@type") == "BlogPosting" for block in page.structured
+                                    for node in block.get("@graph", [block]))}
+                if len(ids) != len(set(ids)) or set(ids) != expected or not expected:
+                    errors.append(f"{feed_url}: feed does not match locale articles")
+                if feed.findtext("a:id", namespaces=ns) != base + prefix + "blog/":
+                    errors.append(f"{feed_url}: wrong feed id")
+                self_link = feed.find('a:link[@rel="self"]', ns)
+                if self_link is None or self_link.get("href") != feed_url:
+                    errors.append(f"{feed_url}: wrong feed self link")
+                for entry in entries:
+                    link = entry.find("a:link", ns)
+                    if link is None or link.get("href") != entry.findtext("a:id", namespaces=ns):
+                        errors.append(f"{feed_url}: entry link differs from canonical id")
+                    for field in ("title", "published", "updated", "summary"):
+                        if not entry.findtext("a:" + field, namespaces=ns):
+                            errors.append(f"{feed_url}: missing entry {field}")
+            except (OSError, ET.ParseError) as error:
+                errors.append(f"{feed_url}: invalid Atom feed: {error}")
     try:
         sitemap = ET.parse(root / "sitemap.xml")
         urls = [node.text for node in sitemap.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
@@ -151,8 +230,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--base-url", default=BASE)
+    registry = Path(__file__).resolve().parents[1] / "_data/locales.yml"
+    parser.add_argument("--languages", nargs="+", default=re.findall(r'^([a-z]{2}):$', registry.read_text(), re.M))
     args = parser.parse_args()
-    failures = check(args.directory, args.base_url)
+    failures = check(args.directory, args.base_url, args.languages)
     if failures:
         parser.exit(1, "\n".join(failures) + "\n")
-    print("PASS: metadata, JSON-LD, sitemap, crawlable pages, links, fragments and copy targets")
+    print("PASS: metadata, JSON-LD, sitemap, reciprocal translations, Atom feeds, crawlable pages, links, fragments and copy targets")

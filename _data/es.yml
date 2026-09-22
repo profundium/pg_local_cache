@@ -1,0 +1,53 @@
+skip: Saltar al contenido
+menu: Menú
+primary_nav: Navegación principal
+language: Idioma
+try_locally: Probar localmente
+benchmarks: Benchmarks
+reference: Referencia
+blog: Blog
+releases: Versiones
+docs: Documentación
+docs_sections: Secciones de la documentación
+on_this_page: En esta página
+breadcrumb: Ruta de navegación
+updated: Actualizado
+published: Publicado
+contributors: Colaboradores de pg_local_cache
+copy: Copiar
+copy_code: Copiar código
+copied: Copiado
+copy_selected: Copiar texto seleccionado
+scroll_table: Tabla desplazable
+social_alt: Datos del recorrido de la caché de filas de PostgreSQL de pg_local_cache
+blog_intro: Notas prácticas sobre la caché de PostgreSQL
+blog_description: Mide el recorrido de lectura, entiende la invalidación y haz predecibles las lecturas por lotes. Notas de campo con SQL, decisiones y comprobaciones reproducibles.
+read_article: Leer artículo
+all_articles: Todos los artículos
+related_articles: Sigue leyendo
+feed: Suscribirse mediante Atom
+topics:
+  performance: Rendimiento
+  correctness: Corrección
+  application: Diseño de aplicaciones
+read_diagram:
+  title: Recorrido de lectura de SQL mget
+  description: La aplicación llama a local_cache.mget dentro de PostgreSQL. Tras las comprobaciones de elegibilidad y de snapshot, un acierto de caché devuelve la carga útil almacenada de la fila completa. Un fallo o una omisión lee la tabla de origen. Ambos recorridos devuelven filas mediante la misma conexión de PostgreSQL.
+  application: Aplicación
+  checks: Elegibilidad + snapshot
+  hit: Acierto
+  miss: Fallo / omisión
+  stored: Almacenada
+  row: fila
+  source: Origen
+  table: tabla
+  caption: Ambos recorridos devuelven filas completas serializadas por la misma conexión de PostgreSQL. Una lectura elegible de la tabla de origen puede llenar la caché.
+transaction_diagram:
+  title: Lo que ven los lectores durante una actualización
+  description: Con READ COMMITTED, empieza con la revisión cero. Una transacción la actualiza a uno. El escritor ve uno mediante una lectura de la tabla de origen, mientras otra sesión sigue viendo cero. Tras COMMIT, una nueva sentencia de la otra sesión ve uno. Tras ROLLBACK, sigue viendo cero.
+  committed: Fila confirmada
+  open: Transacción abierta
+  writer: El escritor lee 1
+  other: La otra sesión lee 0
+  next: Siguiente lectura
+  caption: READ COMMITTED, comenzando en la revisión 0. «Siguiente lectura» significa una nueva sentencia en la otra sesión después de COMMIT o ROLLBACK. El escritor lee su propio cambio mediante la tabla de origen.

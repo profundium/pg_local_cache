@@ -1,0 +1,6 @@
+{% assign localized_docs = site.pages | where: 'lang', lang %}
+{% for item in site.data.navigation %}
+{% assign key = item.url | split: '/' | last | remove: '.html' %}
+{% assign target = localized_docs | where: 'translation_key', key | first %}
+<a class="docs-link" href="{{ target.url | relative_url }}"><strong>{{ target.nav_title | default: target.title }}</strong><span>{{ target.description }}</span><b aria-hidden="true">→</b></a>
+{% endfor %}

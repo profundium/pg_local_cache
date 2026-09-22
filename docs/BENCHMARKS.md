@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: BENCHMARKS
 title: PostgreSQL cache benchmarks
 description: Measured pg_local_cache results with Node.js, Go and RESP on Apple M3 Max. Includes the machine, PostgreSQL CPU, memory and methodology.
 section: Benchmarks
@@ -7,12 +9,12 @@ permalink: /docs/BENCHMARKS.html
 last_modified_at: "2026-09-16"
 ---
 
-# PostgreSQL cache benchmarks
+# PostgreSQL cache benchmarks {#postgresql-cache-benchmarks}
 
 Recorded on an Apple M3 Max with PostgreSQL 16. Each comparison uses the same
 client, dataset and decoded row results for cached and ordinary SQL reads.
 
-## Where the cache helped—and where it did not
+## Where the cache helped—and where it did not {#where-the-cache-helpedand-where-it-did-not}
 
 - **Single-key SQL:** prepared SQL beat SQL `mget` in both published client
   setups. At 256 Go connections it returned 253,790 requests/s versus 186,296
@@ -31,7 +33,7 @@ VM. Each page links raw repetitions, exact versions and server resource costs.
 These separate setups do not rank languages. For connection examples, see
 [Node.js](node-postgres.md), [Go](go.md) or [RESP](resp.md).
 
-## Run the same comparison on every client
+## Run the same comparison on every client {#run-the-same-comparison-on-every-client}
 
 From the repository root, with Docker, Node.js 20+ and Go 1.25+:
 
@@ -79,7 +81,7 @@ The published 14–15 September results below predate this common launcher.
 Their original environments and source revisions remain attached to the
 data; they are not new measurements from the unified matrix.
 
-## Test environment
+## Test environment {#test-environment}
 
 
 | Component | Configuration |
@@ -96,7 +98,7 @@ preserving input order, duplicates and missing positions. SQL uses prepared
 statements; connections, authentication and warmup are outside the timing.
 There is no TLS or pipelining.
 
-## Measurement method
+## Measurement method {#measurement-method}
 
 
 Each connection waits for its response before sending another request:

@@ -20,6 +20,8 @@ kramdown:
   syntax_highlighter: rouge
 permalink: pretty
 exclude:
+  - docs/presentations
+  - output
   - benchmark.json
   - benchmark.md
   - benchmark-artifact

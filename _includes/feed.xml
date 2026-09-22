@@ -1,0 +1,18 @@
+{% assign lang = page.lang | default: 'en' %}{% assign ui = site.data[lang] %}{% assign locale = site.data.locales[lang] %}{% assign articles = site.pages | where: 'layout', 'post' | where: 'lang', lang | sort: 'date' | reverse %}{% assign latest = articles | sort: 'last_modified_at' | last %}<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="{{ lang }}">
+  <title>{{ ui.blog_intro | xml_escape }} — pg_local_cache</title>
+  <subtitle>{{ ui.blog_description | xml_escape }}</subtitle>
+  <id>{{ '/blog/' | prepend: locale.prefix | absolute_url | xml_escape }}</id>
+  <link href="{{ '/feed.xml' | prepend: locale.prefix | absolute_url | xml_escape }}" rel="self" type="application/atom+xml"/>
+  <link href="{{ '/blog/' | prepend: locale.prefix | absolute_url | xml_escape }}"/>
+  <updated>{{ latest.last_modified_at | date_to_xmlschema }}</updated>
+  <author><name>{{ ui.contributors | xml_escape }}</name><uri>https://github.com/{{ site.repository }}/graphs/contributors</uri></author>
+  {% for article in articles %}<entry>
+    <title>{{ article.title | xml_escape }}</title>
+    <id>{{ article.url | absolute_url | xml_escape }}</id>
+    <link href="{{ article.url | absolute_url | xml_escape }}"/>
+    <published>{{ article.date | date_to_xmlschema }}</published>
+    <updated>{{ article.last_modified_at | date_to_xmlschema }}</updated>
+    <summary>{{ article.description | xml_escape }}</summary>
+  </entry>{% endfor %}
+</feed>
