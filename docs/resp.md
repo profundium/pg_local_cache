@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: resp
 title: Connect over RESP
 description: Read PostgreSQL rows over RESP2 with redis-cli or Node.js. Includes authentication, client settings, runnable examples and cleanup.
 section: RESP
@@ -7,7 +9,7 @@ permalink: /docs/resp.html
 last_modified_at: "2026-09-16"
 ---
 
-# Connect over RESP
+# Connect over RESP {#connect-over-resp}
 
 Use `MGET` to read cached PostgreSQL rows with a RESP2 client.
 Start the [disposable demo](QUICKSTART.md) with its RESP configuration:
@@ -19,7 +21,7 @@ docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build
 This enables RESP on `127.0.0.1:56379`. Recreating the demo discards its data.
 The token below is public and only for this local demo.
 
-## redis-cli
+## redis-cli {#redis-cli}
 
 ```bash
 export REDISCLI_AUTH=DemoRespToken_0123456789abcdef0123456789
@@ -30,7 +32,7 @@ The response contains row 42 as JSON. Missing rows return `nil`.
 [redis-cli](https://redis.io/docs/latest/develop/tools/cli/) reads the token
 from `REDISCLI_AUTH`.
 
-## Node.js
+## Node.js {#nodejs}
 
 ```bash
 npm --prefix examples/node-postgres ci --ignore-scripts
@@ -72,7 +74,7 @@ RESP workers use one configured PostgreSQL role for all clients. For reads
 within a SQL transaction, use [Node.js SQL](node-postgres.md) or [Go SQL](go.md).
 See the [RESP reference](TECHNICAL.md#optional-resp2-endpoint) for commands and limits.
 
-## Compare with SQL
+## Compare with SQL {#compare-with-sql}
 
 The [common benchmark](BENCHMARKS.md#run-the-same-comparison-on-every-client)
 runs RESP `MGET`, SQL `mget` and prepared SQL with the same keys and decoded
@@ -80,7 +82,7 @@ results in both Node.js and Go.
 For broader application caching, read the
 [PostgreSQL and Redis cache-aside guide](postgresql-redis-cache.md).
 
-## Stop the demo
+## Stop the demo {#stop-the-demo}
 
 ```bash
 docker compose -f examples/compose.yaml -f examples/compose.resp.yaml down

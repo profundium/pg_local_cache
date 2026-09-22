@@ -1,8 +1,10 @@
+{% assign diagram_lang = page.lang | default: 'en' %}
+{% assign d = site.data[diagram_lang].transaction_diagram %}
 {% assign diagram_id = include.id | default: 'transaction' %}
 <figure class="diagram">
   <svg viewBox="0 0 384 480" role="img" aria-labelledby="{{ diagram_id }}-title {{ diagram_id }}-desc">
-    <title id="{{ diagram_id }}-title">What readers see during an update</title>
-    <desc id="{{ diagram_id }}-desc">Under READ COMMITTED, start with revision zero. A transaction updates it to one. The writer sees one through a source-table read, while another session still sees zero. After COMMIT, a new statement in the other session sees one. After ROLLBACK, it still sees zero.</desc>
+    <title id="{{ diagram_id }}-title">{{ d.title }}</title>
+    <desc id="{{ diagram_id }}-desc">{{ d.description }}</desc>
     <defs>
       <marker id="{{ diagram_id }}-arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 L8 4 L0 8" fill="var(--blue)"/></marker>
     </defs>
@@ -12,18 +14,18 @@
       <path d="M216 280 V312 Q216 320 224 320 H296 Q304 320 304 328 V392"/>
     </g>
     <rect class="diagram-node" x="72" y="16" width="240" height="72" rx="8"/>
-    <text class="diagram-label" x="192" y="44" text-anchor="middle" font-size="20"><tspan x="192">Committed row</tspan><tspan x="192" dy="28">revision = 0</tspan></text>
+    <text class="diagram-label" x="192" y="44" text-anchor="middle" font-size="20"><tspan x="192">{{ d.committed }}</tspan><tspan x="192" dy="28">revision = 0</tspan></text>
     <text class="diagram-label" x="212" y="124" font-size="20">BEGIN; UPDATE</text>
     <rect class="diagram-accent" x="40" y="152" width="304" height="128" rx="8"/>
-    <text class="diagram-label" x="192" y="184" text-anchor="middle" font-size="24">Transaction open</text>
-    <text class="diagram-muted" x="192" y="224" text-anchor="middle" font-size="20">Writer reads 1</text>
-    <text class="diagram-muted" x="192" y="252" text-anchor="middle" font-size="20">Other session reads 0</text>
+    <text class="diagram-label" x="192" y="184" text-anchor="middle" font-size="24">{{ d.open }}</text>
+    <text class="diagram-muted" x="192" y="224" text-anchor="middle" font-size="20">{{ d.writer }}</text>
+    <text class="diagram-muted" x="192" y="252" text-anchor="middle" font-size="20">{{ d.other }}</text>
     <text class="diagram-label" x="80" y="308" text-anchor="middle" font-size="20">COMMIT</text>
     <text class="diagram-label" x="304" y="308" text-anchor="middle" font-size="20">ROLLBACK</text>
     <rect class="diagram-hit" x="8" y="392" width="168" height="72" rx="8"/>
-    <text class="diagram-hit-label" x="92" y="420" text-anchor="middle" font-size="20"><tspan x="92">Next read</tspan><tspan x="92" dy="28">revision = 1</tspan></text>
+    <text class="diagram-hit-label" x="92" y="420" text-anchor="middle" font-size="20"><tspan x="92">{{ d.next }}</tspan><tspan x="92" dy="28">revision = 1</tspan></text>
     <rect class="diagram-node" x="208" y="392" width="168" height="72" rx="8"/>
-    <text class="diagram-label" x="292" y="420" text-anchor="middle" font-size="20"><tspan x="292">Next read</tspan><tspan x="292" dy="28">revision = 0</tspan></text>
+    <text class="diagram-label" x="292" y="420" text-anchor="middle" font-size="20"><tspan x="292">{{ d.next }}</tspan><tspan x="292" dy="28">revision = 0</tspan></text>
   </svg>
-  <figcaption>READ COMMITTED, starting from revision 0. “Next read” means a new statement in the other session after COMMIT or ROLLBACK. The writer reads its own change through the source table.</figcaption>
+  <figcaption>{{ d.caption }}</figcaption>
 </figure>

@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: go
 title: Batch row lookups with Go and pgx
 seo_title: "Batch PostgreSQL Row Lookups with Go and pgx"
 description: Use pg_local_cache from Go with pgx, parameterized keys, and decoded JSON rows.
@@ -8,7 +10,7 @@ permalink: /docs/go.html
 last_modified_at: "2026-09-16"
 ---
 
-# Batch row lookups with Go and pgx
+# Batch row lookups with Go and pgx {#batch-row-lookups-with-go-and-pgx}
 
 Start the [disposable database](QUICKSTART.md) first, then run:
 
@@ -30,7 +32,7 @@ requests `42, 7, 42, NULL, 999999` and prints rows in input order. Duplicate
 `42` stays in both positions; the null input and missing `999999` produce null
 elements.
 
-## Compare rows, not just round trips
+## Compare rows, not just round trips {#compare-rows-not-just-round-trips}
 
 An ordinary `WHERE id = ANY($1::bigint[])` query does not preserve requested
 positions. Restore input order, duplicates and missing rows before comparing

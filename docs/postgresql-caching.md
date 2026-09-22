@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: postgresql-caching
 title: PostgreSQL caching decision guide
 seo_title: "PostgreSQL Caching Decision Guide: Pages, Rows, Views, or Redis"
 description: Choose PostgreSQL page caching, prepared SQL, whole-row caching, materialized views, or an external cache by the work you need to avoid.
@@ -8,14 +10,14 @@ permalink: /docs/postgresql-caching.html
 last_modified_at: "2026-09-16"
 ---
 
-# PostgreSQL caching decision guide
+# PostgreSQL caching decision guide {#postgresql-caching-decision-guide}
 
 “Add a cache” describes several different changes. PostgreSQL page caching,
 prepared SQL, a whole-row cache, a materialized view, and Redis avoid different
 parts of a read. Choose from the repeated work in your request, then measure
 the complete path with the [benchmark guide](BENCHMARKS.md).
 
-## Start with the work you repeat
+## Start with the work you repeat {#start-with-the-work-you-repeat}
 
 | Need | First option | What it changes |
 |---|---|---|
@@ -25,7 +27,7 @@ the complete path with the [benchmark guide](BENCHMARKS.md).
 | Precompute a join or aggregate | A materialized view | Reads persisted results; refresh defines freshness |
 | Share application objects across services | An external cache such as Redis | Application-managed keys, TTLs, and invalidation |
 
-### Pages and prepared SQL
+### Pages and prepared SQL {#pages-and-prepared-sql}
 
 [`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS)
 holds database pages, not final `SELECT` results. A warm page can avoid storage
@@ -37,7 +39,7 @@ against the current database state, and its plan can be generic or custom.
 The [row cache comparison](row-cache-vs-shared-buffers.md)
 shows the work that remains on each path.
 
-### Whole rows by primary key
+### Whole rows by primary key {#whole-rows-by-primary-key}
 
 `pg_local_cache` stores serialized complete rows under complete primary keys in
 bounded PostgreSQL shared memory. It is reached through
@@ -50,7 +52,7 @@ specific read path, not an arbitrary query-result cache. See the
 [batch lookup guide](batch-primary-key-lookups.md), [technical contract](TECHNICAL.md),
 and [transaction checks](cache-invalidation.md).
 
-### Views and external caches
+### Views and external caches {#views-and-external-caches}
 
 PostgreSQL [materialized views](https://www.postgresql.org/docs/18/rules-materializedviews.html)
 persist a query result in a relation and refresh it on demand. They suit

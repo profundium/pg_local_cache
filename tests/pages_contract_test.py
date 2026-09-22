@@ -5,11 +5,22 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import runpy
 import statistics
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+LANGUAGES = re.findall(r'^([a-z]{2}):$', (ROOT / '_data/locales.yml').read_text(), re.M)
+
+
+def documents():
+    return [ROOT / 'index.html', *(ROOT / 'docs').glob('*.md'), *(ROOT / 'blog').glob('*.md')]
+
+
+def metadata(text):
+    return {key: value.strip('"\'') for key, value in
+            re.findall(r'^([a-z_]+):\s*(.+)$', text.split('---', 2)[1], re.M)}
 
 
 def module(name):
@@ -24,9 +35,49 @@ report = module('benchmark_report')
 
 
 class PagesContracts(unittest.TestCase):
+    def test_executable_docs_keep_heading_extraction_with_stable_anchors(self):
+        blocks = runpy.run_path(str(ROOT / 'tests/install_docs_smoke.py'))['blocks']
+        for filename, heading, language in [
+            ('INSTALL_EXISTING.md', 'Configure before restart', 'conf'),
+            ('INSTALL_EXISTING.md', 'Initialize a source installation', 'sql'),
+            ('QUICKSTART.md', 'Read as an application role', 'bash'),
+            ('QUICKSTART.md', 'Check commit and rollback', 'bash'),
+        ]:
+            document = (ROOT / 'docs' / filename).read_text()
+            self.assertEqual(blocks(document, heading, language),
+                             blocks(re.sub(r' \{#[^}]+\}', '', document), heading, language))
+
+    def test_complete_translations_preserve_code_and_section_anchors(self):
+        originals = documents()
+        self.assertEqual(len(originals), 19)
+        self.assertEqual(len(list((ROOT / 'docs').glob('*.md'))), 14)
+        self.assertEqual(len(list((ROOT / 'blog').glob('*.md'))), 4)
+        dictionary_keys = re.findall(r'^(\s*[a-z_]+):', (ROOT / '_data/en.yml').read_text(), re.M)
+        for language in LANGUAGES:
+            dictionary = (ROOT / f'_data/{language}.yml').read_text()
+            self.assertEqual(re.findall(r'^(\s*[a-z_]+):', dictionary, re.M), dictionary_keys, language)
+            for source in originals:
+                translated = source if language == 'en' else ROOT / language / source.relative_to(ROOT)
+                with self.subTest(path=translated):
+                    original, text = source.read_text(), translated.read_text()
+                    a, b = metadata(original), metadata(text)
+                    self.assertEqual(b['lang'], language)
+                    self.assertEqual(b['translation_key'], a['translation_key'])
+                    self.assertEqual(b['permalink'], ('' if language == 'en' else '/' + language) + a['permalink'])
+                    self.assertEqual(b['layout'], a['layout'])
+                    self.assertEqual(re.findall(r'\{#[^}]+\}', original), re.findall(r'\{#[^}]+\}', text))
+                    self.assertEqual(re.findall(r'^```[^\n]*\n(.*?)^```', original, re.M | re.S),
+                                     re.findall(r'^```[^\n]*\n(.*?)^```', text, re.M | re.S))
+                    for field in ('date', 'last_modified_at', 'topic'):
+                        self.assertEqual(b.get(field), a.get(field))
+                    if language != 'en':
+                        self.assertNotEqual(b['title'], a['title'])
+                        self.assertNotEqual(b['description'], a['description'])
+                        self.assertGreater(len(text), len(original) * .35)
+
     def test_navigation_resolves_and_metadata_is_distinct(self):
         paths, titles, descriptions = set(), set(), set()
-        for document in [ROOT / 'index.html', *(ROOT / 'docs').glob('*.md')]:
+        for document in documents():
             text = document.read_text()
             self.assertTrue(text.startswith('---\n'), document)
             frontmatter = text.split('---', 2)[1]
@@ -53,13 +104,18 @@ class PagesContracts(unittest.TestCase):
 
     def test_local_markdown_links_resolve(self):
         failures = []
-        for document in [ROOT / 'README.md', ROOT / 'CONTRIBUTING.md', *(ROOT / 'docs').glob('*.md')]:
-            for target in re.findall(r'\[[^]]*\]\(([^)]+)\)', document.read_text()):
+        translated = [ROOT / lang / source.relative_to(ROOT) for lang in LANGUAGES if lang != 'en'
+                      for source in documents() if source.suffix == '.md']
+        for document in [ROOT / 'README.md', ROOT / 'CONTRIBUTING.md',
+                         *(path for path in documents() if path.suffix == '.md'), *translated]:
+            for label, target in re.findall(r'\[([^]]*)\]\(([^)]+)\)', document.read_text()):
                 if target.startswith(('http://', 'https://', '#', 'mailto:')):
                     continue
                 path = target.split('#', 1)[0]
+                if path.endswith('.md') and '\n' in label:
+                    failures.append(f'{document.relative_to(ROOT)}: Jekyll cannot rewrite a multiline link label')
                 if path and not (document.parent / path).resolve().exists():
-                    failures.append(f'{document.name} -> {target}')
+                    failures.append(f'{document.relative_to(ROOT)} -> {target}')
         self.assertEqual(failures, [])
 
     def test_hero_benchmark_matches_recorded_medians(self):
@@ -100,6 +156,61 @@ class PagesContracts(unittest.TestCase):
 
 
 class BuiltSiteChecks(unittest.TestCase):
+    def multilingual_fixture(self, root):
+        self.fixture(root)
+        template = (root / 'index.html').read_text()
+        alternates = ''.join(f'<link rel="alternate" hreflang="{lang}" href="{site.BASE}{lang + "/" if lang != "en" else ""}">'
+                             for lang in LANGUAGES)
+        alternates += f'<link rel="alternate" hreflang="x-default" href="{site.BASE}">'
+        links = ''.join(f'<a hreflang="{lang}" href="{site.BASE}{lang + "/" if lang != "en" else ""}">{lang}</a>' for lang in LANGUAGES)
+        urls = []
+        for lang in LANGUAGES:
+            prefix = '' if lang == 'en' else lang + '/'
+            url = site.BASE + prefix
+            directory = root / prefix
+            directory.mkdir(exist_ok=True)
+            urls.append(url)
+            text = template.replace('<html>', f'<html lang="{lang}">')
+            text = text.replace('Demo', 'Demo ' + lang).replace('A demo', 'A demo ' + lang)
+            text = text.replace('href="' + site.BASE + '"', 'href="' + url + '"')
+            text = text.replace('content="' + site.BASE + '"', 'content="' + url + '"')
+            text = text.replace('{"@type":"SoftwareSourceCode"}', json.dumps({
+                '@type': 'BlogPosting', 'inLanguage': lang, 'datePublished': '2026-09-22',
+                'dateModified': '2026-09-22', 'headline': 'Demo ' + lang,
+                'author': {'@type': 'Organization', 'name': 'Demo'},
+                'publisher': {'@type': 'Organization', 'name': 'Demo'},
+            }))
+            text = text.replace('</head>', alternates + f'<link rel="alternate" type="application/atom+xml" href="{url}feed.xml"></head>')
+            text = text.replace('</main>', links + '</main>')
+            (directory / 'index.html').write_text(text)
+            (directory / 'feed.xml').write_text(f'''<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="{lang}">
+<id>{url}blog/</id><link rel="self" href="{url}feed.xml"/><title>Demo</title><updated>2026-09-22T00:00:00Z</updated>
+<entry><id>{url}</id><link href="{url}"/><title>Demo {lang}</title><summary>Demo</summary>
+<published>2026-09-22T00:00:00Z</published><updated>2026-09-22T00:00:00Z</updated></entry></feed>''')
+        (root / 'sitemap.xml').write_text('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' +
+                                        ''.join(f'<url><loc>{url}</loc></url>' for url in urls) + '</urlset>')
+
+    def test_multilingual_artifact_and_mutations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.multilingual_fixture(root)
+            self.assertEqual(site.check(root, languages=LANGUAGES), [])
+            mutations = [
+                ('fr/index.html', '<a hreflang="es"', '<a', 'content link changes locale'),
+                ('ru/index.html', 'hreflang="es"', 'hreflang="it"', 'hreflang'),
+                ('fr/index.html', '<html lang="fr">', '<html lang="en">', 'language'),
+                ('de/index.html', '"inLanguage": "de"', '"inLanguage": "en"', 'structured-data language'),
+                ('es/feed.xml', f'<id>{site.BASE}es/</id>', f'<id>{site.BASE}fr/</id>', 'locale articles'),
+                ('zh/index.html', '"datePublished": "2026-09-22"', '"datePublished": ""', 'datePublished'),
+            ]
+            for filename, before, after, error in mutations:
+                path = root / filename
+                original = path.read_text()
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertTrue(any(error in item for item in site.check(root, languages=LANGUAGES)), filename)
+                path.write_text(original)
+
     def fixture(self, root):
         (root / 'index.html').write_text('''<!doctype html><html><head><title>Demo</title>
 <meta name="description" content="A demo"><meta name="robots" content="index,follow">

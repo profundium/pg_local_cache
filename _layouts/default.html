@@ -1,5 +1,9 @@
+{% assign lang = page.lang | default: 'en' %}
+{% assign locale = site.data.locales[lang] %}
+{% assign ui = site.data[lang] %}
+{% assign translations = site.pages | where: 'translation_key', page.translation_key | sort: 'lang' %}
 <!doctype html>
-<html class="no-js" lang="{{ site.lang | default: 'en' }}">
+<html class="no-js" lang="{{ lang }}">
   <head>
     {% assign meta_title = page.seo_title | default: page.title | default: site.title %}
     {% assign meta_description = page.description | default: site.description %}
@@ -15,7 +19,7 @@
     </script>
     <title>{{ meta_title | escape }}</title>
     <meta name="description" content="{{ meta_description | escape }}">
-    <meta name="author" content="pg_local_cache contributors">
+    <meta name="author" content="{{ ui.contributors | escape }}">
     <meta name="robots" content="{% if page.sitemap == false %}noindex,follow{% else %}index,follow,max-image-preview:large{% endif %}">
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#0d1319" media="(prefers-color-scheme: dark)">
@@ -24,9 +28,14 @@
     {% if site.bing_site_verification != '' and site.bing_site_verification %}<meta name="msvalidate.01" content="{{ site.bing_site_verification | escape }}">{% endif %}
     <script>document.documentElement.classList.replace('no-js', 'js');</script>
     <link rel="canonical" href="{{ page.url | absolute_url }}">
+    {% for translation in translations %}
+    <link rel="alternate" hreflang="{{ translation.lang }}" href="{{ translation.url | absolute_url }}">
+    {% if translation.lang == 'en' %}<link rel="alternate" hreflang="x-default" href="{{ translation.url | absolute_url }}">{% endif %}
+    {% endfor %}
+    <link rel="alternate" type="application/atom+xml" title="{{ ui.blog | escape }}" href="{{ '/feed.xml' | prepend: locale.prefix | relative_url }}">
     <link rel="sitemap" type="application/xml" href="{{ '/sitemap.xml' | relative_url }}">
-    <meta property="og:type" content="{% if page.home %}website{% else %}article{% endif %}">
-    <meta property="og:locale" content="en_US">
+    <meta property="og:type" content="{% if page.home or page.layout == 'blog' %}website{% else %}article{% endif %}">
+    <meta property="og:locale" content="{{ locale.og_locale }}">
     <meta property="og:site_name" content="{{ site.title }}">
     <meta property="og:title" content="{{ meta_title | escape }}">
     <meta property="og:description" content="{{ meta_description | escape }}">
@@ -34,12 +43,12 @@
     <meta property="og:image" content="{{ meta_image }}">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
-    <meta property="og:image:alt" content="pg_local_cache PostgreSQL row cache data path">
+    <meta property="og:image:alt" content="{{ ui.social_alt | escape }}">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="{{ meta_title | escape }}">
     <meta name="twitter:description" content="{{ meta_description | escape }}">
     <meta name="twitter:image" content="{{ meta_image }}">
-    <meta name="twitter:image:alt" content="pg_local_cache PostgreSQL row cache data path">
+    <meta name="twitter:image:alt" content="{{ ui.social_alt | escape }}">
     <link rel="icon" href="{{ '/assets/favicon.svg' | relative_url }}" type="image/svg+xml">
     <link rel="preload" href="{{ '/assets/fonts/outfit-latin.woff2' | relative_url }}" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
@@ -50,6 +59,7 @@
       "@type": "SoftwareSourceCode",
       "name": "pg_local_cache",
       "description": {{ meta_description | jsonify }},
+      "inLanguage": {{ lang | jsonify }},
       "url": {{ page.url | absolute_url | jsonify }},
       "image": {{ meta_image | jsonify }},
       "codeRepository": "https://github.com/{{ site.repository }}",
@@ -63,37 +73,52 @@
     {
       "@context": "https://schema.org",
       "@graph": [{
-      "@type": "TechArticle",
+      "@type": {% if page.layout == 'post' %}"BlogPosting"{% elsif page.layout == 'blog' %}"CollectionPage"{% else %}"TechArticle"{% endif %},
       "headline": {{ page.title | jsonify }},
       "description": {{ meta_description | jsonify }},
       "url": {{ page.url | absolute_url | jsonify }},
       "mainEntityOfPage": {{ page.url | absolute_url | jsonify }},
-      "inLanguage": {{ site.lang | jsonify }},
+      "inLanguage": {{ lang | jsonify }},
       "image": {{ meta_image | jsonify }},
       {% if page.last_modified_at %}"dateModified": {{ page.last_modified_at | date: '%Y-%m-%d' | jsonify }},{% endif %}
-      "author": {"@type": "Organization", "name": "pg_local_cache contributors", "url": "https://github.com/{{ site.repository }}/graphs/contributors"},
-      "isPartOf": {"@type": "WebSite", "name": "pg_local_cache documentation", "url": {{ '/' | absolute_url | jsonify }}}
+      {% if page.layout == 'post' %}"datePublished": {{ page.date | date: '%Y-%m-%d' | jsonify }},
+      "publisher": {"@type": "Organization", "name": "pg_local_cache", "url": {{ '/' | absolute_url | jsonify }}},{% endif %}
+      "author": {"@type": "Organization", "name": {{ ui.contributors | jsonify }}, "url": "https://github.com/{{ site.repository }}/graphs/contributors"},
+      "isPartOf": {"@type": "WebSite", "name": {{ ui.docs | prepend: 'pg_local_cache — ' | jsonify }}, "url": {{ '/' | prepend: locale.prefix | absolute_url | jsonify }}}
       }, {
         "@type": "BreadcrumbList",
         "itemListElement": [
-          {"@type": "ListItem", "position": 1, "name": "pg_local_cache", "item": {{ '/' | absolute_url | jsonify }}},
-          {"@type": "ListItem", "position": 2, "name": {{ page.title | jsonify }}, "item": {{ page.url | absolute_url | jsonify }}}
+          {"@type": "ListItem", "position": 1, "name": "pg_local_cache", "item": {{ '/' | prepend: locale.prefix | absolute_url | jsonify }}},
+          {% if page.layout == 'post' %}{"@type": "ListItem", "position": 2, "name": {{ ui.blog | jsonify }}, "item": {{ '/blog/' | prepend: locale.prefix | absolute_url | jsonify }}},{% endif %}
+          {"@type": "ListItem", "position": {% if page.layout == 'post' %}3{% else %}2{% endif %}, "name": {{ page.title | jsonify }}, "item": {{ page.url | absolute_url | jsonify }}}
         ]
       }]
     }
     {% endif %}
     </script>
   </head>
-  <body class="{% if page.home %}home{% else %}documentation{% endif %}">
-    <a class="skip-link" href="#main-content">Skip to content</a>
+  <body class="{% if page.home %}home{% else %}documentation{% endif %}"
+    data-copy-label="{{ ui.copy | escape }}" data-copy-code="{{ ui.copy_code | escape }}"
+    data-copied="{{ ui.copied | escape }}" data-copy-selected="{{ ui.copy_selected | escape }}"
+    data-scroll-table="{{ ui.scroll_table | escape }}">
+    <a class="skip-link" href="#main-content">{{ ui.skip }}</a>
     <header class="site-header">
       <div class="header-inner">
-        <a class="wordmark" href="{{ '/' | relative_url }}">pg_local_cache</a>
-        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
-        <nav id="site-nav" class="site-nav" aria-label="Primary navigation">
-          <a href="{{ '/docs/QUICKSTART.html' | relative_url }}">Try locally</a>
-          <a href="{{ '/docs/BENCHMARKS.html' | relative_url }}">Benchmarks</a>
-          <a href="{{ '/docs/TECHNICAL.html' | relative_url }}">Reference</a>
+        <a class="wordmark" href="{{ '/' | prepend: locale.prefix | relative_url }}">pg_local_cache</a>
+        <details class="language-picker">
+          <summary aria-label="{{ ui.language | escape }}: {{ locale.label }}">{{ locale.label }}</summary>
+          <nav aria-label="{{ ui.language | escape }}">
+            {% for translation in translations %}{% assign translation_locale = site.data.locales[translation.lang] %}
+            <a href="{{ translation.url | relative_url }}" lang="{{ translation.lang }}" hreflang="{{ translation.lang }}"{% if translation.lang == lang %} aria-current="page"{% endif %}>{{ translation_locale.label }}</a>
+            {% endfor %}
+          </nav>
+        </details>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">{{ ui.menu }}</button>
+        <nav id="site-nav" class="site-nav" aria-label="{{ ui.primary_nav | escape }}">
+          <a href="{{ '/docs/QUICKSTART.html' | prepend: locale.prefix | relative_url }}">{{ ui.try_locally }}</a>
+          <a href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">{{ ui.benchmarks }}</a>
+          <a href="{{ '/docs/TECHNICAL.html' | prepend: locale.prefix | relative_url }}">{{ ui.reference }}</a>
+          <a href="{{ '/blog/' | prepend: locale.prefix | relative_url }}">{{ ui.blog }}</a>
           <a class="nav-download" href="https://github.com/{{ site.repository }}">GitHub</a>
         </nav>
       </div>
@@ -101,9 +126,9 @@
     {{ content }}
     <footer class="site-footer">
       <div class="footer-inner">
-        <a class="wordmark" href="{{ '/' | relative_url }}">pg_local_cache</a>
+        <a class="wordmark" href="{{ '/' | prepend: locale.prefix | relative_url }}">pg_local_cache</a>
         <p>{{ site.release_series }} / PostgreSQL 14-18 / Linux amd64 / MIT</p>
-        <a href="https://github.com/{{ site.repository }}/releases/latest">Releases</a>
+        <a href="https://github.com/{{ site.repository }}/releases/latest">{{ ui.releases }}</a>
       </div>
     </footer>
     <script src="{{ '/assets/site.js' | relative_url }}" defer></script>

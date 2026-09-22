@@ -1,0 +1,132 @@
+---
+layout: default
+lang: de
+translation_key: home
+title: "PostgreSQL-Zeilen-Cache-Erweiterung | pg_local_cache"
+seo_title: "PostgreSQL-Zeilen-Cache-Erweiterung | pg_local_cache"
+description: Cachen Sie PostgreSQL-Primärschlüsselzeilen im Shared Memory mit explizitem SQL-mget und transaktionsbewusster Invalidation. Probieren Sie die lokale Demo aus und vergleichen Sie sie mit gebündeltem SQL.
+image: /assets/social-card.png
+last_modified_at: "2026-09-22"
+home: true
+permalink: /de/
+---
+{% assign lang = page.lang | default: 'en' %}
+{% assign locale = site.data.locales[lang] %}
+{% assign ui = site.data[lang] %}
+<main id="main-content">
+  <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
+    <div class="hero-copy">
+      <h1 id="hero-title">Ein Zeilen-Cache<br>in <span>PostgreSQL.</span></h1>
+      <p>Lesen Sie Zeilen per Primärschlüssel mit SQL-<code>mget</code> oder RESP. PostgreSQL-Schreibvorgänge invalidieren betroffene Cache-Einträge automatisch.</p>
+      <div class="hero-actions">
+        <a class="button primary" href="{{ '/docs/QUICKSTART.html' | prepend: locale.prefix | relative_url }}">Lokal ausprobieren <span aria-hidden="true">→</span></a>
+        <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Mit SQL vergleichen <span aria-hidden="true">→</span></a>
+      </div>
+      <p class="hero-note">Explizite SQL-API · PostgreSQL 14–18 · Open Source</p>
+    </div>
+    <figure class="hero-benchmark" aria-label="Lokaler Benchmark mit einem Schlüssel: RESP im Vergleich zu SQL">
+      <p class="benchmark-label">Lokal gemessen · 15. Sep. 2026</p>
+      <p class="benchmark-number"><strong>839,678</strong><span>Anfragen/s · RESP MGET</span></p>
+      <p class="benchmark-gain"><strong>3.31×</strong> der vorbereiteten SQL-Rate<br>in diesem Vergleich mit einem Schlüssel</p>
+      <dl class="benchmark-baselines">
+        <div><dt>Vorbereitetes SQL</dt><dd>253,790 <span>Anfragen/s</span></dd></div>
+        <div><dt>SQL mget</dt><dd>186,296 <span>Anfragen/s</span></dd></div>
+      </dl>
+      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 Verbindungen.<br>Aufgewärmter Cache, 1 Schlüssel/Anfrage. Median aus 3 × 5 Sekunden.<br>SQL mget war hier langsamer; Batch-Ergebnisse weichen ab.</figcaption>
+      <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">Ergebnisse, Rohdaten und Bedingungen <span aria-hidden="true">→</span></a>
+    </figure>
+  </section>
+
+  <section id="read-path" class="page-section read-path" aria-labelledby="read-path-title">
+    <div class="read-path-heading">
+      <h2 id="read-path-title">Ein Aufruf. Zwei Lesepfade.</h2>
+      <p>Ein geeigneter Treffer gibt die gespeicherte Zeile zurück. Ein Fehltreffer oder Bypass liest die Quelltabelle. Ihre gewöhnlichen <code>SELECT</code>-Abfragen behalten ihren bisherigen Pfad.</p>
+    </div>
+    <div class="read-path-grid">
+    <div class="terminal" aria-label="PostgreSQL-mget-Beispiel">
+      <div class="terminal-bar"><strong>psql</strong> │ Lesevorgänge per Primärschlüssel</div>
+      <pre><code><span class="comment">-- Attach your table once.</span>
+<span class="sql">SELECT</span> local_cache.attach_table('public.items');
+
+<span class="comment">-- Read rows by primary key.</span>
+<span class="sql">SELECT</span> local_cache.mget(
+  'public.items', ARRAY[42, 7]::bigint[]
+);</code></pre>
+      <p class="terminal-links"><a href="{{ '/docs/node-postgres.html' | prepend: locale.prefix | relative_url }}">Node.js-Beispiel</a><a href="{{ '/docs/go.html' | prepend: locale.prefix | relative_url }}">Go-Beispiel</a><a href="{{ '/docs/resp.html' | prepend: locale.prefix | relative_url }}">RESP-Beispiel</a></p>
+    </div>
+    {% include diagrams/read-path.html id="home-read" %}
+    </div>
+    <a class="text-link" href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">Was ein Treffer im Zeilen-Cache vermeidet <span aria-hidden="true">→</span></a>
+  </section>
+
+  <section class="proof-rail" aria-label="Anforderungen und Verhalten">
+    <div class="proof-item"><strong>SQL mget</strong><p>Bis zu 1.024 Schlüssel pro Aufruf. Reihenfolge, Duplikate und NULL-Positionen bleiben erhalten.</p></div>
+    <div class="proof-item"><strong>Gewöhnliche Schreibvorgänge</strong><p>INSERT, UPDATE und DELETE invalidieren betroffene Einträge.</p></div>
+    <div class="proof-item"><strong>Feste Kapazität</strong><p>Allokieren Sie den gemeinsamen Zeilen-Cache beim Start von PostgreSQL.</p></div>
+    <div class="proof-item"><strong>Snapshot-Prüfungen</strong><p>Nicht geeignete Lesevorgänge verwenden die Quelltabelle gemäß den Sichtbarkeitsregeln von PostgreSQL.</p></div>
+  </section>
+
+  <section id="benchmarks" class="band" aria-labelledby="benchmark-title">
+    <div class="page-section section-grid">
+      <div class="section-intro">
+        <h2 id="benchmark-title">Führen Sie denselben Test aus.<br>Mit jedem Client.</h2>
+        <p>Node.js und Go. Vorbereitetes SQL, SQL mget und RESP MGET.</p>
+      </div>
+      <div>
+        <p>Ein Runner verwendet dieselben Schlüssel, Batch-Größen, Verbindungszahlen, Dauer und Ergebnisprüfungen. Vergleichen Sie Durchsatz, Latenz sowie CPU und Speicher von PostgreSQL auf Ihrem Rechner.</p>
+        <a class="button" href="{{ '/docs/BENCHMARKS.html#run-the-same-comparison-on-every-client' | prepend: locale.prefix | relative_url }}">Vergleich ausführen <span aria-hidden="true">→</span></a>
+      </div>
+    </div>
+  </section>
+
+  <section id="fit" class="page-section section-grid" aria-labelledby="fit-title">
+    <div class="section-intro"><h2 id="fit-title">Passt das zu Ihrer Arbeitslast?</h2><p>Sie wählen einen Cache? <a href="{{ '/docs/postgresql-caching.html' | prepend: locale.prefix | relative_url }}">Vergleichen Sie PostgreSQL-Seiten, Zeilen, materialisierte Sichten und Redis</a>.</p></div>
+    <div class="fit-columns">
+      <section class="fit-group">
+        <h3>Messung lohnt sich</h3>
+        <ul><li>Wiederholte vollständige Primärschlüssel-Lesevorgänge.</li><li>Eine kleine heiße Menge vollständiger Zeilen.</li><li>READ COMMITTED auf einem beschreibbaren primären Server.</li><li>Eine Anwendung, die die explizite SQL-API aufrufen kann.</li></ul>
+      </section>
+      <section class="fit-group">
+        <h3>Gewöhnliches SQL beibehalten</h3>
+        <ul><li>Joins, Bereiche, Aggregate oder beliebige Abfrageergebnisse.</li><li>RLS-, partitionierte oder vererbte Tabellen.</li><li>Eine Datenbank, in der Sie keine native Erweiterung installieren können.</li><li>Arbeitslasten ohne gemessenen Nutzen.</li></ul>
+      </section>
+    </div>
+  </section>
+
+  <section id="quick-start" class="page-section quick-start" aria-labelledby="quick-start-title">
+    <h2 id="quick-start-title">Lokale Demo starten.</h2>
+    <p class="quick-start-lead">Klonen Sie das Repository und starten Sie einen verworfenen PostgreSQL-Server mit Beispielzeilen. Docker baut die Erweiterung und hält die Demo von Ihren Datenbanken getrennt.</p>
+    <div class="install-command">
+      <div class="command-label">Git und Docker Compose erforderlich</div>
+      <button class="copy-button" type="button" data-copy="demo-command" aria-live="polite">Kopieren</button>
+      <pre id="demo-command"><code>git clone https://github.com/profundium/pg_local_cache.git
+cd pg_local_cache
+docker compose -f examples/compose.yaml up --build --wait</code></pre>
+    </div>
+    <p class="quick-start-more"><a href="{{ '/docs/QUICKSTART.html#read-as-an-application-role' | prepend: locale.prefix | relative_url }}">Beispielzeilen lesen und Cache-Treffer prüfen</a>. Repository bereits geklont? Führen Sie den letzten Befehl aus dessen Stammverzeichnis aus. Für einen vorhandenen Server verwenden Sie den <a href="{{ '/docs/INSTALL_EXISTING.html' | prepend: locale.prefix | relative_url }}">Installationsleitfaden</a>.</p>
+    <p class="quick-start-more">Die Installation auf einem vorhandenen Server erfordert einen Neustart von PostgreSQL.</p>
+  </section>
+
+  <section class="band"><div class="page-section docs-index">
+    <h2>Dokumentation</h2>
+    <div class="docs-list">
+      {% include docs-list.html %}
+    </div>
+  </div></section>
+
+  <section class="page-section blog-preview" aria-labelledby="blog-title">
+    <h2 id="blog-title">{{ ui.blog_intro }}</h2>
+    {% include blog-list.html %}
+    <a class="text-link" href="{{ '/blog/' | prepend: locale.prefix | relative_url }}">{{ ui.all_articles }} →</a>
+  </section>
+
+  <section class="page-section faq" aria-labelledby="faq-title">
+    <h2 id="faq-title">Vor dem Ausprobieren</h2>
+    <div class="faq-list">
+      <details><summary>Ersetzt das shared_buffers?</summary><p>Nein. PostgreSQL cached Datenbankseiten. Diese Erweiterung cached separat serialisierte vollständige Zeilen per Primärschlüssel. Siehe den <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">Vergleich der Lesepfade</a>.</p></details>
+      <details><summary>Cached es gewöhnliche SELECT-Abfragen?</summary><p>Nein. Nur explizite Aufrufe von <code>local_cache.mget</code> verwenden den SQL-Cache. Ihre bestehenden Abfragen behalten den normalen PostgreSQL-Ausführungspfad.</p></details>
+      <details><summary>Ersetzt es Redis?</summary><p>Nein. Der optionale RESP2-Endpunkt ist begrenzt. Es gibt weder einen allgemeinen Redis-Befehlssatz noch TTL, Pub/Sub oder verteilte Koordination. Vergleichen Sie die <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">PostgreSQL- und Redis-Cache-aside-Pfade</a>.</p></details>
+      <details><summary>Wie prüfe ich Updates und Rollback?</summary><p>Der <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">Invalidation-Leitfaden</a> enthält einen Test mit zwei Sitzungen. Das ausführbare Beispiel prüft nicht bestätigte Schreibvorgänge, Read-your-writes, Rollback und bestätigte Updates.</p></details>
+    </div>
+  </section>
+</main>

@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: INSTALL_EXISTING
 title: Install pg_local_cache on PostgreSQL 14-18
 seo_title: Install pg_local_cache on PostgreSQL 14-18
 description: Install the pg_local_cache PostgreSQL extension with verified Linux binaries or PGXS, then configure preload, restart, verify, and recover safely.
@@ -8,7 +10,7 @@ permalink: /docs/INSTALL_EXISTING.html
 last_modified_at: "2026-09-05"
 ---
 
-# Install pg_local_cache on an existing PostgreSQL server
+# Install pg_local_cache on an existing PostgreSQL server {#install-pg_local_cache-on-an-existing-postgresql-server}
 
 Install the extension with a verified Linux package or build it with PostgreSQL's
 PGXS toolchain. Both paths require one controlled PostgreSQL restart before
@@ -18,7 +20,7 @@ PGXS toolchain. Both paths require one controlled PostgreSQL restart before
 > `shared_preload_libraries`. Preserve its existing entries and restart the
 > correct cluster only after preflight succeeds.
 
-## Choose an installation path
+## Choose an installation path {#choose-an-installation-path}
 
 | Path | Best for | Restart owner |
 |---|---|---|
@@ -29,7 +31,7 @@ PGXS toolchain. Both paths require one controlled PostgreSQL restart before
 Published binaries support PostgreSQL 14-18 on Linux amd64 with glibc or musl.
 The fixed-version examples below use pg_local_cache 2.0.1.
 
-## Fast binary install
+## Fast binary install {#fast-binary-install}
 
 For a local cluster controlled by `pg_ctl`:
 
@@ -53,7 +55,7 @@ less install-latest.sh
 bash install-latest.sh app
 ```
 
-## Controlled binary install
+## Controlled binary install {#controlled-binary-install}
 
 Download a fixed release with its published helper:
 
@@ -83,7 +85,7 @@ sudo ./pg_local_cache-package/install.sh verify --database app
 The installer prints a state directory. Keep it until verification succeeds;
 it contains the online backup required by `recover`.
 
-## Build from source
+## Build from source {#build-from-source}
 
 Use the same `pg_config` as the target PostgreSQL server. Install its server
 development headers, a C compiler, and GNU Make first.
@@ -99,7 +101,7 @@ Build from a clean checkout so the binary records its Git commit. Source
 installation copies extension files only. Continue with preload configuration,
 restart, and the SQL initialization below.
 
-## Configure before restart
+## Configure before restart {#configure-before-restart}
 
 Minimum SQL-only configuration using the default capacity and memory budget:
 
@@ -121,7 +123,7 @@ Size `cache_entries`, relation states, clients, workers, and
 plans. Source builds require the same capacity review before restart; do not
 increase the entry count without reviewing the memory budget.
 
-## Initialize a source installation
+## Initialize a source installation {#initialize-a-source-installation}
 
 After restarting, connect to the configured database as a database superuser.
 For a first manual installation, run:
@@ -145,7 +147,7 @@ have the attributes and metadata grants shown above. `attach_table` manages its
 access to each mapped table. No password or network listener is needed for
 SQL-only operation.
 
-## Attach a table
+## Attach a table {#attach-a-table}
 
 Use an existing permanent table with a supported primary key. As a database
 superuser in the configured database:
@@ -165,7 +167,7 @@ GRANT EXECUTE ON FUNCTION local_cache.mget(regclass, anyarray) TO app_user;
 
 Ordinary `SELECT` is not rewritten by the extension.
 
-## Verify cold fill and warm hit
+## Verify cold fill and warm hit {#verify-cold-fill-and-warm-hit}
 
 ```sql
 SELECT local_cache.invalidate('public.items');
@@ -177,7 +179,7 @@ SELECT local_cache.stats();
 Confirm `local_cache.health()` is ready, the mapping has converged, and SQL cache
 counters move as expected.
 
-## Enable optional RESP2
+## Enable optional RESP2 {#enable-optional-resp2}
 
 RESP2 adds a listener, worker processes, and one shared token. It uses the
 same dedicated PostgreSQL role required for table attachment:
@@ -199,7 +201,7 @@ sudo ./pg_local_cache-package/install.sh install \
 Keep the listener on `127.0.0.1` or behind authenticated TLS. RESP clients share
 the configured worker role and do not receive per-client PostgreSQL ACL context.
 
-## Recover a failed binary install
+## Recover a failed binary install {#recover-a-failed-binary-install}
 
 Use the state directory printed by the installer:
 
@@ -211,7 +213,7 @@ sudo ./pg_local_cache-package/install.sh recover \
 Do not recover after a new postmaster has accepted traffic until you review the
 recorded state and operational impact.
 
-## Troubleshooting
+## Troubleshooting {#troubleshooting}
 
 - **Preload error:** confirm the target cluster's configuration and restart the
   correct postmaster.

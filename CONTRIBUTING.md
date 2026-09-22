@@ -88,3 +88,37 @@ in the organization site repository.
 
 The public site uses Google Analytics (`G-MHQBYKWZ7W`); browser tests stub its
 loader so local/CI visits are not recorded. The extension has no telemetry.
+
+## Languages and blog articles
+
+English URLs stay at the root. Russian, Spanish, German, French and Simplified
+Chinese live under `ru/`, `es/`, `de/`, `fr/` and `zh/`. `_data/locales.yml` is the
+language registry; `_data/en.yml` and its five counterparts contain shared UI
+and diagram text. Pages work as static HTML, including language switching.
+
+Every public page has a unique `translation_key`, a `lang` and a self-canonical
+`permalink`. Give every translation the same key and heading `{#id}` anchors.
+Translate full prose, titles, descriptions and accessibility labels. Keep
+executable examples, API names, measured numbers and raw output unchanged.
+Relative links between guides stay within the locale; shared assets and source
+files stay at the repository root. Check those paths when adding translations.
+
+Write articles in `blog/` with `layout: post`, `topic` (`performance`,
+`correctness` or `application`), a publication `date` and `last_modified_at`.
+Add the complete article in all five language directories in the same change.
+Use `layout: blog` for the index. The shared lists, related articles, sitemap,
+language alternates and six Atom feeds are generated from page metadata.
+Dates describe publication and substantive edits, never the build time.
+
+Use distinct reader questions for new articles. Link explanations to runnable
+guides and the API reference; keep performance claims tied to their workload
+and raw measurements. Follow Google's [localized-page guidance](https://developers.google.com/search/docs/specialty/international/localized-versions):
+reciprocal language alternates, a self-canonical for each translation and
+explicit language links. These checks establish a crawlable artifact, not
+search-engine indexing or ranking.
+
+Run `python3 tests/pages_contract_test.py`, then the built-site and browser
+checks above. They verify translation coverage, stable anchors and code,
+reciprocal `hreflang`, locale feeds, schema, links and mobile navigation.
+
+Keep Markdown link labels on one source line. The GitHub Pages `jekyll-relative-links` plugin does not rewrite links whose label contains a newline; the built-site check rejects the resulting `.md` URLs.

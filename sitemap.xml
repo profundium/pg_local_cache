@@ -6,7 +6,7 @@ sitemap: false
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 {% assign pages = site.pages | sort: 'url' %}
-{% for item in pages %}{% if item.sitemap != false %}{% if item.home or item.layout == 'doc' %}
+{% for item in pages %}{% if item.sitemap != false %}{% if item.translation_key %}
   <url>
     <loc>{{ item.url | absolute_url | xml_escape }}</loc>
     {% if item.last_modified_at %}<lastmod>{{ item.last_modified_at | date: '%Y-%m-%d' }}</lastmod>{% endif %}

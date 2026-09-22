@@ -1,0 +1,24 @@
+en:
+  label: English
+  prefix: ""
+  og_locale: en_US
+ru:
+  label: Русский
+  prefix: /ru
+  og_locale: ru_RU
+es:
+  label: Español
+  prefix: /es
+  og_locale: es_ES
+de:
+  label: Deutsch
+  prefix: /de
+  og_locale: de_DE
+fr:
+  label: Français
+  prefix: /fr
+  og_locale: fr_FR
+zh:
+  label: 简体中文
+  prefix: /zh
+  og_locale: zh_CN

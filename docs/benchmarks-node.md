@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: benchmarks-node
 title: Node.js benchmarks
 description: "Local node-postgres results on Apple M3 Max: batch reads, concurrent updates, PostgreSQL CPU and memory."
 section: Benchmarks
@@ -7,7 +9,7 @@ permalink: /docs/benchmarks-node.html
 last_modified_at: "2026-09-16"
 ---
 
-# Node.js benchmarks
+# Node.js benchmarks {#nodejs-benchmarks}
 
 [Overview](BENCHMARKS.md) · [Node.js](benchmarks-node.md) · [Go and RESP](benchmarks-go.md)
 
@@ -36,7 +38,7 @@ requests/s. The batch result does not apply to single-key reads.
 [Raw measurements](../assets/benchmarks/2026-09-14-m3-max-clients.json)
 include latency percentiles, resource samples and source revisions.
 
-### Reads mixed with writes
+### Reads mixed with writes {#reads-mixed-with-writes}
 
 The Node.js application runner uses **64 connections**, **50,000 requests
 per sample** and three repetitions. Reads cycle through 128 hot rows;
@@ -56,7 +58,7 @@ samples count reads and writes together. The JSON's `application_run` includes
 cold-fill and write-overhead cases. Cold fill at batch 64 has only 64 latency
 observations, too few for a useful p99 estimate.
 
-## Query setup
+## Query setup {#query-setup}
 
 ```sql
 SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows;
@@ -66,7 +68,7 @@ Connections and named prepared statements are reused. JSON decoding and
 restoring input positions are included in request time. See the
 [Node.js example](node-postgres.md).
 
-## Reproduce
+## Reproduce {#reproduce}
 
 <details markdown="1">
 <summary>Run the Node.js benchmarks</summary>

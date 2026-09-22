@@ -1,4 +1,5 @@
 (() => {
+  const labels = document.body.dataset;
   const docMenu = document.querySelector('.doc-menu');
   if (docMenu) {
     const desktop = window.matchMedia('(min-width: 981px)');
@@ -60,7 +61,7 @@
     region.className = 'table-scroll';
     region.setAttribute('role', 'region');
     region.setAttribute('tabindex', '0');
-    region.setAttribute('aria-label', 'Scrollable data table');
+    region.setAttribute('aria-label', labels.scrollTable);
     table.before(region);
     region.append(table);
   }
@@ -76,8 +77,8 @@
       button.type = 'button';
       button.className = 'copy-button';
       button.dataset.copy = code.id;
-      button.textContent = 'Copy';
-      button.setAttribute('aria-label', 'Copy code');
+      button.textContent = labels.copyLabel;
+      button.setAttribute('aria-label', labels.copyCode);
       button.setAttribute('aria-live', 'polite');
       wrapper.prepend(button);
     });
@@ -92,14 +93,14 @@
       window.clearTimeout(resetLabel);
       try {
         await navigator.clipboard.writeText(target.textContent.trim());
-        button.textContent = 'Copied';
+        button.textContent = labels.copied;
       } catch {
         const range = document.createRange();
         range.selectNodeContents(target);
         const selection = window.getSelection();
         selection.removeAllRanges();
         selection.addRange(range);
-        button.textContent = 'Copy selected text';
+        button.textContent = labels.copySelected;
       }
       resetLabel = window.setTimeout(() => { button.textContent = label; }, 1400);
     });

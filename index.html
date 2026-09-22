@@ -1,21 +1,26 @@
 ---
 layout: default
+lang: en
+translation_key: home
 title: "PostgreSQL row cache extension | pg_local_cache"
 seo_title: "PostgreSQL Row Cache Extension | pg_local_cache"
 description: Cache PostgreSQL primary-key rows in shared memory with explicit SQL mget and transaction-aware invalidation. Try the local demo and compare it with batched SQL.
 image: /assets/social-card.png
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-09-22"
 home: true
 permalink: /
 ---
+{% assign lang = page.lang | default: 'en' %}
+{% assign locale = site.data.locales[lang] %}
+{% assign ui = site.data[lang] %}
 <main id="main-content">
   <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
     <div class="hero-copy">
       <h1 id="hero-title">A row cache<br>inside <span>PostgreSQL.</span></h1>
       <p>Read rows by primary key with SQL <code>mget</code> or RESP. PostgreSQL writes automatically invalidate affected cache entries.</p>
       <div class="hero-actions">
-        <a class="button primary" href="{{ '/docs/QUICKSTART.html' | relative_url }}">Try locally <span aria-hidden="true">→</span></a>
-        <a class="button" href="{{ '/docs/BENCHMARKS.html' | relative_url }}">Compare with SQL <span aria-hidden="true">→</span></a>
+        <a class="button primary" href="{{ '/docs/QUICKSTART.html' | prepend: locale.prefix | relative_url }}">Try locally <span aria-hidden="true">→</span></a>
+        <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Compare with SQL <span aria-hidden="true">→</span></a>
       </div>
       <p class="hero-note">Explicit SQL API · PostgreSQL 14–18 · Open source</p>
     </div>
@@ -28,7 +33,7 @@ permalink: /
         <div><dt>SQL mget</dt><dd>186,296 <span>req/s</span></dd></div>
       </dl>
       <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 connections.<br>Warm cache, 1 key/request. Median of 3 × 5 seconds.<br>SQL mget was slower here; batch results differ.</figcaption>
-      <a href="{{ '/docs/benchmarks-go.html' | relative_url }}">Results, raw data &amp; conditions <span aria-hidden="true">→</span></a>
+      <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">Results, raw data &amp; conditions <span aria-hidden="true">→</span></a>
     </figure>
   </section>
 
@@ -47,11 +52,11 @@ permalink: /
 <span class="sql">SELECT</span> local_cache.mget(
   'public.items', ARRAY[42, 7]::bigint[]
 );</code></pre>
-      <p class="terminal-links"><a href="{{ '/docs/node-postgres.html' | relative_url }}">Node.js example</a><a href="{{ '/docs/go.html' | relative_url }}">Go example</a><a href="{{ '/docs/resp.html' | relative_url }}">RESP example</a></p>
+      <p class="terminal-links"><a href="{{ '/docs/node-postgres.html' | prepend: locale.prefix | relative_url }}">Node.js example</a><a href="{{ '/docs/go.html' | prepend: locale.prefix | relative_url }}">Go example</a><a href="{{ '/docs/resp.html' | prepend: locale.prefix | relative_url }}">RESP example</a></p>
     </div>
     {% include diagrams/read-path.html id="home-read" %}
     </div>
-    <a class="text-link" href="{{ '/docs/row-cache-vs-shared-buffers.html' | relative_url }}">What a row-cache hit avoids <span aria-hidden="true">→</span></a>
+    <a class="text-link" href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">What a row-cache hit avoids <span aria-hidden="true">→</span></a>
   </section>
 
   <section class="proof-rail" aria-label="Requirements and behavior">
@@ -69,13 +74,13 @@ permalink: /
       </div>
       <div>
         <p>One runner uses the same keys, batch sizes, connection counts, duration, and result checks. Compare throughput, latency, and PostgreSQL CPU and memory on your machine.</p>
-        <a class="button" href="{{ '/docs/BENCHMARKS.html#run-the-same-comparison-on-every-client' | relative_url }}">Run the comparison <span aria-hidden="true">→</span></a>
+        <a class="button" href="{{ '/docs/BENCHMARKS.html#run-the-same-comparison-on-every-client' | prepend: locale.prefix | relative_url }}">Run the comparison <span aria-hidden="true">→</span></a>
       </div>
     </div>
   </section>
 
   <section id="fit" class="page-section section-grid" aria-labelledby="fit-title">
-    <div class="section-intro"><h2 id="fit-title">Is this your workload?</h2><p>Choosing a cache? <a href="{{ '/docs/postgresql-caching.html' | relative_url }}">Compare PostgreSQL pages, rows, materialized views, and Redis</a>.</p></div>
+    <div class="section-intro"><h2 id="fit-title">Is this your workload?</h2><p>Choosing a cache? <a href="{{ '/docs/postgresql-caching.html' | prepend: locale.prefix | relative_url }}">Compare PostgreSQL pages, rows, materialized views, and Redis</a>.</p></div>
     <div class="fit-columns">
       <section class="fit-group">
         <h3>Worth measuring</h3>
@@ -98,26 +103,30 @@ permalink: /
 cd pg_local_cache
 docker compose -f examples/compose.yaml up --build --wait</code></pre>
     </div>
-    <p class="quick-start-more"><a href="{{ '/docs/QUICKSTART.html#read-as-an-application-role' | relative_url }}">Read sample rows and check cache hits</a>. Already cloned the repository? Run the last command from its root. For an existing server, use the <a href="{{ '/docs/INSTALL_EXISTING.html' | relative_url }}">installation guide</a>.</p>
+    <p class="quick-start-more"><a href="{{ '/docs/QUICKSTART.html#read-as-an-application-role' | prepend: locale.prefix | relative_url }}">Read sample rows and check cache hits</a>. Already cloned the repository? Run the last command from its root. For an existing server, use the <a href="{{ '/docs/INSTALL_EXISTING.html' | prepend: locale.prefix | relative_url }}">installation guide</a>.</p>
     <p class="quick-start-more">Installing on an existing server requires a PostgreSQL restart.</p>
   </section>
 
   <section class="band"><div class="page-section docs-index">
     <h2>Documentation</h2>
     <div class="docs-list">
-      {% for item in site.data.navigation %}
-      <a class="docs-link" href="{{ item.url | relative_url }}"><strong>{{ item.title }}</strong><span>{{ item.description }}</span><b aria-hidden="true">→</b></a>
-      {% endfor %}
+      {% include docs-list.html %}
     </div>
   </div></section>
+
+  <section class="page-section blog-preview" aria-labelledby="blog-title">
+    <h2 id="blog-title">{{ ui.blog_intro }}</h2>
+    {% include blog-list.html %}
+    <a class="text-link" href="{{ '/blog/' | prepend: locale.prefix | relative_url }}">{{ ui.all_articles }} →</a>
+  </section>
 
   <section class="page-section faq" aria-labelledby="faq-title">
     <h2 id="faq-title">Before you try it</h2>
     <div class="faq-list">
-      <details><summary>Does this replace shared_buffers?</summary><p>No. PostgreSQL caches database pages. This extension separately caches serialized whole rows by primary key. See the <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | relative_url }}">read-path comparison</a>.</p></details>
+      <details><summary>Does this replace shared_buffers?</summary><p>No. PostgreSQL caches database pages. This extension separately caches serialized whole rows by primary key. See the <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">read-path comparison</a>.</p></details>
       <details><summary>Does it cache ordinary SELECT queries?</summary><p>No. Only explicit <code>local_cache.mget</code> calls use the SQL cache. Your existing queries keep PostgreSQL's normal execution path.</p></details>
-      <details><summary>Does it replace Redis?</summary><p>No. The optional RESP2 endpoint is limited. There is no general-purpose Redis command set, TTL, pub/sub, or distributed coordination. Compare the <a href="{{ '/docs/postgresql-redis-cache.html' | relative_url }}">PostgreSQL and Redis cache-aside paths</a>.</p></details>
-      <details><summary>How do I check updates and rollback?</summary><p>The <a href="{{ '/docs/cache-invalidation.html' | relative_url }}">invalidation guide</a> includes a two-session test. The runnable example checks uncommitted writes, read-your-writes, rollback, and committed updates.</p></details>
+      <details><summary>Does it replace Redis?</summary><p>No. The optional RESP2 endpoint is limited. There is no general-purpose Redis command set, TTL, pub/sub, or distributed coordination. Compare the <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">PostgreSQL and Redis cache-aside paths</a>.</p></details>
+      <details><summary>How do I check updates and rollback?</summary><p>The <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">invalidation guide</a> includes a two-session test. The runnable example checks uncommitted writes, read-your-writes, rollback, and committed updates.</p></details>
     </div>
   </section>
 </main>

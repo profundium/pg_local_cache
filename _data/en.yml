@@ -1,0 +1,53 @@
+skip: Skip to content
+menu: Menu
+primary_nav: Primary navigation
+language: Language
+try_locally: Try locally
+benchmarks: Benchmarks
+reference: Reference
+blog: Blog
+releases: Releases
+docs: Documentation
+docs_sections: Documentation sections
+on_this_page: On this page
+breadcrumb: Breadcrumb
+updated: Updated
+published: Published
+contributors: pg_local_cache contributors
+copy: Copy
+copy_code: Copy code
+copied: Copied
+copy_selected: Copy selected text
+scroll_table: Scrollable data table
+social_alt: pg_local_cache PostgreSQL row cache data path
+blog_intro: Practical notes on PostgreSQL caching
+blog_description: Measure the read path, understand invalidation, and make batch reads predictable. Field notes with SQL, trade-offs, and reproducible checks.
+read_article: Read article
+all_articles: All articles
+related_articles: Keep reading
+feed: Subscribe via Atom
+topics:
+  performance: Performance
+  correctness: Correctness
+  application: Application design
+read_diagram:
+  title: The SQL mget read path
+  description: The application calls local_cache.mget inside PostgreSQL. After eligibility and snapshot checks, a cache hit returns the stored whole-row payload. A miss or bypass reads the source table. Both paths return rows through the same PostgreSQL connection.
+  application: Application
+  checks: Eligibility + snapshot
+  hit: Hit
+  miss: Miss / bypass
+  stored: Stored
+  row: row
+  source: Source
+  table: table
+  caption: Both paths return serialized whole rows over the same PostgreSQL connection. An eligible source-table read may fill the cache.
+transaction_diagram:
+  title: What readers see during an update
+  description: Under READ COMMITTED, start with revision zero. A transaction updates it to one. The writer sees one through a source-table read, while another session still sees zero. After COMMIT, a new statement in the other session sees one. After ROLLBACK, it still sees zero.
+  committed: Committed row
+  open: Transaction open
+  writer: Writer reads 1
+  other: Other session reads 0
+  next: Next read
+  caption: READ COMMITTED, starting from revision 0. “Next read” means a new statement in the other session after COMMIT or ROLLBACK. The writer reads its own change through the source table.

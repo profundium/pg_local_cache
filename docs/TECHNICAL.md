@@ -1,5 +1,7 @@
 ---
 layout: doc
+lang: en
+translation_key: TECHNICAL
 title: pg_local_cache technical reference
 seo_title: pg_local_cache SQL API, consistency, memory, and RESP2
 description: Technical reference for pg_local_cache SQL mget, transaction-aware invalidation, bounded PostgreSQL shared memory, monitoring, and optional RESP2.
@@ -7,7 +9,7 @@ section: Technical
 permalink: /docs/TECHNICAL.html
 ---
 
-# pg_local_cache technical reference
+# pg_local_cache technical reference {#pg_local_cache-technical-reference}
 
 `pg_local_cache` caches whole rows by complete primary key in bounded PostgreSQL
 shared memory. It exposes an explicit SQL `local_cache.mget` function and an
@@ -16,7 +18,7 @@ optional RESP2 endpoint.
 > **Ordinary SQL stays ordinary:** the extension installs no planner or executor
 > hooks. A normal `SELECT` always uses PostgreSQL and never reads this cache.
 
-## Supported tables and keys
+## Supported tables and keys {#supported-tables-and-keys}
 
 Source tables must be permanent heap tables with a valid primary key and
 without RLS, partitioning, inheritance, or extension ownership.
@@ -31,7 +33,7 @@ Supported key types:
 Unsupported relations are rejected during attachment instead of producing an
 unsafe partial mapping.
 
-## Attach, reconcile, and detach tables
+## Attach, reconcile, and detach tables {#attach-reconcile-and-detach-tables}
 
 `local_cache.attach_table(regclass)` performs one guarded setup sequence:
 
@@ -45,7 +47,7 @@ DDL event triggers invalidate cached mapping metadata. Run
 intentional schema changes. `local_cache.detach_table(...)` removes the mapping
 and its triggers.
 
-## SQL mget API
+## SQL mget API {#sql-mget-api}
 
 Signature:
 
@@ -70,7 +72,7 @@ Contract:
 A prepared source query is cached per function instance, user, relation, and
 mapping generation.
 
-## Read path and safe fallback
+## Read path and safe fallback {#read-path-and-safe-fallback}
 
 Each requested key follows the same path:
 
@@ -86,7 +88,7 @@ Each requested key follows the same path:
 transaction that wrote mapped data bypass the cache. Rows larger than the cache
 payload limit still return from PostgreSQL but are not cached.
 
-## Transaction consistency
+## Transaction consistency {#transaction-consistency}
 
 Before a mapped write can commit, triggers fence the affected key or relation.
 A cache fill carries mapping, global, relation, key, and loader generations, so
@@ -99,7 +101,7 @@ are never authoritative for an older active snapshot.
 Rollback removes transaction-local dirty state without publishing new data.
 Read-your-writes therefore comes from PostgreSQL, not speculative cache content.
 
-## Shared memory and configuration
+## Shared memory and configuration {#shared-memory-and-configuration}
 
 Cache entries, relation states, counters, worker generations, and RESP client
 slots are allocated at postmaster startup. Capacity is bounded. Eviction samples
@@ -131,7 +133,7 @@ the source table instead of allocating unbounded memory.
 These are postmaster settings. Size them before restart; binary installer
 preflight checks the combined plan.
 
-## Optional RESP2 endpoint
+## Optional RESP2 endpoint {#optional-resp2-endpoint}
 
 RESP2 uses the same mappings and shared cache. Wire keys use this shape:
 
@@ -146,7 +148,7 @@ inherit each network client's database ACLs.
 The endpoint has no TLS. Bind it to loopback or place it behind an authenticated
 TLS proxy. Prefer a mode-restricted token file over an inline token.
 
-## Health and monitoring
+## Health and monitoring {#health-and-monitoring}
 
 `local_cache.health()` reports readiness and mapping convergence.
 `local_cache.stats()` returns JSON counters. `local_cache.metrics()` exposes the

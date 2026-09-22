@@ -10,6 +10,13 @@ on:
       - _includes/**
       - assets/**
       - docs/**
+      - blog/**
+      - ru/**
+      - es/**
+      - de/**
+      - fr/**
+      - zh/**
+      - feed.xml
       - index.html
       - sitemap.xml
       - robots.txt
@@ -28,6 +35,13 @@ on:
       - _includes/**
       - assets/**
       - docs/**
+      - blog/**
+      - ru/**
+      - es/**
+      - de/**
+      - fr/**
+      - zh/**
+      - feed.xml
       - index.html
       - sitemap.xml
       - robots.txt

@@ -22,6 +22,8 @@ def exercise(browser, name, paths, base, canonical_base, out, width, height, dar
     context = browser.new_context(viewport={'width': width, 'height': height},
                                   color_scheme='dark' if dark else 'light',
                                   java_script_enabled=js, reduced_motion=motion)
+    if js and name.startswith('chromium'):
+        context.grant_permissions(['clipboard-read', 'clipboard-write'])
     # Keep local/CI visits out of real analytics and avoid an external dependency.
     context.route('https://www.googletagmanager.com/gtag/js?*',
                   lambda route: route.fulfill(status=200, content_type='application/javascript', body=''))
@@ -40,6 +42,11 @@ def exercise(browser, name, paths, base, canonical_base, out, width, height, dar
             relative = path[:-10] if path.endswith('index.html') else path
             response = page.goto(urljoin(base, relative), wait_until='load')
             assert response.status == 200, f'{path}: {response.status}'
+            lang = page.locator('html').get_attribute('lang')
+            prefix = '' if lang == 'en' else lang + '/'
+            local_relative = relative[len(prefix):]
+            expect(page.locator('.language-picker a')).to_have_count(6)
+            expect(page.locator(f'.language-picker a[hreflang="{lang}"]')).to_have_attribute('aria-current', 'page')
             expect(page.locator('h1')).to_have_count(1)
             expect(page.locator('#main-content')).to_be_visible()
             assert page.title().strip(), path
@@ -68,15 +75,13 @@ def exercise(browser, name, paths, base, canonical_base, out, width, height, dar
                 }'''), f'{path}: diagram labels too small or outside canvas at {width}px'
             if motion == 'reduce':
                 assert page.evaluate('document.getAnimations().length === 0'), f'{path}: reduced motion ignored'
-            else:
-                page.evaluate('Promise.all(document.getAnimations().map(animation => animation.finished))')
             # A document may scroll code blocks, but never the whole page horizontally.
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1'), f'{path}: horizontal overflow at {width}px'
             expect(page.locator('.site-header')).to_have_css('position', 'sticky')
             if js:
                 assert page.locator('html').get_attribute('class') == 'js'
-            if not relative:
-                page.screenshot(path=str(out / f'{name}-home.png'), full_page=True)
+            if not local_relative:
+                page.screenshot(path=str(out / f'{name}-{lang}-home.png'), full_page=True, animations="disabled")
                 if js:
                     first_action = page.locator('.hero-actions a').first
                     first_action.focus()
@@ -91,31 +96,38 @@ def exercise(browser, name, paths, base, canonical_base, out, width, height, dar
                         page.keyboard.press('Escape')
                         expect(nav).to_be_hidden()
                         toggle.click()
-                        nav.get_by_role('link', name='Try locally').click()
-                        expect(page).to_have_url(urljoin(base, 'docs/QUICKSTART.html'))
+                        nav.locator('a[href$="/docs/QUICKSTART.html"]').click()
+                        expect(page).to_have_url(urljoin(base, prefix + 'docs/QUICKSTART.html'))
                         expect(page.locator('#site-nav')).to_be_hidden()
-                        page.goto(base, wait_until='load')
-                    summary = page.locator('details summary').first
+                        page.goto(urljoin(base, prefix), wait_until='load')
+                    faq = page.locator('#main-content details').first
+                    summary = faq.locator('summary')
                     summary.click()
-                    expect(page.locator('details').first).to_have_attribute('open', '')
-                    expect(page.locator('details').first.locator('p')).to_be_visible()
+                    expect(faq).to_have_attribute('open', '')
+                    expect(faq.locator('p')).to_be_visible()
                     summary.click()
                     button = page.locator('[data-copy]').first
                     if name.startswith('chromium'):
-                        context.grant_permissions(['clipboard-read', 'clipboard-write'])
                         expected = page.locator('#' + button.get_attribute('data-copy')).text_content().strip()
                         button.click()
-                        expect(button).to_have_text('Copied')
+                        expect(button).to_have_text(page.locator('body').get_attribute('data-copied'))
                         assert page.evaluate('navigator.clipboard.readText()') == expected
                     else:
                         # WebKit disallows programmatic clipboard-read grants; test the real write.
                         button.click()
-                        expect(button).to_have_text('Copied')
+                        expect(button).to_have_text(page.locator('body').get_attribute('data-copied'))
                 else:
                     expect(page.locator('#site-nav')).to_be_visible()
-                page.locator('.hero-actions').get_by_role('link', name='Try locally').click()
-                expect(page).to_have_url(urljoin(base, 'docs/QUICKSTART.html'))
-            elif path == 'docs/QUICKSTART.html':
+                action = page.locator('.hero-actions a').first
+                if js:
+                    action.click()
+                else:
+                    # Exercise native keyboard navigation without JS/rAF stability polling.
+                    expect(action).to_be_visible()
+                    action.focus()
+                    page.keyboard.press('Enter')
+                expect(page).to_have_url(urljoin(base, prefix + 'docs/QUICKSTART.html'))
+            elif local_relative == 'docs/QUICKSTART.html':
                 if js:
                     menu = page.locator('.doc-menu')
                     if width <= 980:
@@ -128,10 +140,34 @@ def exercise(browser, name, paths, base, canonical_base, out, width, height, dar
                     toc.first.click()
                     expect(page).to_have_url(urljoin(base, relative) + target)
                     expect(page.locator(target)).to_be_in_viewport()
-                page.evaluate('window.scrollTo(0, 0)')
-                page.screenshot(path=str(out / f'{name}-quickstart.png'), full_page=True)
+                page.evaluate('window.scrollTo({top: 0, behavior: "instant"})')
+                page.screenshot(path=str(out / f'{name}-{lang}-quickstart.png'), full_page=True, animations="disabled")
+            if local_relative == 'blog/' or local_relative == 'blog/measure-postgresql-row-cache/':
+                page.screenshot(path=str(out / f'{name}-{lang}-{"blog" if local_relative == "blog/" else "article"}.png'), full_page=True, animations="disabled")
+                if js and local_relative != 'blog/':
+                    button = page.locator('[data-copy]').first
+                    if button.count():
+                        button.click()
+                        expect(button).to_have_text(page.locator('body').get_attribute('data-copied'))
+            # Exercise native language switching on each locale's index, guide and article.
+            if local_relative in ('', 'blog/', 'blog/measure-postgresql-row-cache/', 'docs/QUICKSTART.html'):
+                page.goto(urljoin(base, relative), wait_until='load')
+                picker = page.locator('.language-picker')
+                picker.locator('summary').focus()
+                page.keyboard.press('Enter')
+                expect(picker).to_have_attribute('open', '')
+                destination = 'ru' if lang == 'en' else 'en'
+                link = picker.locator(f'a[hreflang="{destination}"]')
+                href = link.get_attribute('href')
+                link.focus()
+                page.keyboard.press('Enter')
+                expect(page).to_have_url(urljoin(base, href))
+                expect(page.locator('html')).to_have_attribute('lang', destination)
+                expected_relative = ('ru/' if destination == 'ru' else '') + local_relative
+                assert page.url == urljoin(base, expected_relative)
+                page.goto(urljoin(base, relative), wait_until='load')
             if page.locator('.diagram').count() and relative:
-                page.locator('.diagram').screenshot(path=str(out / f'{name}-{Path(path).stem}-diagram.png'))
+                page.locator('.diagram').screenshot(path=str(out / f'{name}-{lang}-{Path(path).stem}-diagram.png'), animations="disabled")
             assert not failures, '\n'.join(failures)
             records.append({'page': relative or '/', 'status': 'passed'})
         # Unknown routes must not return a successful index page.
