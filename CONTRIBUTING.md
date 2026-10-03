@@ -5,7 +5,7 @@ Documentation and executable examples target the 2.0 SQL mget API.
 ## Checks before merging
 
 Pull-request CI follows the changed files. Extension changes run source tests, sanitizers,
-Docker integration and PostgreSQL compilation. Documentation changes run the
+Docker integration and PostgreSQL 14–18 tests on amd64 and arm64. Documentation changes run the
 Pages checks; executable-example changes also run PostgreSQL 14–18 smoke tests.
 Package inputs retain their separate archive validation. Manual workflow
 dispatch remains available. The examples matrix is not repeated on a push to
@@ -23,8 +23,23 @@ Quick local checks:
 
 ```bash
 make verify-static source-test source-sanitize
+pg_buildext -o shared_preload_libraries=pg_local_cache \
+  -o pg_local_cache.port=0 \
+  -o pg_local_cache.database=contrib_regression \
+  -o pg_local_cache.role=regress_pglc_worker installcheck
+docker run --rm -v "$PWD:/repo" -w /repo ubuntu:24.04 test/ci.sh 16
 npm --prefix examples/node-postgres ci --ignore-scripts
 node --test examples/node-postgres/queries.test.mjs
+```
+
+## Releasing the extension
+
+Run `scripts/bump-version.sh X.Y.Z`, review and commit the changes, then create
+and push the matching tag:
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 Run the documented database examples locally (Docker and Node.js 20+):
@@ -80,7 +95,7 @@ second URL list. Set `last_modified_at` only after a substantive content edit.
 Do not replace it with the build date.
 
 Search Console and Bing verification tokens go in `google_site_verification`
-and `bing_site_verification` in `_config.yml`. Empty values emit no tags.
+and `bing_site_verification` in `site/_config.yml`. Empty values emit no tags.
 Sitemap: `https://profundium.github.io/pg_local_cache/sitemap.xml`.
 
 Crawlers use the host-level `https://profundium.github.io/robots.txt`, managed
@@ -92,21 +107,25 @@ loader so local/CI visits are not recorded. The extension has no telemetry.
 ## Languages and blog articles
 
 English URLs stay at the root. Russian, Spanish, German, French and Simplified
-Chinese live under `ru/`, `es/`, `de/`, `fr/` and `zh/`. `_data/locales.yml` is the
-language registry; `_data/en.yml` and its five counterparts contain shared UI
-and diagram text. Pages work as static HTML, including language switching.
+Chinese live under `site/ru/`, `site/es/`, `site/de/`, `site/fr/` and `site/zh/`.
+English docs live in root `docs/` and are copied into `site/docs/` at build time.
+`site/_data/locales.yml` is the language registry; `site/_data/en.yml` and its
+five counterparts contain shared UI and diagram text. Pages work as static HTML,
+including language switching.
 
 Every public page has a unique `translation_key`, a `lang` and a self-canonical
 `permalink`. Give every translation the same key and heading `{#id}` anchors.
 Translate full prose, titles, descriptions and accessibility labels. Keep
 executable examples, API names, measured numbers and raw output unchanged.
-Relative links between guides stay within the locale; shared assets and source
-files stay at the repository root. Check those paths when adding translations.
+Relative links between guides stay within the locale; shared site assets live in
+`site/assets/`, while English documentation and benchmark data live in root
+`docs/`. Check those paths when adding translations.
 
-Write articles in `blog/` with `layout: post`, `topic` (`performance`,
+Write articles in `site/blog/` with `layout: post`, `topic` (`performance`,
 `correctness` or `application`), a publication `date` and `last_modified_at`.
-Add the complete article in all five language directories in the same change.
-Use `layout: blog` for the index. The shared lists, related articles, sitemap,
+Add the complete article under each translated `site/<lang>/blog/` directory in
+the same change. Use `layout: blog` for `site/blog/index.md` and translated
+indexes. The shared lists, related articles, sitemap,
 language alternates and six Atom feeds are generated from page metadata.
 Dates describe publication and substantive edits, never the build time.
 

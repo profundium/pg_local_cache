@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #include "postgres.h"
 
 #include "catalog/pg_type_d.h"

@@ -217,9 +217,11 @@ def row_bytes(row_id: int, value: str) -> bytes:
     ).encode()
 
 
-def crud_key(table: str, row_id: int | str) -> str:
+def crud_key(
+    table: str, row_id: int | str, *, database: str = PGDATABASE
+) -> str:
     return (
-        f"CRUD:{PGDATABASE}.public.{table}:"
+        f"CRUD:{database}.public.{table}:"
         + json.dumps({"id": str(row_id)}, separators=(",", ":"))
     )
 
@@ -373,7 +375,7 @@ def test_warm_pipeline_has_no_sql_reads(table: str) -> None:
         client.close()
 
 
-def test_mget(table: str, composite_table: str) -> None:
+def test_mget(table: str, composite_table: str, scoped_table: str) -> None:
     unauthenticated = RespConnection(authenticate=False)
     try:
         try:
@@ -396,7 +398,17 @@ def test_mget(table: str, composite_table: str) -> None:
         key_two = crud_key(table, 2)
         missing = crud_key(table, 9_000_000_000)
         composite = composite_key(composite_table, "tenant-a", 1)
+        scoped = crud_key(scoped_table, 1)
+        other_database = crud_key(table, 1, database=f"{PGDATABASE}_other")
         malformed = f"CRUD:{PGDATABASE}.public.unknown:{{\"id\":\"1\"}}"
+
+        assert mget_one(client, key_one) == row_bytes(1, "initial")
+        assert mget_one(client, scoped) == row_bytes(1, "scope-only")
+        try:
+            mget_one(client, other_database)
+            raise AssertionError("RESP key crossed database scope")
+        except RespError as error:
+            assert "targets a different database" in str(error)
 
         before_invalid = json.loads(client.command("STAT"))
         try:
@@ -773,17 +785,44 @@ def test_transactional_commit_and_rollback(table: str) -> None:
         client.close()
 
 
+# The late-fill race is covered by the concurrent stress test (to be added).
+def test_uncommitted_write_is_not_served_before_commit(table: str) -> None:
+    client = RespConnection()
+    key = crud_key(table, 1)
+    writer: subprocess.Popen[str] | None = None
+    try:
+        # Start from a cache miss so the read performed during the open write
+        # transaction has to fill from PostgreSQL's committed snapshot.
+        assert isinstance(
+            client.command("INVALIDATE", f"CRUD:{PGDATABASE}.public.{table}"), int
+        )
+        writer = start_idle_writer(
+            table,
+            "committed-after-write",
+            application_name=f"pglc_pipeline_uncommitted_write_{os.getpid()}",
+        )
+        assert_eventual_value(client, key, row_bytes(1, "committed"))
+        finish_writer(writer, commit=True)
+        writer = None
+        assert_eventual_value(client, key, row_bytes(1, "committed-after-write"))
+    finally:
+        terminate_writer(writer)
+        client.close()
+
+
 def main() -> None:
     suffix = str(os.getpid())
     table = f"p{suffix}"
     composite_table = f"c{suffix}"
+    scoped_table = f"s{suffix}"
     mapping_namespace = f"pipeline{suffix}"
     composite_namespace = f"pipelinec{suffix}"
+    scoped_namespace = f"pipelines{suffix}"
     granted_roles = list(dict.fromkeys(filter(None, (WORKER_ROLE, WRITER_ROLE))))
     grant = "".join(
         f"GRANT USAGE ON SCHEMA public TO {sql_identifier(role)};"
         f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
-        f"public.{table}, public.{composite_table} "
+        f"public.{table}, public.{composite_table}, public.{scoped_table} "
         f"TO {sql_identifier(role)};"
         for role in granted_roles
     )
@@ -800,12 +839,17 @@ def main() -> None:
         "PRIMARY KEY (tenant, id));"
         f"INSERT INTO public.{composite_table} VALUES "
         "('tenant-a', 1, 'composite');"
+        f"CREATE TABLE public.{scoped_table} "
+        "(id bigint PRIMARY KEY, value text NOT NULL);"
+        f"INSERT INTO public.{scoped_table} VALUES (1, 'scope-only');"
         f"{grant}"
         f"SELECT local_cache.attach_table("
         f"'public.{table}'::regclass, true, '{mapping_namespace}');"
         f"SELECT local_cache.attach_table("
         f"'public.{composite_table}'::regclass, true, "
-        f"'{composite_namespace}')"
+        f"'{composite_namespace}');"
+        f"SELECT local_cache.attach_table("
+        f"'public.{scoped_table}'::regclass, true, '{scoped_namespace}')"
     )
     try:
         bootstrap = RespConnection()
@@ -822,16 +866,18 @@ def main() -> None:
         test_fragmented_suffix_and_order(table)
         test_command_error_does_not_poison_batch(table)
         test_warm_pipeline_has_no_sql_reads(table)
-        test_mget(table, composite_table)
+        test_mget(table, composite_table, scoped_table)
         test_pipeline_budget_is_a_fairness_yield()
         test_half_close_drains_final_pipeline(table)
         test_backpressure_preserves_every_response(table)
         test_close_after_flush(table)
         test_transactional_commit_and_rollback(table)
+        test_uncommitted_write_is_not_served_before_commit(table)
         print(
             "pipeline integration passed: fragmentation/order, warm-hit stats, "
             "error recovery, fairness resume, half-close drain, backpressure, "
             "bounded MGET, close-after-flush, commit/rollback fence, "
+            "database/table key scope and uncommitted-write visibility, "
             "non-superuser writer"
         )
     finally:
@@ -839,8 +885,11 @@ def main() -> None:
             f"SELECT local_cache.detach_table('public.{table}'::regclass);"
             f"SELECT local_cache.detach_table("
             f"'public.{composite_table}'::regclass);"
+            f"SELECT local_cache.detach_table("
+            f"'public.{scoped_table}'::regclass);"
             f"DROP TABLE IF EXISTS public.{table};"
-            f"DROP TABLE IF EXISTS public.{composite_table}"
+            f"DROP TABLE IF EXISTS public.{composite_table};"
+            f"DROP TABLE IF EXISTS public.{scoped_table}"
         )
 
 

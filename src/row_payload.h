@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #ifndef PGLC_ROW_PAYLOAD_H
 #define PGLC_ROW_PAYLOAD_H
 

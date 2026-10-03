@@ -1,25 +1,9 @@
 name: Release PostgreSQL 14-18 Linux artifacts
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    branches: ["master"]
-    types: [completed]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      ref:
-        description: Exact commit SHA to release
-        required: false
-        type: string
-      ci_run_id:
-        description: Successful CI run for the exact release commit
-        required: false
-        type: string
-      publish_pgxn:
-        description: Dispatch PGXN publication after release
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -29,145 +13,74 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  metadata:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (
-        github.event.workflow_run.conclusion == 'success' &&
-        (
-          github.event.workflow_run.event == 'push' ||
-          github.event.workflow_run.event == 'workflow_dispatch'
-        ) &&
-        github.event.workflow_run.head_branch == 'master' &&
-        github.event.workflow_run.head_repository.full_name == github.repository
-      )
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  verify:
+    name: Verify release tag
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      release_ready: ${{ steps.meta.outputs.release_ready }}
-      version: ${{ steps.meta.outputs.version }}
-      stable_tag: ${{ steps.meta.outputs.stable_tag }}
-      commit_tag: ${{ steps.meta.outputs.commit_tag }}
-      sha: ${{ steps.meta.outputs.sha }}
-      short_sha: ${{ steps.meta.outputs.short_sha }}
-      stable_publishable: ${{ steps.meta.outputs.stable_publishable }}
-      workflow_run_id: ${{ steps.meta.outputs.workflow_run_id }}
-    env:
-      TARGET_SHA: >-
-        ${{ github.event_name == 'workflow_run'
-            && github.event.workflow_run.head_sha
-            || inputs.ref
-            || github.sha }}
-      TRIGGER_RUN_ID: >-
-        ${{ github.event_name == 'workflow_run'
-            && github.event.workflow_run.id
-            || inputs.ci_run_id
-            || '' }}
-      GH_TOKEN: ${{ github.token }}
+    timeout-minutes: 15
     steps:
-      - name: Check out the exact successful commit
+      - name: Check out the release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ env.TARGET_SHA }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate release metadata and immutable tag policy
+      - name: Verify tag, version, and commit identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          [[ "$GITHUB_REF" == refs/tags/* ]] || {
+            echo "::error::Run releases from a version tag"
+            exit 1
+          }
+          version="$(sed -n "s/^default_version = '\\([0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*\\)'$/\\1/p" pg_local_cache.control)"
+          [[ -n "$version" && "$GITHUB_REF_NAME" == "v${version}" ]] || {
+            echo "::error::Tag ${GITHUB_REF_NAME} must match v<default_version> (v${version})"
+            exit 1
+          }
+          scripts/bump-version.sh --check
+          sha="$(git rev-parse HEAD)"
+          [[ "$sha" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")" == "$sha" ]]
+
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      stable_tag: ${{ steps.meta.outputs.stable_tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read release metadata
         id: meta
         shell: bash
         run: |
           set -Eeuo pipefail
 
+          version="$(sed -n "s/^default_version = '\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)'$/\1/p" pg_local_cache.control)"
           sha="$(git rev-parse HEAD)"
-          [[ "$sha" == "$TARGET_SHA" ]]
-          master_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/master" --jq .sha)"
-          if [[ "$sha" != "$master_sha" ]]; then
-            echo "::notice::Skipping ${sha}; master advanced to ${master_sha}"
-            {
-              echo "release_ready=false"
-              echo "sha=${sha}"
-              echo "workflow_run_id=${TRIGGER_RUN_ID}"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          plan="$(python3 scripts/auto_version.py --json)"
-          action="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["action"])' <<<"$plan")"
-          reason="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])' <<<"$plan")"
-          if [[ "$action" != "release" ]]; then
-            echo "::notice::No release from ${sha}: ${reason}"
-            {
-              echo "release_ready=false"
-              echo "sha=${sha}"
-              echo "workflow_run_id=${TRIGGER_RUN_ID}"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          mapfile -t versions < <(
-            sed -n \
-              "s/^default_version = '\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)'$/\1/p" \
-              pg_local_cache.control
-          )
-          [[ "${#versions[@]}" == 1 ]] || {
-            echo "::error::control file needs one strict X.Y.Z default_version"
-            exit 1
-          }
-
-          version="${versions[0]}"
-          stable_tag="v${version}"
           short_sha="${sha:0:12}"
-          commit_tag="master-${short_sha}"
-          test -f "sql/pg_local_cache--${version}.sql"
-          grep -Fq 'pg_local_cache--' Dockerfile
-          grep -Fqx "#define PGLC_VERSION \"${version}\"" src/pg_local_cache.h
-          python3 scripts/validate_pgxn_meta.py
-
-          if stable_sha="$(
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${stable_tag}" \
-              --jq .sha 2>/dev/null
-          )"; then
-            echo "::error::${stable_tag} already points to ${stable_sha}; refusing version reuse"
-            exit 1
-          fi
-
-          workflow_run_id="$TRIGGER_RUN_ID"
-          if [[ -z "$workflow_run_id" ]]; then
-            workflow_run_id="$(
-              gh api \
-                "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=master&head_sha=${sha}&status=success&per_page=100" \
-                --jq '[
-                  .workflow_runs[]
-                  | select(
-                      .event == "push" or
-                      .event == "workflow_dispatch"
-                    )
-                ][0].id // empty'
-            )"
-          fi
-
-          [[ -n "$workflow_run_id" ]] || {
-            echo "::error::No successful master CI run exists for ${sha}"
-            exit 1
-          }
-
           {
-            echo "release_ready=true"
             echo "version=${version}"
-            echo "stable_tag=${stable_tag}"
-            echo "commit_tag=${commit_tag}"
+            echo "stable_tag=${GITHUB_REF_NAME}"
             echo "sha=${sha}"
             echo "short_sha=${short_sha}"
-            echo "stable_publishable=true"
-            echo "workflow_run_id=${workflow_run_id}"
           } >> "$GITHUB_OUTPUT"
 
   binary:
-    needs: metadata
-    if: needs.metadata.outputs.release_ready == 'true'
+    needs: [metadata, verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
@@ -329,8 +242,6 @@ jobs:
       VERSION: ${{ needs.metadata.outputs.version }}
       RELEASE_SHA: ${{ needs.metadata.outputs.sha }}
       SHORT_SHA: ${{ needs.metadata.outputs.short_sha }}
-      TRIGGER_RUN_ID: ${{ needs.metadata.outputs.workflow_run_id }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out exact source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -383,7 +294,9 @@ jobs:
           (
             cd "$extracted_root"
             bash -n scripts/install-existing.sh
-            make verify-static source-test pgxn-check
+            # The archive omits checkout-only inputs (docker/, debian/, rpm/);
+            # verify-static runs on the checkout in ci.yml.
+            make source-test
           )
           python3 scripts/release_archive.py verify-identity \
             --archive "$source_archive" --identity "$source_identity"
@@ -414,20 +327,17 @@ jobs:
           retention-days: 90
 
   publish:
-    needs: [metadata, package]
+    needs: [ci, metadata, package, verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
-      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       VERSION: ${{ needs.metadata.outputs.version }}
       STABLE_TAG: ${{ needs.metadata.outputs.stable_tag }}
-      COMMIT_TAG: ${{ needs.metadata.outputs.commit_tag }}
       RELEASE_SHA: ${{ needs.metadata.outputs.sha }}
-      STABLE_PUBLISHABLE: ${{ needs.metadata.outputs.stable_publishable }}
     steps:
       - name: Download verified packages
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
@@ -439,24 +349,10 @@ jobs:
         working-directory: dist
         run: sha256sum --check SHA256SUMS
 
-      - name: Publish immutable commit prerelease and optional stable release
+      - name: Publish stable release
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          create_ref() {
-            local tag="$1" existing
-            existing=""
-            if existing="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha 2>/dev/null)"; then
-              [[ "$existing" == "$RELEASE_SHA" ]] || {
-                echo "::error::Refusing to move immutable tag ${tag}"
-                return 1
-              }
-              return
-            fi
-            gh api --method POST "repos/${GH_REPO}/git/refs" \
-              -f "ref=refs/tags/${tag}" -f "sha=${RELEASE_SHA}" >/dev/null
-          }
 
           upload_missing_assets() {
             local tag="$1" existing_assets temporary
@@ -478,33 +374,49 @@ jobs:
             done
           }
 
-          create_ref "$COMMIT_TAG"
-          if ! gh release view "$COMMIT_TAG" >/dev/null 2>&1; then
-            gh release create "$COMMIT_TAG" \
-              --target "$RELEASE_SHA" --draft --prerelease \
-              --title "pg_local_cache ${VERSION} — master ${RELEASE_SHA:0:12}" \
-              --notes "Successful master build ${RELEASE_SHA}. Includes PostgreSQL 14–18 Linux glibc/musl binaries, checksums and installer."
+          tag_sha="$(gh api "repos/${GH_REPO}/commits/${STABLE_TAG}" --jq .sha)"
+          [[ "$tag_sha" == "$RELEASE_SHA" ]] || {
+            echo "::error::${STABLE_TAG} points to ${tag_sha}, not ${RELEASE_SHA}"
+            exit 1
+          }
+          if ! gh release view "$STABLE_TAG" >/dev/null 2>&1; then
+            gh release create "$STABLE_TAG" \
+              --target "$RELEASE_SHA" --draft \
+              --title "pg_local_cache ${VERSION} — PostgreSQL 14–18" \
+              --notes "Immutable pg_local_cache ${VERSION} release for PostgreSQL 14–18 on Linux amd64 (glibc and musl). Read docs/INSTALL_EXISTING.md before installing on an existing cluster."
           fi
-          upload_missing_assets "$COMMIT_TAG"
-          gh release edit "$COMMIT_TAG" --draft=false --prerelease
+          upload_missing_assets "$STABLE_TAG"
+          gh release edit "$STABLE_TAG" --draft=false --prerelease=false
 
-          if [[ "$STABLE_PUBLISHABLE" == "true" ]]; then
-            create_ref "$STABLE_TAG"
-            if ! gh release view "$STABLE_TAG" >/dev/null 2>&1; then
-              gh release create "$STABLE_TAG" \
-                --target "$RELEASE_SHA" --draft \
-                --title "pg_local_cache ${VERSION} — PostgreSQL 14–18" \
-                --notes "Immutable pg_local_cache ${VERSION} release for PostgreSQL 14–18 on Linux amd64 (glibc and musl). Read docs/INSTALL_EXISTING.md before installing on an existing cluster."
-            fi
-            upload_missing_assets "$STABLE_TAG"
-            gh release edit "$STABLE_TAG" --draft=false --prerelease=false
-          fi
+  pgxn:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: pgxn/pgxn-tools:latest
+    steps:
+      - name: Check out the published commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Dispatch PGXN publication
-        if: inputs.publish_pgxn
+      - name: Check version metadata
+        run: scripts/bump-version.sh --check
+
+      - name: Check tag version
         shell: bash
         run: |
-          gh workflow run pgxn.yml \
-            --ref master \
-            --raw-field "ref=${RELEASE_SHA}" \
-            --field publish=true
+          version="$(awk -F"'" '/^default_version = / {print $2}' pg_local_cache.control)"
+          test "$GITHUB_REF_NAME" = "v$version"
+
+      - name: Build PGXN distribution
+        run: pgxn-bundle
+
+      - name: Publish to PGXN
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: pgxn-release

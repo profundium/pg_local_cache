@@ -35,7 +35,7 @@ memory was 215.0 versus 205.5 MiB. Client CPU was 0.84 versus 0.87 cores.
 For **one key** at 64 connections, SQL was faster: 55,409 versus 53,646
 requests/s. The batch result does not apply to single-key reads.
 
-[Raw measurements](../assets/benchmarks/2026-09-14-m3-max-clients.json)
+[Raw measurements](benchmarks/2026-09-14-m3-max-clients.json)
 include latency percentiles, resource samples and source revisions.
 
 ### Reads mixed with writes {#reads-mixed-with-writes}

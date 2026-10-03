@@ -389,8 +389,15 @@ resolve_package_build_id() {
         stage_release_file "$build_id_file"
         build_id_file="$staged_file"
         packaged_build_id="$(<"$build_id_file")"
-        [[ "$(stat -c '%s' "$build_id_file")" == "${#packaged_build_id}" || "$(stat -c '%s' "$build_id_file")" == "$(( ${#packaged_build_id} + 1 ))" ]] \
-            || fail "BUILD-ID must contain one line"
+        if [[ "$packaged_build_id" == '$Format'* ]]; then
+            packaged_build_id=""
+            [[ -d "$release_root/.git" && -z "$(run_as_release_owner git -C "$release_root" status --porcelain --untracked-files=all)" ]] \
+                || fail "release needs PGLC_BUILD_ID, BUILD-ID, or an exact clean Git checkout"
+            packaged_build_id="$(run_as_release_owner git -C "$release_root" rev-parse --verify HEAD)"
+        else
+            [[ "$(stat -c '%s' "$build_id_file")" == "${#packaged_build_id}" || "$(stat -c '%s' "$build_id_file")" == "$(( ${#packaged_build_id} + 1 ))" ]] \
+                || fail "BUILD-ID must contain one line"
+        fi
     elif [[ -n "$binary_release_build_id" ]]; then
         packaged_build_id="$binary_release_build_id"
     elif [[ -d "$release_root/.git" && -z "$(run_as_release_owner git -C "$release_root" status --porcelain --untracked-files=all)" ]]; then

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #include "postgres.h"
 
 #include <arpa/inet.h>
@@ -158,8 +159,6 @@ pg_local_cache_worker_main(Datum main_arg)
 	before_shmem_exit(worker_before_exit, (Datum) 0);
 	set_worker_mapping_generation(0);
 	set_worker_mappings_incomplete(true);
-	pglc_note_worker_start();
-	worker_counted_active = true;
 
 	mapping_context = AllocSetContextCreate(TopMemoryContext,
 										"pg_local_cache mappings",
@@ -173,6 +172,9 @@ pg_local_cache_worker_main(Datum main_arg)
 	maybe_reload_mappings();
 
 	listener = create_listener();
+	/* Count the worker only once it accepts connections: health() reads this. */
+	pglc_note_worker_start();
+	worker_counted_active = true;
 	ereport(LOG,
 			(errmsg("pg_local_cache worker %d listening on %s:%d for database \"%s\"",
 					DatumGetInt32(main_arg), pglc_bind_address, pglc_port,

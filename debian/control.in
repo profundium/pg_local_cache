@@ -1,0 +1,20 @@
+Source: pg-local-cache
+Section: database
+Priority: optional
+Maintainer: maxbronnikov10 <bronnikovmr@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               postgresql-server-dev-all (>= 217~)
+Standards-Version: 4.7.2
+Homepage: https://github.com/profundium/pg_local_cache
+Vcs-Git: https://github.com/profundium/pg_local_cache.git
+Vcs-Browser: https://github.com/profundium/pg_local_cache
+Rules-Requires-Root: no
+
+Package: postgresql-PGVERSION-pg-local-cache
+Architecture: any
+Section: database
+Depends: ${misc:Depends}, ${shlibs:Depends}, ${postgresql:Depends}
+Description: transaction-aware PostgreSQL primary-key row cache
+ pg_local_cache is a PostgreSQL extension that caches complete rows by primary
+ key, with transaction-aware invalidation and an optional authenticated RESP2
+ endpoint. PostgreSQL remains the source of truth.

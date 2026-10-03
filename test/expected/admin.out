@@ -1,0 +1,24 @@
+\set ECHO none
+create-extension=|t
+update-paths=|t
+worker-role-and-grants=|t
+reject-no-primary-key=|t
+reject-partitioned=|t
+reject-inherited=|t
+reject-rls=|t
+reject-unlogged=|t
+reject-temporary=|t
+attach-shape=|t
+mapping-row=|t
+triggers-installed=|t
+reconcile-table=|t
+reconcile-all=|t
+health-shape=|t
+stats-shape=|t
+metrics-shape=|t
+invalidate-namespace=|t
+alter-keeps-mapping=|t
+detach-returns-true=|t
+detach-removes-trigger-and-mapping=|t
+drop-fixture-attached=|t
+drop-removes-mapping=|t

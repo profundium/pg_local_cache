@@ -1,0 +1,10 @@
+#!/usr/bin/make -f
+
+include /usr/share/postgresql-common/pgxs_debian_control.mk
+
+override_dh_pgxs_test:
+	# Tests run via autopkgtest (debian/tests/installcheck), with required preload settings.
+	@:
+
+%:
+	dh $@ --with pgxs_loop

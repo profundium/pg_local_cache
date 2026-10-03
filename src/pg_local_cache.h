@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #ifndef PG_LOCAL_CACHE_H
 #define PG_LOCAL_CACHE_H
 

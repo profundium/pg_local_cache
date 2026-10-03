@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+pg_buildext -o shared_preload_libraries=pg_local_cache \
+    -o pg_local_cache.port=0 \
+    -o pg_local_cache.database=contrib_regression \
+    -o pg_local_cache.role=regress_pglc_worker installcheck
