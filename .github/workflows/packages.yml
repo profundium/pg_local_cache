@@ -91,7 +91,8 @@ jobs:
   rpm:
     name: RPM package (PostgreSQL 16)
     runs-on: ubuntu-24.04
-    container: rockylinux:9
+    # The Docker Hub "rockylinux" image stopped at 9.3; PGDG only serves 9.6+.
+    container: rockylinux/rockylinux:9
     timeout-minutes: 30
     steps:
       - name: Install git
