@@ -62,7 +62,7 @@ jobs:
           retry /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           retry apt-get update
           retry apt-get install -y --no-install-recommends \
-            devscripts debhelper fakeroot postgresql-server-dev-all \
+            build-essential devscripts debhelper fakeroot postgresql-server-dev-all \
             postgresql-server-dev-14 postgresql-server-dev-15 \
             postgresql-server-dev-16 postgresql-server-dev-17 \
             postgresql-server-dev-18
@@ -117,8 +117,11 @@ jobs:
 
           retry dnf -y install \
             https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
-          dnf -qy module disable postgresql
-          retry dnf --enablerepo=crb -y install rpm-build postgresql16-devel clang gzip git
+          # Only the repositories this build needs: a flaky mirror of another
+          # PGDG major must not fail the job.
+          repos=(--disablerepo='pgdg*' --enablerepo=pgdg16 --enablerepo=pgdg-common --enablerepo=crb)
+          retry dnf "${repos[@]}" -qy module disable postgresql
+          retry dnf "${repos[@]}" -y install rpm-build postgresql16-devel clang gzip git
 
           version="$(sed -n "s/^default_version = '\([^']*\)'$/\1/p" pg_local_cache.control)"
           [[ -n "$version" ]] || { echo "could not read default_version" >&2; exit 1; }
