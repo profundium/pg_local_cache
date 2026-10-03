@@ -9,6 +9,8 @@ All notable changes to pg_local_cache are documented here. This project follows
 ### Added
 
 - Debian and RPM package references and package-build CI for PGDG repositories.
+- Release `.deb` and `.rpm` packages, a source tarball, `SHA256SUMS`, and build
+  provenance attestations.
 - pg_regress administrative coverage, package installcheck, and security policy.
 - SPDX license identifiers to all C source and header files.
 
@@ -21,6 +23,7 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ### Removed
 
+- Remove the bespoke installer and glibc/musl binary tarballs.
 - Remove duplicate historical install SQL copies, obsolete release helpers, and
   superseded contract tests; retain current install SQL and upgrade paths.
 

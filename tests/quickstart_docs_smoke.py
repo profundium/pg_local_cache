@@ -6,9 +6,20 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from install_docs_smoke import blocks
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def blocks(document: str, heading: str, language: str) -> list[str]:
+    section = re.split(
+        r"\n## " + re.escape(heading) + r"(?: \{#[^}]+\})?\n",
+        document,
+        maxsplit=1,
+    )[1].split("\n## ", 1)[0]
+    result = re.findall(rf"```{language}\n(.*?)\n```", section, re.DOTALL)
+    if not result:
+        raise ValueError(f"No {language} block under {heading}")
+    return result
 
 
 def main():

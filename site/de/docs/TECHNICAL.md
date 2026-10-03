@@ -141,8 +141,8 @@ zurück, statt unbegrenzt Speicher zu allokieren.
 | `pg_local_cache.auth_token` | leer | Token inline, nur für Entwicklung |
 | `pg_local_cache.allow_superuser` | `off` | Rollenüberschreibung, nur für Entwicklung |
 
-Dies sind Postmaster-Einstellungen. Dimensionieren Sie sie vor dem Neustart; die
-Vorprüfung des Binärinstallers prüft den kombinierten Plan.
+Dies sind Postmaster-Einstellungen. Dimensionieren Sie sie vor dem Neustart.
+Der [Installationsleitfaden](INSTALL_EXISTING.md) beschreibt Pakete und Neustarts.
 
 ## Optionaler RESP2-Endpunkt {#optional-resp2-endpoint}
 
@@ -179,5 +179,5 @@ Datenbanklesevorgänge, Invalidationen, abgelehnte Aufnahmen, Dirty-Key-Fallback
 Singleflight-, Worker- und RESP-Zähler bleiben getrennt.
 
 Als Nächstes verwenden Sie den [Installationsleitfaden](INSTALL_EXISTING.md) für
-verifizierte Binärdateien, PGXS-Quellcode-Builds, kontrollierte Neustarts,
-Prüfung und Wiederherstellung.
+Debian- und RPM-Paketprüfung, PGXS-Quellcode-Builds, Konfiguration, Neustarts,
+Upgrades und Deinstallation.

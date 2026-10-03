@@ -4,107 +4,64 @@ lang: de
 translation_key: INSTALL_EXISTING
 title: pg_local_cache auf PostgreSQL 14–18 installieren
 seo_title: pg_local_cache auf PostgreSQL 14–18 installieren
-description: Installieren Sie die pg_local_cache-PostgreSQL-Erweiterung mit verifizierten Linux-Binärdateien oder PGXS, konfigurieren Sie Preload und Neustart, prüfen Sie die Installation und stellen Sie sie sicher wieder her.
+description: Installieren Sie ein geprüftes Debian- oder RPM-Paket, verwenden Sie PGXN oder PGXS, konfigurieren Sie Preload, starten Sie PostgreSQL neu und initialisieren, aktualisieren oder entfernen Sie pg_local_cache.
 section: Installation
 permalink: /de/docs/INSTALL_EXISTING.html
-last_modified_at: "2026-09-05"
+last_modified_at: "2026-10-04"
 ---
 
 # pg_local_cache auf einem bestehenden PostgreSQL-Server installieren {#install-pg_local_cache-on-an-existing-postgresql-server}
 
-Installieren Sie die Erweiterung mit einem verifizierten Linux-Paket oder bauen
-Sie sie mit PostgreSQLs PGXS-Toolchain. Beide Wege erfordern vor
-`CREATE EXTENSION` einen kontrollierten PostgreSQL-Neustart.
+Diese Anleitung gilt für Linux und PostgreSQL 14–18. Installation und Konfiguration erfordern Datenbank-Superuserrechte. Das Eintragen der Erweiterung in <code>shared_preload_libraries</code> erfordert einen Neustart von PostgreSQL.
 
-> **Wartungsfenster einplanen:** Die erste Aktivierung ändert
-> `shared_preload_libraries`. Bewahren Sie vorhandene Einträge und starten Sie
-> den richtigen Cluster erst neu, wenn die Vorprüfungen erfolgreich sind.
+## 1. Voraussetzungen {#choose-an-installation-path}
 
-## Installationsweg wählen {#choose-an-installation-path}
+Verwenden Sie beim Bauen aus dem Quellcode das <code>pg_config</code> des Zielservers. Planen Sie den Neustart mit dem Dienst oder Operator, der den PostgreSQL-Cluster verwaltet.
 
-| Weg | Geeignet für | Zuständig für Neustart |
-|---|---|---|
-| Neueste verifizierte Binärdatei | Lokaler Linux-amd64-Cluster | `pg_ctl`-Bootstrap |
-| Feste verifizierte Binärdatei | Produktion und verwaltete Abläufe | systemd, `pg_ctl` oder externer Operator |
-| PGXS-Quellcode-Build | Nicht unterstützte Plattform oder benutzerdefinierte PostgreSQL-Installation | Ihr normaler Betriebsablauf |
+## 2. Paket installieren {#fast-binary-install}
 
-Veröffentlichte Binärdateien unterstützen PostgreSQL 14–18 unter Linux amd64 mit
-glibc oder musl. Die Beispiele mit fester Version verwenden pg_local_cache 2.0.1.
+Laden Sie das Paket und <code>SHA256SUMS</code> für PostgreSQL-Hauptversion und Architektur aus demselben [GitHub-Release](https://github.com/profundium/pg_local_cache/releases) herunter.
 
-## Schnelle Binärinstallation {#fast-binary-install}
+### Debian und Ubuntu {#controlled-binary-install}
 
-Für einen lokalen, durch `pg_ctl` kontrollierten Cluster:
+Laden Sie <code>postgresql-&lt;major&gt;-pg-local-cache_&lt;version&gt;-1_&lt;arch&gt;.deb</code> herunter. Die Pakete werden auf Debian 12 gebaut und benötigen glibc 2.36 oder neuer. Das Manifest enthält alle Release-Dateien; bei einer Teilauswahl benötigen Sie <code>--ignore-missing</code>.
+
+Prüfen Sie Prüfsumme und Build-Provenienz, installieren Sie anschließend das Paket:
 
 ```bash
-curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh | bash -s -- app
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify <file>.deb --repo profundium/pg_local_cache
+sudo apt install ./<file>.deb
 ```
 
-Ersetzen Sie `app` durch den Datenbanknamen. Dadurch wird der reine SQL-Modus
-mit `pg_local_cache.port = 0` aktiviert.
+### RHEL, Rocky Linux und AlmaLinux 9
 
-Der Bootstrap löst einen Release-Tag auf, verifiziert `fetch-release.sh` gegen
-die `SHA256SUMS` dieses Releases, wählt das passende PostgreSQL- und libc-Archiv,
-verifiziert es, installiert es, startet neu, erstellt die Erweiterung und führt
-`local_cache.health()` aus.
-
-Wenn `curl | bash` außerhalb Ihrer Richtlinie liegt, prüfen Sie das Skript zuerst:
+Laden Sie das passende <code>.rpm</code> für PostgreSQL-Hauptversion und Architektur herunter. Prüfen und installieren Sie es:
 
 ```bash
-curl -fsSLO https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh
-less install-latest.sh
-bash install-latest.sh app
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify <file>.rpm --repo profundium/pg_local_cache
+sudo dnf install ./<file>.rpm
 ```
 
-## Kontrollierte Binärinstallation {#controlled-binary-install}
-
-Laden Sie ein festes Release mit seinem veröffentlichten Helfer herunter:
+### PGXN
 
 ```bash
-curl -fsSLO https://github.com/profundium/pg_local_cache/releases/download/v2.0.1/fetch-release.sh
-bash fetch-release.sh --release-tag v2.0.1 --output-directory ./pg_local_cache-package
+pgxn install pg_local_cache
 ```
 
-Führen Sie die Vorprüfung aus und wählen Sie den Zuständigen für den Neustart explizit:
+### Aus dem Quellcode bauen {#build-from-source}
+
+Installieren Sie die Entwicklungs-Header der Zielversion von PostgreSQL, einen C-Compiler und GNU Make. Bauen und installieren Sie die Erweiterung mit dem <code>pg_config</code> dieser Version:
 
 ```bash
-sudo ./pg_local_cache-package/install.sh preflight --database app
-sudo ./pg_local_cache-package/install.sh install \
-  --database app \
-  --restart-method systemd \
-  --systemd-unit postgresql@16-main
+make PG_CONFIG=/path/to/pg_config && \
+  sudo make PG_CONFIG=/path/to/pg_config install
 ```
 
-Unterstützte Neustartmethoden sind `systemd`, `pg_ctl` und `none`. Verwenden Sie
-`none` mit Patroni, einem Kubernetes-Operator oder einer anderen externen
-Steuerung. Starten Sie über diese Steuerung neu und prüfen Sie anschließend:
+## 3. <code>postgresql.conf</code> konfigurieren {#configure-before-restart}
 
-```bash
-sudo ./pg_local_cache-package/install.sh verify --database app
-```
-
-Das Installationsprogramm gibt ein Zustandsverzeichnis aus. Bewahren Sie es auf,
-bis die Prüfung erfolgreich ist; es enthält das für `recover` erforderliche
-Online-Backup.
-
-## Aus dem Quellcode bauen {#build-from-source}
-
-Verwenden Sie dasselbe `pg_config` wie der Ziel-PostgreSQL-Server. Installieren
-Sie zuerst dessen Server-Entwicklungsheader, einen C-Compiler und GNU Make.
-
-```bash
-git clone --branch v2.0.1 --depth 1 https://github.com/profundium/pg_local_cache.git
-cd pg_local_cache
-make PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
-sudo make install PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
-```
-
-Bauen Sie aus einem sauberen Checkout, damit die Binärdatei ihren Git-Commit
-aufzeichnet. Die Quellinstallation kopiert nur Erweiterungsdateien. Fahren Sie
-unten mit Preload-Konfiguration, Neustart und SQL-Initialisierung fort.
-
-## Vor dem Neustart konfigurieren {#configure-before-restart}
-
-Minimale SQL-only-Konfiguration mit Standardkapazität und Speicherbudget:
+Behalten Sie vorhandene Einträge in <code>shared_preload_libraries</code> bei und ergänzen Sie <code>pg_local_cache</code>. Ersetzen Sie <code>app</code> durch den Namen der Datenbank, die die Erweiterung bedient. Minimale SQL-only-Konfiguration:
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
@@ -115,22 +72,44 @@ pg_local_cache.memory_budget_mb = 384
 pg_local_cache.port = 0
 ```
 
-Behalten Sie vorhandene Einträge in `shared_preload_libraries` bei. Ersetzen Sie
-hier und in den folgenden SQL-Grants `app` durch den tatsächlichen
-Datenbanknamen. Das Speicherbudget gilt für die Erweiterung, nicht für den
-gesamten PostgreSQL-Server.
+Für RESP2 sollte der Listener nur auf Loopback oder hinter einem authentifizierten TLS-Proxy erreichbar sein. Verwenden Sie eine geschützte Token-Datei:
 
-Dimensionieren Sie `cache_entries`, Relationszustände, Clients, Worker und
-`memory_budget_mb` gemeinsam. Die Vorprüfung des Binärinstallers weist
-widersprüchliche Pläne zurück. Bei Quellcode-Builds ist dieselbe
-Kapazitätsprüfung vor dem Neustart erforderlich; erhöhen Sie die Zahl der
-Einträge nicht, ohne das Speicherbudget zu überprüfen.
+### RESP2-Einstellungen {#enable-optional-resp2}
 
-## Eine Quellinstallation initialisieren {#initialize-a-source-installation}
+```conf
+shared_preload_libraries = 'pg_local_cache'
+pg_local_cache.database = 'app'
+pg_local_cache.role = 'local_cache_worker'
+pg_local_cache.port = 6380
+pg_local_cache.bind_address = '127.0.0.1'
+pg_local_cache.auth_token_file = '/secure/path/token'
+```
 
-Verbinden Sie sich nach dem Neustart als Datenbank-Superuser mit der
-konfigurierten Datenbank. Führen Sie bei einer ersten manuellen Installation
-Folgendes aus:
+Stimmen Sie Cache-Einträge, Relationszustände, Worker, Clients und <code>memory_budget_mb</code> gemeinsam ab. Hinweise zu Kapazität und Speicher finden Sie in der [technischen Referenz](TECHNICAL.md#shared-memory-and-configuration).
+
+## 4. PostgreSQL neu starten
+
+Verwenden Sie den Dienst oder Operator, der den Cluster verwaltet. Mit systemd:
+
+```bash
+# Debian and Ubuntu
+sudo systemctl restart postgresql@<major>-main
+# RHEL, Rocky Linux, and AlmaLinux
+sudo systemctl restart postgresql-<major>
+```
+
+Ändern Sie bei Patroni die Clusterkonfiguration und starten Sie den Cluster über Patroni neu:
+
+```bash
+patronictl edit-config <cluster>
+patronictl restart <cluster>
+```
+
+Erstellen Sie für Kubernetes ein eigenes PostgreSQL-Image mit dem passenden Paket und rollen Sie es über Ihren Operator aus. CloudNativePG-Erweiterungsimages sind geplant.
+
+## 5. Initialisieren {#initialize-a-source-installation}
+
+Verbinden Sie sich als Datenbank-Superuser mit der konfigurierten Datenbank. Erstellen Sie die Erweiterung und eine eigene Worker-Rolle und gewähren Sie ihr Zugriff auf die Metadaten:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_local_cache;
@@ -141,101 +120,42 @@ GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
 GRANT SELECT ON TABLE local_cache.mapping TO local_cache_worker;
 ```
 
-Der Binärinstaller erstellt diese Rolle und ihre Metadaten-Grants; überspringen
-Sie diesen Block, wenn diese Einrichtung bereits erfolgt ist. Verwenden Sie bei
-einem eigenen `pg_local_cache.role` diesen Namen konsequent. Verwenden Sie keine
-Rolle wieder, der Anwendungstabellen gehören.
+Die Worker-Rolle wird auch bei <code>pg_local_cache.port = 0</code> benötigt. Verwenden Sie nicht die Rolle, der Anwendungstabellen gehören. Binden Sie jede permanente Tabelle mit einem unterstützten Primärschlüssel an:
 
-**Die Rolle ist auch bei `pg_local_cache.port = 0` erforderlich.** Das Anhängen
-von Tabellen validiert sie auch im SQL-only-Modus. Sie muss vom Eigentümer der
-Tabelle getrennt sein und die oben gezeigten Attribute und Metadaten-Grants
-besitzen. `attach_table` verwaltet ihren Zugriff auf jede zugeordnete Tabelle.
-Für den SQL-only-Betrieb sind weder Passwort noch Netzwerk-Listener erforderlich.
-
-## Eine Tabelle anhängen {#attach-a-table}
-
-Verwenden Sie eine vorhandene dauerhafte Tabelle mit einem unterstützten
-Primärschlüssel. Als Datenbank-Superuser in der konfigurierten Datenbank:
+### Tabelle anbinden {#attach-a-table}
 
 ```sql
 SELECT local_cache.attach_table('public.items'::regclass);
+```
+
+### Bereitschaft prüfen {#verify-cold-fill-and-warm-hit}
+
+```sql
 SELECT local_cache.health();
 ```
 
-Gewähren Sie einer vorhandenen Anwendungsrolle nur die nötigen Rechte:
+Prüfen Sie, ob die Erweiterung bereit ist und die Zuordnungen aktuell sind.
+
+## 6. Aktualisieren {#recover-a-failed-binary-install}
+
+Installieren Sie das neue Paket und starten Sie PostgreSQL über den zuständigen Dienst oder Operator neu. Aktualisieren Sie danach die Erweiterung als Datenbank-Superuser:
 
 ```sql
-GRANT SELECT ON public.items TO app_user;
-GRANT USAGE ON SCHEMA local_cache TO app_user;
-GRANT EXECUTE ON FUNCTION local_cache.mget(regclass, anyarray) TO app_user;
+ALTER EXTENSION pg_local_cache UPDATE;
 ```
 
-Gewöhnliche `SELECT`-Abfragen werden von der Erweiterung nicht umgeschrieben.
+## 7. Deinstallieren {#troubleshooting}
 
-## Kaltes Füllen und warmen Treffer prüfen {#verify-cold-fill-and-warm-hit}
+Trennen Sie alle angebundenen Tabellen und entfernen Sie die Erweiterung als Datenbank-Superuser. Entfernen Sie <code>pg_local_cache</code> aus <code>shared_preload_libraries</code>, starten Sie PostgreSQL neu und entfernen Sie das Paket mit dem passenden Paketmanager:
 
 ```sql
-SELECT local_cache.invalidate('public.items');
-SELECT local_cache.mget('public.items'::regclass, ARRAY[1]::bigint[]);
-SELECT local_cache.mget('public.items'::regclass, ARRAY[1]::bigint[]);
-SELECT local_cache.stats();
+SELECT local_cache.detach_table('public.items'::regclass);
+DROP EXTENSION pg_local_cache;
 ```
-
-Bestätigen Sie, dass `local_cache.health()` bereit ist, die Zuordnung konvergiert
-ist und sich die SQL-Cache-Zähler wie erwartet bewegen.
-
-## Optionales RESP2 aktivieren {#enable-optional-resp2}
-
-RESP2 fügt einen Listener, Worker-Prozesse und ein gemeinsames Token hinzu. Es
-verwendet dieselbe dedizierte PostgreSQL-Rolle, die für das Anhängen von Tabellen
-erforderlich ist:
 
 ```bash
-sudo ./pg_local_cache-package/install.sh preflight \
-  --database app \
-  --mode resp \
-  --token-file /secure/path/token
-
-sudo ./pg_local_cache-package/install.sh install \
-  --database app \
-  --mode resp \
-  --token-file /secure/path/token \
-  --restart-method systemd \
-  --systemd-unit postgresql@16-main
+sudo apt remove postgresql-<major>-pg-local-cache
+sudo dnf remove pg_local_cache_<major>
 ```
 
-Halten Sie den Listener auf `127.0.0.1` oder hinter authentifiziertem TLS. RESP-
-Clients teilen sich die konfigurierte Worker-Rolle und erhalten keinen
-PostgreSQL-ACL-Kontext pro Client.
-
-## Fehlgeschlagene Binärinstallation wiederherstellen {#recover-a-failed-binary-install}
-
-Verwenden Sie das vom Installer ausgegebene Zustandsverzeichnis:
-
-```bash
-sudo ./pg_local_cache-package/install.sh recover \
-  --state-directory /path/printed/by/install
-```
-
-Stellen Sie nicht wieder her, nachdem ein neuer Postmaster Datenverkehr
-akzeptiert hat, bevor Sie den aufgezeichneten Zustand und die betrieblichen
-Auswirkungen geprüft haben.
-
-## Fehlerbehebung {#troubleshooting}
-
-- **Preload-Fehler:** Prüfen Sie die Konfiguration des Zielclusters und starten
-  Sie den richtigen Postmaster neu.
-- **Worker-Rolle fehlt oder wird abgelehnt:** Schließen Sie die obige SQL-
-  Initialisierung einschließlich Rollenattributen und Metadaten-Grants ab, auch
-  im SQL-only-Modus.
-- **Tabelle abgelehnt:** Verwenden Sie eine dauerhafte, nicht partitionierte,
-  nicht von RLS geschützte Tabelle mit einem unterstützten Primärschlüssel.
-- **Berechtigungsfehler bei `mget`:** Gewähren Sie `SELECT` auf der Quelltabelle,
-  `USAGE` auf dem Schema und `EXECUTE` auf der Funktion.
-- **Cache-Bypasses:** Prüfen Sie Isolationsstufe, Schreibvorgänge der aktuellen
-  Transaktion, Recovery-Zustand, Zeilengröße und Metriken.
-- **Veraltete Zuordnung nach DDL:** Führen Sie
-  `local_cache.reconcile_table('public.items'::regclass)` aus.
-
-Als Nächstes lesen Sie die [technische Referenz](TECHNICAL.md) zu SQL-Verträgen,
-Konsistenz, Speichergrößen, Monitoring und RESP-Sicherheit.
+Weiter: Lesen Sie in der [technischen Referenz](TECHNICAL.md) mehr über SQL, Speicherbedarf, Monitoring und RESP-Sicherheit.

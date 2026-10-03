@@ -17,14 +17,18 @@ permissions:
 
 jobs:
   deb:
-    name: Debian packages (${{ matrix.runner }})
+    name: Debian packages (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     container: debian:bookworm
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
     env:
       PG_SUPPORTED_VERSIONS: |
         14
@@ -84,16 +88,28 @@ jobs:
       - name: Upload Debian packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: deb-packages-${{ matrix.runner }}
+          name: deb-${{ matrix.arch }}
           path: package-artifacts/deb/*.deb
           if-no-files-found: error
 
   rpm:
-    name: RPM package (PostgreSQL 16)
-    runs-on: ubuntu-24.04
+    name: RPM PostgreSQL ${{ matrix.pgmajor }} (${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.runner }}
     # The Docker Hub "rockylinux" image stopped at 9.3; PGDG only serves 9.6+.
     container: rockylinux/rockylinux:9
-    timeout-minutes: 30
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        pgmajor: [14, 15, 16, 17, 18]
+        target:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    env:
+      PGMAJOR: ${{ matrix.pgmajor }}
+      RPM_ARCH: ${{ matrix.target.arch }}
     steps:
       - name: Install git
         run: |
@@ -102,7 +118,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Build PGDG RPM
+      - name: Build, install, and test PGDG RPM
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -116,13 +132,12 @@ jobs:
             return 1
           }
 
-          retry dnf -y install \
-            https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
-          # Only the repositories this build needs: a flaky mirror of another
-          # PGDG major must not fail the job.
-          repos=(--disablerepo='pgdg*' --enablerepo=pgdg16 --enablerepo=pgdg-common --enablerepo=crb)
+          repo_url="https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-${RPM_ARCH}/pgdg-redhat-repo-latest.noarch.rpm"
+          retry dnf -y install "$repo_url"
+          repos=(--disablerepo='pgdg*' "--enablerepo=pgdg${PGMAJOR}" --enablerepo=pgdg-common --enablerepo=crb)
           retry dnf "${repos[@]}" -qy module disable postgresql
-          retry dnf "${repos[@]}" -y install rpm-build postgresql16-devel clang llvm gzip git
+          retry dnf "${repos[@]}" -y install \
+            rpm-build "postgresql${PGMAJOR}-devel" clang llvm gzip
 
           version="$(sed -n "s/^default_version = '\([^']*\)'$/\1/p" pg_local_cache.control)"
           [[ -n "$version" ]] || { echo "could not read default_version" >&2; exit 1; }
@@ -134,5 +149,43 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git archive --format=tar --prefix="pg_local_cache-$version/" HEAD \
             | gzip -n >"$buildroot/SOURCES/pg_local_cache-$version.tar.gz"
-          rpmbuild -bb "$buildroot/SPECS/pg_local_cache.spec" \
-            --define 'pgmajorversion 16'
+          rpmbuild -bb --define "pgmajorversion ${PGMAJOR}" \
+            "$buildroot/SPECS/pg_local_cache.spec"
+
+          rpm_dir="$buildroot/RPMS/$RPM_ARCH"
+          mapfile -t built_rpms < <(find "$rpm_dir" -maxdepth 1 -type f -name '*.rpm' -print | LC_ALL=C sort)
+          main_rpm=""
+          for package in "${built_rpms[@]}"; do
+            if [[ "$(basename "$package")" == "pg_local_cache_${PGMAJOR}-${version}-"*.rpm ]]; then
+              main_rpm="$package"
+              break
+            fi
+          done
+          [[ -n "$main_rpm" && "${#built_rpms[@]}" -ge 1 ]]
+          retry dnf "${repos[@]}" -y install "$main_rpm" "postgresql${PGMAJOR}-server"
+
+          pgdata="/var/lib/pgsql/${PGMAJOR}/data"
+          install -d -o postgres -g postgres "$pgdata"
+          runuser -u postgres -- "/usr/pgsql-${PGMAJOR}/bin/initdb" -D "$pgdata"
+          cat >>"$pgdata/postgresql.conf" <<'EOF'
+          shared_preload_libraries = 'pg_local_cache'
+          pg_local_cache.port = 0
+          pg_local_cache.database = 'contrib_regression'
+          pg_local_cache.role = 'regress_pglc_worker'
+          EOF
+          chown postgres:postgres "$pgdata/postgresql.conf"
+          runuser -u postgres -- "/usr/pgsql-${PGMAJOR}/bin/pg_ctl" \
+            -D "$pgdata" -l "$pgdata/logfile" start -w
+          chown -R postgres:postgres "$GITHUB_WORKSPACE"
+          runuser -u postgres -- make installcheck \
+            PG_CONFIG="/usr/pgsql-${PGMAJOR}/bin/pg_config"
+
+          mkdir -p package-artifacts/rpm
+          cp "${built_rpms[@]}" package-artifacts/rpm/
+
+      - name: Upload RPM packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rpm-${{ matrix.pgmajor }}-${{ matrix.target.arch }}
+          path: package-artifacts/rpm/*.rpm
+          if-no-files-found: error

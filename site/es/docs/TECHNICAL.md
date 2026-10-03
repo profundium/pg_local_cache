@@ -108,7 +108,7 @@ Las entradas de caché, los estados de relaciones, los contadores, las generacio
 | `pg_local_cache.auth_token` | vacío | token insertado solo para desarrollo |
 | `pg_local_cache.allow_superuser` | `off` | anulación de rol solo para desarrollo |
 
-Son ajustes del postmaster. Dimensiona antes de reiniciar; el preflight del instalador binario comprueba el plan combinado.
+Son ajustes del postmaster. Dimensiona antes de reiniciar. La [guía de instalación](INSTALL_EXISTING.md) describe los paquetes y los reinicios.
 
 ## Endpoint RESP2 opcional {#optional-resp2-endpoint}
 
@@ -135,4 +135,4 @@ Los contadores de la caché SQL describen solo llamadas explícitas a `mget`:
 
 Las lecturas de la base de datos, las invalidaciones, el rechazo de admisión, el fallback por claves sucias, el singleflight y los contadores de workers y RESP permanecen separados.
 
-A continuación: usa la [guía de instalación](INSTALL_EXISTING.md) para binarios verificados, compilaciones PGXS desde código fuente, reinicios controlados, verificación y recuperación.
+A continuación: usa la [guía de instalación](INSTALL_EXISTING.md) para verificar paquetes Debian y RPM, compilar con PGXS, configurar, reiniciar, actualizar y desinstalar.

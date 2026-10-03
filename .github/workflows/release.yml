@@ -1,4 +1,4 @@
-name: Release PostgreSQL 14-18 Linux artifacts
+name: Release pg_local_cache
 
 on:
   push:
@@ -8,14 +8,7 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: pg_local_cache-release
-  cancel-in-progress: false
-
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-
   verify:
     name: Verify release tag
     runs-on: ubuntu-24.04
@@ -32,12 +25,11 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
           [[ "$GITHUB_REF" == refs/tags/* ]] || {
             echo "::error::Run releases from a version tag"
             exit 1
           }
-          version="$(sed -n "s/^default_version = '\\([0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*\\)'$/\\1/p" pg_local_cache.control)"
+          version="$(sed -n "s/^default_version = '\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)'$/\1/p" pg_local_cache.control)"
           [[ -n "$version" && "$GITHUB_REF_NAME" == "v${version}" ]] || {
             echo "::error::Tag ${GITHUB_REF_NAME} must match v<default_version> (v${version})"
             exit 1
@@ -47,346 +39,106 @@ jobs:
           [[ "$sha" == "$GITHUB_SHA" ]]
           [[ "$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")" == "$sha" ]]
 
-  metadata:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      version: ${{ steps.meta.outputs.version }}
-      stable_tag: ${{ steps.meta.outputs.stable_tag }}
-      sha: ${{ steps.meta.outputs.sha }}
-      short_sha: ${{ steps.meta.outputs.short_sha }}
-    steps:
-      - name: Check out the release tag
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ github.ref }}
-          fetch-depth: 0
-          persist-credentials: false
+  ci:
+    uses: ./.github/workflows/ci.yml
 
-      - name: Read release metadata
-        id: meta
-        shell: bash
-        run: |
-          set -Eeuo pipefail
+  packages:
+    uses: ./.github/workflows/packages.yml
 
-          version="$(sed -n "s/^default_version = '\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)'$/\1/p" pg_local_cache.control)"
-          sha="$(git rev-parse HEAD)"
-          short_sha="${sha:0:12}"
-          {
-            echo "version=${version}"
-            echo "stable_tag=${GITHUB_REF_NAME}"
-            echo "sha=${sha}"
-            echo "short_sha=${short_sha}"
-          } >> "$GITHUB_OUTPUT"
-
-  binary:
-    needs: [metadata, verify]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        postgres_major: [14, 15, 16, 17, 18]
-        target:
-          - variant: bookworm
-            libc: glibc
-          - variant: alpine3.23
-            libc: musl
-    env:
-      VERSION: ${{ needs.metadata.outputs.version }}
-      RELEASE_SHA: ${{ needs.metadata.outputs.sha }}
-      POSTGRES_MAJOR: ${{ matrix.postgres_major }}
-      POSTGRES_VARIANT: ${{ matrix.target.variant }}
-      LIBC: ${{ matrix.target.libc }}
-    steps:
-      - name: Check out exact source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ env.RELEASE_SHA }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Build and verify binary
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          image="pg_local_cache-release:pg${POSTGRES_MAJOR}-${LIBC}-${RELEASE_SHA}"
-          docker build \
-            --platform linux/amd64 \
-            --target extension \
-            --build-arg "POSTGRES_MAJOR=${POSTGRES_MAJOR}" \
-            --build-arg "POSTGRES_VARIANT=${POSTGRES_VARIANT}" \
-            --build-arg "PGLC_BUILD_ID=${RELEASE_SHA}" \
-            --tag "$image" \
-            .
-
-          pkglibdir="$(
-            docker run --rm \
-              --entrypoint /bin/sh \
-              "$image" \
-              -ec 'pg_config --pkglibdir'
-          )"
-
-          reported="$(
-            docker run --rm \
-              --env LD_BIND_NOW=1 \
-              --env "LD_PRELOAD=${pkglibdir}/pg_local_cache.so" \
-              --entrypoint postgres \
-              "$image" \
-              --version
-          )"
-          [[ "$reported" == *" ${POSTGRES_MAJOR}."* ]]
-
-      - name: Assemble deterministic binary archive
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          image="pg_local_cache-release:pg${POSTGRES_MAJOR}-${LIBC}-${RELEASE_SHA}"
-          asset="pg_local_cache-pg${POSTGRES_MAJOR}-linux-${LIBC}-amd64"
-          root="release-stage/pg_local_cache-${VERSION}-pg${POSTGRES_MAJOR}-linux-${LIBC}-amd64"
-          install -d "$root/lib" "$root/share/extension" "$root/docs" extracted
-
-          pkglibdir="$(docker run --rm --entrypoint /bin/sh "$image" -ec 'pg_config --pkglibdir')"
-          sharedir="$(docker run --rm --entrypoint /bin/sh "$image" -ec 'pg_config --sharedir')"
-          artifact_container="$(docker create "$image")"
-          trap 'docker rm -f "$artifact_container" >/dev/null 2>&1 || true' EXIT
-          docker cp "${artifact_container}:${pkglibdir}/pg_local_cache.so" "$root/lib/"
-          docker cp "${artifact_container}:${sharedir}/extension/." extracted/
-          docker rm -f "$artifact_container" >/dev/null
-          trap - EXIT
-          install -m 0644 extracted/pg_local_cache.control "$root/share/extension/"
-          find extracted -maxdepth 1 -type f -name 'pg_local_cache--*.sql' \
-            -exec install -m 0644 {} "$root/share/extension/" \;
-
-          install -m 0755 scripts/install-existing.sh "$root/install.sh"
-          install -m 0644 README.md LICENSE "$root/"
-          printf '%s\n' "$RELEASE_SHA" > "$root/BUILD-ID"
-          install -m 0644 \
-            docs/INSTALL_EXISTING.md docs/TECHNICAL.md "$root/docs/"
-          {
-            printf 'format=1\n'
-            printf 'version=%s\n' "$VERSION"
-            printf 'postgres_major=%s\n' "$POSTGRES_MAJOR"
-            printf 'os=linux\n'
-            printf 'libc=%s\n' "$LIBC"
-            printf 'architecture=amd64\n'
-            printf 'commit=%s\n' "$RELEASE_SHA"
-            printf 'build_image=postgres:%s-%s\n' "$POSTGRES_MAJOR" "$POSTGRES_VARIANT"
-          } > "$root/RELEASE-METADATA"
-
-          epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
-          archive="$PWD/dist/${asset}.tar.gz"
-          identity="$RUNNER_TEMP/${asset}.identity.json"
-          python3 scripts/release_archive.py build \
-            --stage release-stage --root "$(basename "$root")" \
-            --output "$archive" --epoch "$epoch"
-          python3 scripts/release_archive.py inspect \
-            --archive "$archive" --root "$(basename "$root")" \
-            --extract-dir "$RUNNER_TEMP/${asset}-extracted" \
-            --identity-out "$identity" | tee "$RUNNER_TEMP/${asset}.members.txt"
-
-          extracted_root="$RUNNER_TEMP/${asset}-extracted/$(basename "$root")"
-          test -x "$extracted_root/install.sh"
-          test -r "$extracted_root/README.md"
-          test -r "$extracted_root/LICENSE"
-          test -r "$extracted_root/BUILD-ID"
-          test -r "$extracted_root/RELEASE-METADATA"
-          test "$(cat "$extracted_root/BUILD-ID")" = "$RELEASE_SHA"
-          bash "$extracted_root/install.sh" --help >/dev/null
-
-          container="$(docker run --detach --network none \
-            --env POSTGRES_HOST_AUTH_METHOD=trust "$image")"
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-          for attempt in {1..60}; do
-            docker exec "$container" pg_isready --username postgres \
-              --dbname postgres >/dev/null 2>&1 && break
-            sleep 0.5
-          done
-          docker exec "$container" pg_isready --username postgres \
-            --dbname postgres >/dev/null
-          docker cp "$extracted_root/." "$container:/artifact/"
-          docker exec --user root "$container" chown -R 0:0 /artifact
-          before="$(docker exec "$container" sh -c \
-            'sha256sum "$PGDATA/postgresql.auto.conf"')"
-          docker exec "$container" /artifact/install.sh preflight \
-            --database postgres --postgres-os-user postgres \
-            --pg-config pg_config --psql psql --mode sql-only
-          docker exec "$container" /artifact/install.sh install --dry-run \
-            --database postgres --postgres-os-user postgres \
-            --pg-config pg_config --psql psql --mode sql-only
-          after="$(docker exec "$container" sh -c \
-            'sha256sum "$PGDATA/postgresql.auto.conf"')"
-          test "$before" = "$after"
-          python3 scripts/release_archive.py verify-identity \
-            --archive "$archive" --identity "$identity"
-          (cd dist && sha256sum "${asset}.tar.gz" > "${asset}.tar.gz.sha256")
-
-      - name: Upload binary lane
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: binary-pg${{ matrix.postgres_major }}-${{ matrix.target.libc }}
-          path: |
-            dist/*.tar.gz
-            dist/*.tar.gz.sha256
-          if-no-files-found: error
-          retention-days: 1
-
-  package:
-    needs: [metadata, binary]
+  source:
+    needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    permissions:
-      contents: read
-      actions: read
-    env:
-      VERSION: ${{ needs.metadata.outputs.version }}
-      RELEASE_SHA: ${{ needs.metadata.outputs.sha }}
-      SHORT_SHA: ${{ needs.metadata.outputs.short_sha }}
     steps:
-      - name: Check out exact source
+      - name: Check out the release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ env.RELEASE_SHA }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Download all binary lanes
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
-        with:
-          pattern: binary-*
-          path: dist
-          merge-multiple: true
-
-      - name: Validate source and create source archive
+      - name: Build and test source archive
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(find dist -maxdepth 1 -name 'pg_local_cache-pg*-linux-*-amd64.tar.gz' | wc -l)" -eq 10
-          test "$(find dist -maxdepth 1 -name 'pg_local_cache-pg*-linux-*-amd64.tar.gz.sha256' | wc -l)" -eq 10
+          V="$(sed -n "s/^default_version = '\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)'$/\1/p" pg_local_cache.control)"
+          SHA="$GITHUB_SHA"
+          [[ -n "$V" && "$(git rev-parse HEAD)" == "$SHA" ]]
+          mkdir -p dist "$RUNNER_TEMP/source-extract"
+          git archive --format=tar --prefix="pg_local_cache-$V/" "$SHA" \
+            | gzip -n >"dist/pg_local_cache-$V.tar.gz"
+          tar -xzf "dist/pg_local_cache-$V.tar.gz" -C "$RUNNER_TEMP/source-extract"
           (
-            cd dist
-            for manifest in pg_local_cache-pg*-linux-*-amd64.tar.gz.sha256; do
-              sha256sum --check "$manifest"
-            done
-          )
-          rm dist/pg_local_cache-pg*-linux-*-amd64.tar.gz.sha256
-          test -x scripts/install-existing.sh
-          bash -n scripts/install-existing.sh
-          make source-sanitize
-
-          source_root="pg_local_cache-${VERSION}-source"
-          source_stage="$RUNNER_TEMP/pg_local_cache-source"
-          install -d "$source_stage/$source_root"
-          git archive --format=tar "$RELEASE_SHA" |
-            tar -xf - -C "$source_stage/$source_root"
-          printf '%s\n' "$RELEASE_SHA" > "$source_stage/$source_root/BUILD-ID"
-          epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
-          source_archive="$PWD/dist/pg_local_cache-source.tar.gz"
-          source_identity="$RUNNER_TEMP/source.identity.json"
-          python3 scripts/release_archive.py build \
-            --stage "$source_stage" --root "$source_root" \
-            --output "$source_archive" --epoch "$epoch"
-          python3 scripts/release_archive.py inspect \
-            --archive "$source_archive" --root "$source_root" \
-            --extract-dir "$RUNNER_TEMP/source-extracted" \
-            --identity-out "$source_identity"
-          extracted_root="$RUNNER_TEMP/source-extracted/$source_root"
-          (
-            cd "$extracted_root"
-            bash -n scripts/install-existing.sh
-            # The archive omits checkout-only inputs (docker/, debian/, rpm/);
-            # verify-static runs on the checkout in ci.yml.
+            cd "$RUNNER_TEMP/source-extract/pg_local_cache-$V"
             make source-test
           )
-          python3 scripts/release_archive.py verify-identity \
-            --archive "$source_archive" --identity "$source_identity"
-          install -m 0755 scripts/fetch-release.sh dist/fetch-release.sh
-          install -m 0755 scripts/install-latest.sh dist/install-latest.sh
-          bash -n dist/fetch-release.sh
-          bash -n dist/install-latest.sh
-          cmp --silent scripts/fetch-release.sh dist/fetch-release.sh
-          cmp --silent scripts/install-latest.sh dist/install-latest.sh
 
-      - name: Create and verify checksums
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          (
-            cd dist
-            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' |
-              LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS
-            sha256sum --check SHA256SUMS
-          )
-
-      - name: Upload per-commit downloadable artifact
+      - name: Upload source archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pg_local_cache-${{ needs.metadata.outputs.version }}-${{ needs.metadata.outputs.short_sha }}
-          path: dist/
+          name: source
+          path: dist/pg_local_cache-*.tar.gz
           if-no-files-found: error
-          retention-days: 90
 
   publish:
-    needs: [ci, metadata, package, verify]
+    needs: [verify, ci, packages, source]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
+      id-token: write
+      attestations: write
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      VERSION: ${{ needs.metadata.outputs.version }}
-      STABLE_TAG: ${{ needs.metadata.outputs.stable_tag }}
-      RELEASE_SHA: ${{ needs.metadata.outputs.sha }}
     steps:
-      - name: Download verified packages
+      - name: Check out release notes
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download all release artifacts
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
-          name: pg_local_cache-${{ needs.metadata.outputs.version }}-${{ needs.metadata.outputs.short_sha }}
           path: dist
+          merge-multiple: true
 
-      - name: Verify checksums
-        working-directory: dist
-        run: sha256sum --check SHA256SUMS
-
-      - name: Publish stable release
+      - name: Write checksums and extract changelog notes
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          upload_missing_assets() {
-            local tag="$1" existing_assets temporary
-            existing_assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
-            temporary="$(mktemp -d)"
-            for file in dist/*; do
-              local name
-              name="$(basename "$file")"
-              if grep -Fxq "$name" <<<"$existing_assets"; then
-                mkdir -p "$temporary/$name"
-                gh release download "$tag" --pattern "$name" --dir "$temporary/$name"
-                cmp --silent "$file" "$temporary/$name/$name" || {
-                  echo "::error::Existing ${tag}/${name} differs; refusing overwrite"
-                  return 1
-                }
-              else
-                gh release upload "$tag" "$file"
-              fi
-            done
-          }
-
-          tag_sha="$(gh api "repos/${GH_REPO}/commits/${STABLE_TAG}" --jq .sha)"
-          [[ "$tag_sha" == "$RELEASE_SHA" ]] || {
-            echo "::error::${STABLE_TAG} points to ${tag_sha}, not ${RELEASE_SHA}"
+          version="$(sed -n "s/^default_version = '\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)'$/\1/p" pg_local_cache.control)"
+          (
+            cd dist
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
+              | LC_ALL=C sort -z \
+              | xargs -0 sha256sum > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+          awk -v version="$version" \
+            'index($0, "## [" version "]") == 1 { found=1; next }
+             found && index($0, "## [") == 1 { exit }
+             found { print }
+             END { if (!found) exit 1 }' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          [[ -s "$RUNNER_TEMP/release-notes.md" ]] || {
+            echo "::error::CHANGELOG.md has no notes for ${version}"
             exit 1
           }
-          if ! gh release view "$STABLE_TAG" >/dev/null 2>&1; then
-            gh release create "$STABLE_TAG" \
-              --target "$RELEASE_SHA" --draft \
-              --title "pg_local_cache ${VERSION} — PostgreSQL 14–18" \
-              --notes "Immutable pg_local_cache ${VERSION} release for PostgreSQL 14–18 on Linux amd64 (glibc and musl). Read docs/INSTALL_EXISTING.md before installing on an existing cluster."
-          fi
-          upload_missing_assets "$STABLE_TAG"
-          gh release edit "$STABLE_TAG" --draft=false --prerelease=false
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Create GitHub release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(sed -n "s/^default_version = '\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)'$/\1/p" pg_local_cache.control)"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "pg_local_cache ${version}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
 
   pgxn:
     needs: publish

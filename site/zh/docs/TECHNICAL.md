@@ -108,7 +108,7 @@ local_cache.mget(relation regclass, key_values anyarray) RETURNS text[]
 | `pg_local_cache.auth_token` | 空 | 仅供开发使用的内联令牌 |
 | `pg_local_cache.allow_superuser` | `off` | 仅供开发使用的角色限制覆盖 |
 
-这些都是 postmaster 配置项。应在重启前设定容量；二进制安装程序会在预检中验证整体配置方案。
+这些都是 postmaster 配置项。应在重启前设定容量。参阅[安装指南](INSTALL_EXISTING.md)了解软件包和重启步骤。
 
 ## 可选 RESP2 接口 {#optional-resp2-endpoint}
 
@@ -135,4 +135,4 @@ SQL 缓存计数器仅描述显式 `mget` 调用：
 
 数据库读取、失效、接纳拒绝、脏键回退、singleflight、工作进程和 RESP 的计数器分别统计。
 
-下一步：参阅[安装指南](INSTALL_EXISTING.md)，了解经过校验的二进制包、PGXS 源码构建、受控重启、验证与恢复。
+下一步：参阅[安装指南](INSTALL_EXISTING.md)，了解 Debian 和 RPM 软件包验证、PGXS 源码构建、配置、重启、升级与卸载。
