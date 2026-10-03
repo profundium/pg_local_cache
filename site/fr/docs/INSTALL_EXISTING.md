@@ -36,6 +36,15 @@ sudo apt install ./<file>.deb
 
 ### RHEL, Rocky Linux et AlmaLinux 9
 
+Ces RPM nécessitent PostgreSQL de PGDG dans la même version majeure. Configurez
+le [dépôt Yum PGDG](https://www.postgresql.org/download/linux/redhat/) pour
+votre version d'EL et la version majeure de PostgreSQL, puis installez
+`postgresql<major>-server` depuis PGDG avant l'extension. Le paquet de
+l'extension s'installe sous `/usr/pgsql-<major>`. Les paquets PostgreSQL fournis
+par la distribution utilisent d'autres noms de paquets, chemins et noms de
+services ; pour ces serveurs, suivez les
+[instructions de compilation depuis les sources](#build-from-source).
+
 Téléchargez le <code>.rpm</code> correspondant à la version majeure de PostgreSQL et à l'architecture. Vérifiez-le puis installez-le :
 
 ```bash
@@ -46,8 +55,14 @@ sudo dnf install ./<file>.rpm
 
 ### PGXN
 
+Installez le client PGXN, les en-têtes de développement du serveur PostgreSQL
+cible, un compilateur C et GNU Make. Indiquez le <code>pg_config</code> du
+serveur cible ; sinon PGXN utilise le premier trouvé dans <code>PATH</code>.
+L'installation des fichiers système nécessite les droits root. Consultez les
+[options de la commande PGXN install](https://pgxn.github.io/pgxnclient/usage.html#pgxn-install).
+
 ```bash
-pgxn install pg_local_cache
+pgxn install --pg_config /path/to/pg_config --sudo sudo pg_local_cache
 ```
 
 ### Compiler depuis les sources {#build-from-source}

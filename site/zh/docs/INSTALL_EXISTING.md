@@ -36,6 +36,13 @@ sudo apt install ./<file>.deb
 
 ### RHEL、Rocky Linux 和 AlmaLinux 9
 
+这些 RPM 要求使用相同主版本的 PGDG PostgreSQL。请为你的 EL 版本和
+PostgreSQL 主版本启用
+[PGDG Yum 仓库](https://www.postgresql.org/download/linux/redhat/)，并先从
+PGDG 安装 `postgresql<major>-server`。扩展 RPM 安装在
+`/usr/pgsql-<major>`。发行版自带的 PostgreSQL 软件包使用不同的软件包名、
+路径和服务名；这类服务器请按[源码构建说明](#build-from-source)操作。
+
 下载与 PostgreSQL 主版本和系统架构匹配的 <code>.rpm</code>。验证后安装：
 
 ```bash
@@ -46,8 +53,13 @@ sudo dnf install ./<file>.rpm
 
 ### PGXN
 
+安装 PGXN 客户端、目标 PostgreSQL 服务器的开发头文件、C 编译器和 GNU
+Make。请明确指定目标服务器的 <code>pg_config</code>；否则 PGXN 会使用
+<code>PATH</code> 中第一个找到的版本。安装系统文件需要 root 权限。参见
+[PGXN install 选项](https://pgxn.github.io/pgxnclient/usage.html#pgxn-install)。
+
 ```bash
-pgxn install pg_local_cache
+pgxn install --pg_config /path/to/pg_config --sudo sudo pg_local_cache
 ```
 
 ### 从源码构建 {#build-from-source}

@@ -41,7 +41,7 @@ protégée :
 
 1. verrouiller et valider la relation ;
 2. enregistrer son namespace, son OID de relation et les colonnes de clé primaire dans l'ordre ;
-3. installer les triggers de statement, de ligne et de truncate appartenant à l'extension ;
+3. créer les triggers de statement, de ligne et de truncate appartenant à l'extension ;
 4. recharger les mappings des workers.
 
 Les triggers d'événements DDL invalident les métadonnées de mapping du cache.
@@ -136,8 +136,9 @@ source au lieu d'allouer une mémoire illimitée.
 | `pg_local_cache.auth_token` | vide | token inline réservé au développement |
 | `pg_local_cache.allow_superuser` | `off` | dérogation de rôle réservée au développement |
 
-Ce sont des paramètres du postmaster. Dimensionnez-les avant le redémarrage ;
-la vérification préalable de l'installateur contrôle le plan combiné.
+Ce sont des paramètres du postmaster. Dimensionnez-les avant le redémarrage.
+Consultez le [guide d'installation](INSTALL_EXISTING.md) pour installer le paquet
+et suivre les étapes de redémarrage.
 
 ## Point de terminaison RESP2 optionnel {#optional-resp2-endpoint}
 
