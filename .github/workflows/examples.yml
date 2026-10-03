@@ -5,7 +5,6 @@ on:
       - examples/**
       - docs/QUICKSTART.md
       - docs/INSTALL_EXISTING.md
-      - tests/install_docs_smoke.py
       - tests/quickstart_docs_smoke.py
       - tests/benchmark_launcher_smoke.py
       - .github/workflows/examples.yml
@@ -40,8 +39,6 @@ jobs:
         run: node --test examples/node-postgres/queries.test.mjs
       - name: Build the checked-out extension
         run: docker compose -f examples/compose.yaml up --build --wait --wait-timeout 120
-      - name: Check source-install instructions on an empty database
-        run: python3 tests/install_docs_smoke.py
       - name: Run quickstart commands and the default benchmark
         run: |
           if [[ "$PGLC_DEMO_PG" == 16 ]]; then

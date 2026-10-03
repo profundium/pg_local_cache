@@ -130,8 +130,9 @@ the source table instead of allocating unbounded memory.
 | `pg_local_cache.auth_token` | empty | development-only inline token |
 | `pg_local_cache.allow_superuser` | `off` | development-only role override |
 
-These are postmaster settings. Size them before restart; binary installer
-preflight checks the combined plan.
+These are postmaster settings. Size them before restart. See the
+[installation guide](INSTALL_EXISTING.md) for package installation and restart
+steps.
 
 ## Optional RESP2 endpoint {#optional-resp2-endpoint}
 
@@ -164,5 +165,6 @@ SQL cache counters describe explicit `mget` calls only:
 Database reads, invalidations, admission rejection, dirty-key fallback,
 singleflight, worker, and RESP counters remain separate.
 
-Next: use the [installation guide](INSTALL_EXISTING.md) for verified binaries,
-PGXS source builds, controlled restarts, verification, and recovery.
+Next: use the [installation guide](INSTALL_EXISTING.md) for Debian and RPM
+package verification, PGXS source builds, configuration, restarts, upgrades,
+and uninstall.

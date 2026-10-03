@@ -30,7 +30,7 @@
   description: Authenticate and read rows with redis-cli or Node.js.
 - title: Installation
   url: /docs/INSTALL_EXISTING.html
-  description: Binaries, source builds, controlled restarts, and recovery.
+  description: Package verification, source builds, configuration, upgrades, and restarts.
 - title: Technical reference
   url: /docs/TECHNICAL.html
   description: SQL API, table restrictions, memory, monitoring, and RESP2.

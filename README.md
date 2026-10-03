@@ -119,24 +119,11 @@ Related guides: [PostgreSQL caching](docs/postgresql-caching.md),
 
 ## Install on an existing server
 
-Supported binary target: **Linux amd64, PostgreSQL 14-18, glibc or musl**.
-First activation adds `pg_local_cache` to `shared_preload_libraries` and requires
-one controlled PostgreSQL restart.
-
-Install from PGDG APT with `sudo apt install postgresql-<major>-pg-local-cache`
-or PGDG YUM with `sudo dnf install pg_local_cache_<major>`. Build Debian
-packages from a checkout with `pg_buildext updatecontrol && dpkg-buildpackage -b -us -uc`.
-
-For a local cluster managed by `pg_ctl`:
-
-```bash
-curl -fsSL https://github.com/profundium/pg_local_cache/releases/latest/download/install-latest.sh | bash -s -- app
-```
-
-Replace `app` with the database name. This command installs and restarts; it is
-not the disposable demo. Use the [installation guide](docs/INSTALL_EXISTING.md)
-for systemd, Patroni, Kubernetes, checksum-first installation, source builds,
-RESP, or recovery.
+Release packages support PostgreSQL 14-18 on Linux for Debian/Ubuntu and
+RHEL-family distributions. First activation adds `pg_local_cache` to
+`shared_preload_libraries` and requires one controlled PostgreSQL restart. Use
+the [installation guide](docs/INSTALL_EXISTING.md) for package verification,
+PGXN and source installation, configuration, restart, upgrade, and uninstall.
 
 Minimum SQL-only configuration:
 

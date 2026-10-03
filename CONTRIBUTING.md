@@ -46,7 +46,6 @@ Run the documented database examples locally (Docker and Node.js 20+):
 
 ```bash
 docker compose -f examples/compose.yaml up --build --wait
-python3 tests/install_docs_smoke.py
 python3 tests/quickstart_docs_smoke.py
 docker compose -f examples/compose.yaml down
 ```

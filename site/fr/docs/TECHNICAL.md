@@ -173,6 +173,6 @@ Les compteurs du cache SQL décrivent uniquement les appels explicites à `mget`
 Les lectures de base de données, invalidations, rejets d'admission, replis dus
 aux clés modifiées, singleflight, workers et compteurs RESP restent séparés.
 
-Ensuite : utilisez le [guide d'installation](INSTALL_EXISTING.md) pour les
-binaires vérifiés, les compilations source PGXS, les redémarrages contrôlés, la
-vérification et la récupération.
+Ensuite : utilisez le [guide d'installation](INSTALL_EXISTING.md) pour vérifier
+les paquets Debian et RPM, compiler avec PGXS, configurer, redémarrer, mettre à
+jour et désinstaller.

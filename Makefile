@@ -61,13 +61,11 @@ verify-static:
 	python3 -m compileall -q scripts tests
 	bash -n docker/entrypoint.sh docker/healthcheck.sh docker/attach-table.sh \
 		docker/initdb/010_pg_local_cache.sh tests/docker_smoke.sh \
-		scripts/fetch-release.sh scripts/install-existing.sh \
-		scripts/install-latest.sh scripts/bump-version.sh
+		scripts/bump-version.sh
 	scripts/bump-version.sh --check
 
 source-test:
 	$(MAKE) -C tests/unit check
-	python3 -m unittest -v tests/installer_release_contract_test.py
 	python3 -m unittest -v tests/bump_version_test.py
 
 source-sanitize:
