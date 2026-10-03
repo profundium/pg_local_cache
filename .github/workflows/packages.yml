@@ -130,6 +130,8 @@ jobs:
           buildroot="$HOME/rpmbuild"
           mkdir -p "$buildroot/SOURCES" "$buildroot/SPECS"
           cp rpm/pg_local_cache.spec "$buildroot/SPECS/"
+          # checkout only trusts the workspace for its own step.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git archive --format=tar --prefix="pg_local_cache-$version/" HEAD \
             | gzip -n >"$buildroot/SOURCES/pg_local_cache-$version.tar.gz"
           rpmbuild -bb "$buildroot/SPECS/pg_local_cache.spec" \
