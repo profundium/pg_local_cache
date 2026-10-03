@@ -3,7 +3,7 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 python3 - "$@" <<'PY'
 import json, re, subprocess, sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 root = Path.cwd()
 semver = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
@@ -29,6 +29,40 @@ def has_upgrade_statement(path):
         re.I,
     )
     return any(statement.match(part.strip()) for part in text.split(";")[:-1])
+def prepare_changelog_release(text, old, new):
+    unreleased_heading = re.compile(r"(?m)^## \[Unreleased\][ \t]*\r?\n")
+    match = unreleased_heading.search(text)
+    if match is None:
+        fail("CHANGELOG.md has no [Unreleased] section")
+    next_heading = re.search(r"(?m)^## \[", text[match.end():])
+    section_end = match.end() + next_heading.start() if next_heading else len(text)
+    notes = text[match.end():section_end].strip()
+    if not re.sub(r"(?m)^#{3,6}[ \t]+.*$", "", notes).strip():
+        fail("CHANGELOG.md [Unreleased] section is empty")
+    if re.search(rf"(?m)^## \[{re.escape(new)}\](?:\s|$)", text):
+        fail(f"CHANGELOG.md already has a section for version {new}")
+    date = datetime.now(timezone.utc).date().isoformat()
+    updated = (text[:match.end()] + f"\n## [{new}] - {date}\n\n{notes}\n\n"
+               + text[section_end:].lstrip("\r\n"))
+    if re.search(r"(?m)^\[Unreleased\]:", updated):
+        compare_link = re.compile(
+            r"(?m)^\[Unreleased\]:[ \t]*(?P<prefix>\S*/compare/)"
+            r"v(?P<base>\d+\.\d+\.\d+)\.\.\.HEAD"
+            r"(?P<newline>\r?\n|$)"
+        )
+        link = compare_link.search(updated)
+        if link is None:
+            fail("could not update CHANGELOG.md compare links")
+        if link.group("base") != old:
+            fail("CHANGELOG.md Unreleased compare link does not match current version")
+        if re.search(rf"(?m)^\[{re.escape(new)}\]:", updated):
+            fail(f"CHANGELOG.md already has a compare link for version {new}")
+        newline = link.group("newline") or "\n"
+        replacement = (f"[Unreleased]: {link.group('prefix')}v{new}...HEAD"
+                       f"{newline}[{new}]: {link.group('prefix')}"
+                       f"v{old}...v{new}{newline}")
+        updated = updated[:link.start()] + replacement + updated[link.end():]
+    return updated
 def current_version():
     control = (root / "pg_local_cache.control").read_text()
     match = re.search(r"^default_version = '([^']+)'$", control, re.M)
@@ -39,6 +73,12 @@ def current_version():
     changelog_match = re.match(r"^pg-local-cache \(([^)]+)\) [^;\n]+; urgency=", changelog)
     if changelog_match is None or changelog_match.group(1) != f"{version}-1":
         fail("Debian changelog version does not match control default_version")
+    project_changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    if not re.search(
+        rf"(?m)^## \[{re.escape(version)}\](?: - \d{{4}}-\d{{2}}-\d{{2}})?[ \t]*$",
+        project_changelog,
+    ):
+        fail("CHANGELOG.md has no section for control default_version")
     rpm_spec = (root / "rpm/pg_local_cache.spec").read_text(encoding="utf-8")
     rpm_versions = re.findall(r"(?m)^Version:\s*(\S+)\s*$", rpm_spec)
     if rpm_versions != [version]:
@@ -108,6 +148,10 @@ elif len(args) == 1 and semver.fullmatch(args[0]):
     old_tag = f"image: pg_local_cache:{old}"
     if compose.count(old_tag) != 1:
         fail("expected one current compose image tag")
+    changelog_path = root / "CHANGELOG.md"
+    prepared_changelog = prepare_changelog_release(
+        changelog_path.read_text(encoding="utf-8"), old, new
+    )
     subprocess.run(["git", "mv", str(old_sql), str(new_sql)], check=True)
     guard = (f'\\echo Use "ALTER EXTENSION pg_local_cache UPDATE TO \'{new}\'" '
              "to load this file. \\quit\n\n")
@@ -131,6 +175,7 @@ elif len(args) == 1 and semver.fullmatch(args[0]):
              f" -- maxbronnikov10 <bronnikovmr@gmail.com>  {date}\n\n")
     changelog_path = root / "debian/changelog"
     changelog_path.write_text(entry + changelog_path.read_text(encoding="utf-8"), encoding="utf-8")
+    (root / "CHANGELOG.md").write_text(prepared_changelog, encoding="utf-8")
     current_version()
     print(f"prepared version {old} -> {new}")
 else:

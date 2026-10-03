@@ -34,8 +34,9 @@ node --test examples/node-postgres/queries.test.mjs
 
 ## Releasing the extension
 
-Run `scripts/bump-version.sh X.Y.Z`, review and commit the changes, then create
-and push the matching tag:
+Run `scripts/bump-version.sh X.Y.Z` to move the non-empty `[Unreleased]` notes in
+`CHANGELOG.md` into a version section dated in UTC. Review and commit the
+changes, then create and push the matching tag:
 
 ```bash
 git tag vX.Y.Z

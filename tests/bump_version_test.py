@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,7 @@ def has_checkout_fixtures() -> bool:
         "META.json",
         "src/pg_local_cache.h",
         "compose.yaml",
+        "CHANGELOG.md",
         "debian/changelog",
         "rpm/pg_local_cache.spec",
         f"sql/pg_local_cache--{match.group(1)}.sql",
@@ -65,6 +67,7 @@ class BumpVersionChecks(unittest.TestCase):
             "META.json",
             "src/pg_local_cache.h",
             "compose.yaml",
+            "CHANGELOG.md",
             "debian/changelog",
             "rpm/pg_local_cache.spec",
             self.install_sql,
@@ -97,8 +100,52 @@ class BumpVersionChecks(unittest.TestCase):
         self.assertIn("SQL objects are unchanged", migration.read_text(encoding="utf-8"))
         changelog = (self.repo / "debian/changelog").read_text(encoding="utf-8")
         self.assertTrue(changelog.startswith(f"pg-local-cache ({self.new}-1) unstable;"))
+        project_changelog = (self.repo / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn(
+            f"## [{self.new}] - {datetime.now(timezone.utc).date().isoformat()}",
+            project_changelog,
+        )
+        self.assertRegex(
+            project_changelog,
+            rf"(?m)^## \[Unreleased\]\n\n## \[{re.escape(self.new)}\] - ",
+        )
+        self.assertIn("### Added\n\n- Debian and RPM package references", project_changelog)
         rpm_spec = (self.repo / "rpm/pg_local_cache.spec").read_text(encoding="utf-8")
         self.assertRegex(rpm_spec, rf"(?m)^Version:\s*{re.escape(self.new)}\s*$")
+
+    def test_bump_updates_compare_links(self) -> None:
+        path = self.repo / "CHANGELOG.md"
+        changelog = path.read_text(encoding="utf-8")
+        changelog += f"\n[Unreleased]: https://github.com/example/project/compare/v{self.old}...HEAD\n"
+        path.write_text(changelog, encoding="utf-8")
+
+        result = self.bump()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        updated = path.read_text(encoding="utf-8")
+        self.assertIn(
+            f"[Unreleased]: https://github.com/example/project/compare/v{self.new}...HEAD\n",
+            updated,
+        )
+        self.assertIn(
+            f"[{self.new}]: https://github.com/example/project/compare/v{self.old}...v{self.new}\n",
+            updated,
+        )
+
+    def test_refuses_empty_unreleased_section_before_mutating(self) -> None:
+        changelog_path = self.repo / "CHANGELOG.md"
+        changelog_path.write_text(
+            f"# Changelog\n\n## [Unreleased]\n\n## [{self.old}] - 2026-09-16\n\n"
+            "### Fixed\n\n- Existing release.\n",
+            encoding="utf-8",
+        )
+
+        result = self.bump()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CHANGELOG.md [Unreleased] section is empty", result.stderr)
+        self.assertTrue((self.repo / self.install_sql).is_file())
+        self.assertFalse((self.repo / f"sql/pg_local_cache--{self.new}.sql").exists())
 
     def test_refuses_changed_install_sql_without_migration(self) -> None:
         (self.repo / self.install_sql).write_text("-- developer changed schema\n", encoding="utf-8")
@@ -195,6 +242,15 @@ class BumpVersionChecks(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Debian changelog version does not match", result.stderr)
+
+    def test_check_fails_when_project_changelog_section_is_missing(self) -> None:
+        path = self.repo / "CHANGELOG.md"
+        path.write_text("# Changelog\n\n## [Unreleased]\n\n- Pending.\n", encoding="utf-8")
+
+        result = command(["bash", "scripts/bump-version.sh", "--check"], self.repo, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CHANGELOG.md has no section for control default_version", result.stderr)
 
     def test_check_fails_when_rpm_spec_version_disagrees(self) -> None:
         spec_path = self.repo / "rpm/pg_local_cache.spec"

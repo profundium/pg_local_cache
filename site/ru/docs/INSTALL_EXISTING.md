@@ -36,6 +36,14 @@ sudo apt install ./<file>.deb
 
 ### RHEL, Rocky Linux и AlmaLinux 9
 
+Эти RPM требуют PostgreSQL той же основной версии из репозитория PGDG.
+Подключите [репозиторий PGDG](https://www.postgresql.org/download/linux/redhat/)
+для своей версии EL и нужной основной версии PostgreSQL, затем сначала
+установите из PGDG пакет `postgresql<major>-server`. Пакет расширения
+устанавливается в `/usr/pgsql-<major>`. В дистрибутивных пакетах PostgreSQL
+другие имена пакетов, пути и имена служб; для таких серверов используйте
+[инструкцию по сборке из исходников](#build-from-source).
+
 Скачайте подходящий <code>.rpm</code> для версии PostgreSQL и архитектуры. Проверьте и установите его:
 
 ```bash
@@ -46,8 +54,13 @@ sudo dnf install ./<file>.rpm
 
 ### PGXN
 
+Установите клиент PGXN, заголовки разработки целевого сервера PostgreSQL,
+компилятор C и GNU Make. Укажите <code>pg_config</code> целевого сервера; иначе
+PGXN выберет первый найденный в <code>PATH</code>. Для установки системных
+файлов нужны права root. См. [параметры команды PGXN install](https://pgxn.github.io/pgxnclient/usage.html#pgxn-install).
+
 ```bash
-pgxn install pg_local_cache
+pgxn install --pg_config /path/to/pg_config --sudo sudo pg_local_cache
 ```
 
 ### Сборка из исходников {#build-from-source}
