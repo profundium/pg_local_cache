@@ -122,7 +122,7 @@ jobs:
           # PGDG major must not fail the job.
           repos=(--disablerepo='pgdg*' --enablerepo=pgdg16 --enablerepo=pgdg-common --enablerepo=crb)
           retry dnf "${repos[@]}" -qy module disable postgresql
-          retry dnf "${repos[@]}" -y install rpm-build postgresql16-devel clang gzip git
+          retry dnf "${repos[@]}" -y install rpm-build postgresql16-devel clang llvm gzip git
 
           version="$(sed -n "s/^default_version = '\([^']*\)'$/\1/p" pg_local_cache.control)"
           [[ -n "$version" ]] || { echo "could not read default_version" >&2; exit 1; }

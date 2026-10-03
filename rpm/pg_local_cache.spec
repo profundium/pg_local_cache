@@ -10,6 +10,7 @@ URL:            https://github.com/profundium/pg_local_cache
 Source0:        %{sname}-%{version}.tar.gz
 BuildRequires:  postgresql%{pgmajorversion}-devel
 BuildRequires:  clang
+BuildRequires:  llvm
 Requires:       postgresql%{pgmajorversion}-server
 
 %description
