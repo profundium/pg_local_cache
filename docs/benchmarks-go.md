@@ -35,7 +35,7 @@ Median **requests/s**, three five-second samples per case:
 64-key SQL varied from 19–28k requests/s across server restarts despite
 identical data, settings and index plans. The table uses the faster repeated
 run; the cause of the variation remains unresolved.
-[All 129 samples](../assets/benchmarks/2026-09-15-m3-max-resp.json) include
+[All 129 samples](benchmarks/2026-09-15-m3-max-resp.json) include
 both runs, exact source revisions, binary hashes and query plans.
 
 Read-only cache samples had 100% hits and no errors or connection-limit

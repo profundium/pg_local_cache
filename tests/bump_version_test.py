@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Behavioral tests for release version bumps."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def command(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=check,
+    )
+
+
+def has_checkout_fixtures() -> bool:
+    if not (ROOT / ".git").exists():
+        return False
+    try:
+        control = (ROOT / "pg_local_cache.control").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    match = re.search(r"^default_version = '([^']+)'$", control, re.M)
+    if match is None:
+        return False
+    fixtures = (
+        "scripts/bump-version.sh",
+        "pg_local_cache.control",
+        "META.json",
+        "src/pg_local_cache.h",
+        "compose.yaml",
+        "debian/changelog",
+        "rpm/pg_local_cache.spec",
+        f"sql/pg_local_cache--{match.group(1)}.sql",
+    )
+    return all((ROOT / relative).is_file() for relative in fixtures)
+
+
+@unittest.skipUnless(
+    has_checkout_fixtures(),
+    "version bump tests require a git checkout and checkout-only fixtures",
+)
+class BumpVersionChecks(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temporary.name)
+        control = (ROOT / "pg_local_cache.control").read_text(encoding="utf-8")
+        self.old = re.search(r"^default_version = '([^']+)'$", control, re.M).group(1)
+        major, minor, patch = map(int, self.old.split("."))
+        self.new = f"{major}.{minor}.{patch + 1}"
+        self.install_sql = f"sql/pg_local_cache--{self.old}.sql"
+
+        for relative in (
+            "scripts/bump-version.sh",
+            "pg_local_cache.control",
+            "META.json",
+            "src/pg_local_cache.h",
+            "compose.yaml",
+            "debian/changelog",
+            "rpm/pg_local_cache.spec",
+            self.install_sql,
+        ):
+            destination = self.repo / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, destination)
+
+        command(["git", "init", "--quiet"], self.repo)
+        command(["git", "config", "user.name", "Bump Version Test"], self.repo)
+        command(["git", "config", "user.email", "bump-version-test@example.invalid"], self.repo)
+        command(["git", "add", "."], self.repo)
+        command(["git", "commit", "--quiet", "-m", "baseline"], self.repo)
+        command(["git", "tag", f"v{self.old}"], self.repo)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def bump(self, *options: str) -> subprocess.CompletedProcess[str]:
+        return command(["bash", "scripts/bump-version.sh", *options, self.new], self.repo, check=False)
+
+    def test_noop_bump_creates_stub_and_keeps_install_sql(self) -> None:
+        before = (self.repo / self.install_sql).read_bytes()
+
+        result = self.bump()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.repo / f"sql/pg_local_cache--{self.new}.sql").read_bytes(), before)
+        migration = self.repo / f"sql/pg_local_cache--{self.old}--{self.new}.sql"
+        self.assertIn("SQL objects are unchanged", migration.read_text(encoding="utf-8"))
+        changelog = (self.repo / "debian/changelog").read_text(encoding="utf-8")
+        self.assertTrue(changelog.startswith(f"pg-local-cache ({self.new}-1) unstable;"))
+        rpm_spec = (self.repo / "rpm/pg_local_cache.spec").read_text(encoding="utf-8")
+        self.assertRegex(rpm_spec, rf"(?m)^Version:\s*{re.escape(self.new)}\s*$")
+
+    def test_refuses_changed_install_sql_without_migration(self) -> None:
+        (self.repo / self.install_sql).write_text("-- developer changed schema\n", encoding="utf-8")
+
+        result = self.bump()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("write sql/pg_local_cache--", result.stderr)
+        self.assertIn("before bumping", result.stderr)
+        self.assertFalse((self.repo / f"sql/pg_local_cache--{self.new}.sql").exists())
+
+    def test_refuses_changed_install_sql_with_comment_only_migration(self) -> None:
+        (self.repo / self.install_sql).write_text("-- developer changed schema\n", encoding="utf-8")
+        migration = self.repo / f"sql/pg_local_cache--{self.old}--{self.new}.sql"
+        migration.write_text("\\echo migration pending\n-- no SQL yet\n", encoding="utf-8")
+
+        result = self.bump()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("with a SQL statement", result.stderr)
+        self.assertFalse((self.repo / f"sql/pg_local_cache--{self.new}.sql").exists())
+
+    def test_refuses_missing_tag_without_sql_upgrade(self) -> None:
+        command(["git", "tag", "--delete", f"v{self.old}"], self.repo)
+
+        result = self.bump()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("with a SQL statement", result.stderr)
+        self.assertFalse((self.repo / f"sql/pg_local_cache--{self.new}.sql").exists())
+
+    def test_refuses_missing_tag_with_comment_only_upgrade(self) -> None:
+        command(["git", "tag", "--delete", f"v{self.old}"], self.repo)
+        migration = self.repo / f"sql/pg_local_cache--{self.old}--{self.new}.sql"
+        migration.write_text("\\echo migration pending\n-- no SQL yet\n/* still empty */\n", encoding="utf-8")
+
+        result = self.bump()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("with a SQL statement", result.stderr)
+        self.assertFalse((self.repo / f"sql/pg_local_cache--{self.new}.sql").exists())
+
+    def test_missing_tag_accepts_sql_upgrade(self) -> None:
+        command(["git", "tag", "--delete", f"v{self.old}"], self.repo)
+        migration = self.repo / f"sql/pg_local_cache--{self.old}--{self.new}.sql"
+        migration.write_text("-- planned schema migration\nALTER TABLE example ADD COLUMN added integer;\n", encoding="utf-8")
+        before = migration.read_bytes()
+
+        result = self.bump()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(migration.read_bytes(), before)
+
+    def test_missing_tag_requires_explicit_no_baseline_override(self) -> None:
+        command(["git", "tag", "--delete", f"v{self.old}"], self.repo)
+
+        result = self.bump("--no-baseline")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.repo / f"sql/pg_local_cache--{self.new}.sql").is_file())
+
+    def test_keeps_handwritten_migration_when_install_sql_changed(self) -> None:
+        (self.repo / self.install_sql).write_text("-- developer changed schema\n", encoding="utf-8")
+        migration = self.repo / f"sql/pg_local_cache--{self.old}--{self.new}.sql"
+        migration.write_text("-- developer migration\nALTER TABLE example ADD COLUMN added integer;\n", encoding="utf-8")
+        before = migration.read_bytes()
+
+        result = self.bump()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(migration.read_bytes(), before)
+
+    def test_check_fails_when_metadata_version_disagrees(self) -> None:
+        metadata_path = self.repo / "META.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["version"] = self.new
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        result = command(["bash", "scripts/bump-version.sh", "--check"], self.repo, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("version metadata, header, or install SQL disagree", result.stderr)
+
+    def test_check_fails_when_debian_changelog_version_disagrees(self) -> None:
+        changelog_path = self.repo / "debian/changelog"
+        changelog_path.write_text(
+            changelog_path.read_text(encoding="utf-8").replace(
+                f"({self.old}-1)", f"({self.new}-1)", 1
+            ),
+            encoding="utf-8",
+        )
+
+        result = command(["bash", "scripts/bump-version.sh", "--check"], self.repo, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Debian changelog version does not match", result.stderr)
+
+    def test_check_fails_when_rpm_spec_version_disagrees(self) -> None:
+        spec_path = self.repo / "rpm/pg_local_cache.spec"
+        spec_path.write_text(
+            spec_path.read_text(encoding="utf-8").replace(
+                f"Version:        {self.old}", f"Version:        {self.new}", 1
+            ),
+            encoding="utf-8",
+        )
+
+        result = command(["bash", "scripts/bump-version.sh", "--check"], self.repo, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RPM spec version does not match", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

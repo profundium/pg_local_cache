@@ -4,22 +4,8 @@ on:
   push:
     branches: [master]
     paths:
-      - _config.yml
-      - _data/**
-      - _layouts/**
-      - _includes/**
-      - assets/**
+      - site/**
       - docs/**
-      - blog/**
-      - ru/**
-      - es/**
-      - de/**
-      - fr/**
-      - zh/**
-      - feed.xml
-      - index.html
-      - sitemap.xml
-      - robots.txt
       - scripts/check_site.py
       - scripts/benchmark_report.py
       - tests/pages_contract_test.py
@@ -29,22 +15,8 @@ on:
       - .github/workflows/pages.yml
   pull_request:
     paths:
-      - _config.yml
-      - _data/**
-      - _layouts/**
-      - _includes/**
-      - assets/**
+      - site/**
       - docs/**
-      - blog/**
-      - ru/**
-      - es/**
-      - de/**
-      - fr/**
-      - zh/**
-      - feed.xml
-      - index.html
-      - sitemap.xml
-      - robots.txt
       - scripts/check_site.py
       - scripts/benchmark_report.py
       - tests/pages_contract_test.py
@@ -71,10 +43,15 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Test documentation checks
         run: python3 tests/pages_contract_test.py
+      - name: Copy English docs into Jekyll source
+        run: |
+          cp -R docs site/docs
+          mkdir -p site/assets/benchmarks
+          cp docs/benchmarks/*.json site/assets/benchmarks/
       - name: Build Jekyll site
         uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1
         with:
-          source: ./
+          source: ./site
           destination: ./_site
       - name: Check metadata
         run: python3 scripts/check_site.py _site --base-url "$SITE_BASE_URL"

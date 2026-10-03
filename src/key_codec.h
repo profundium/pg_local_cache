@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #ifndef PGLC_KEY_CODEC_H
 #define PGLC_KEY_CODEC_H
 

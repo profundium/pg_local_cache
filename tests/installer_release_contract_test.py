@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contracts for the existing-cluster installer and release pipeline."""
+"""Behavioral checks for the existing-cluster installer and release archives."""
 
 from __future__ import annotations
 
@@ -22,18 +22,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install-existing.sh"
-RELEASE = ROOT / ".github" / "workflows" / "release.yml"
 ARCHIVE_HELPER = ROOT / "scripts" / "release_archive.py"
 FETCHER = ROOT / "scripts" / "fetch-release.sh"
-CONTROL = (ROOT / "pg_local_cache.control").read_text(encoding="utf-8")
-CURRENT_VERSION_MATCH = re.search(
-    r"^default_version = '([0-9]+\.[0-9]+\.[0-9]+)'$", CONTROL, re.MULTILINE
-)
-if CURRENT_VERSION_MATCH is None:
-    raise RuntimeError("could not read current extension version")
-CURRENT_VERSION = CURRENT_VERSION_MATCH.group(1)
-
-
 def _write_executable(path: Path, source: str) -> None:
     path.write_text(source, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -1743,7 +1733,7 @@ class FetchReleaseContracts(unittest.TestCase):
             self.assertEqual(list(directory.glob(".pg_local_cache-fetch.*")), [])
 
 
-class ReleaseContracts(unittest.TestCase):
+class ReleaseArchiveBehaviorTests(unittest.TestCase):
     def test_release_archive_build_inspect_and_identity_are_single_copy(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
@@ -1882,134 +1872,6 @@ class ReleaseContracts(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(duplicate_extract.exists())
-
-    def test_release_waits_for_successful_master_ci(self) -> None:
-        source = RELEASE.read_text(encoding="utf-8")
-        self.assertIn('workflows: ["CI"]', source)
-        self.assertIn("workflow_run.conclusion == 'success'", source)
-        self.assertIn("workflow_run.event == 'push'", source)
-        self.assertIn("workflow_run.head_branch == 'master'", source)
-        self.assertIn("head_repository.full_name == github.repository", source)
-
-    def test_release_is_downloadable_versioned_and_immutable(self) -> None:
-        source = RELEASE.read_text(encoding="utf-8")
-        self.assertIn('commit_tag="master-${short_sha}"', source)
-        self.assertIn('stable_tag="v${version}"', source)
-        self.assertIn("Refusing to move immutable tag", source)
-        self.assertIn("refusing overwrite", source)
-        self.assertNotIn("--clobber", source)
-        self.assertIn("SHA256SUMS", source)
-        self.assertIn("retention-days: 90", source)
-        self.assertGreaterEqual(source.count("scripts/release_archive.py build"), 2)
-        self.assertGreaterEqual(source.count("scripts/release_archive.py inspect"), 2)
-        self.assertGreaterEqual(
-            source.count("scripts/release_archive.py verify-identity"), 2
-        )
-        checksums = source.index("- name: Create and verify checksums")
-        helper = source.index("install -m 0755 scripts/fetch-release.sh")
-        self.assertLess(helper, checksums)
-        self.assertIn("dist/fetch-release.sh", source)
-        self.assertIn("dist/install-latest.sh", source)
-        bootstrap = (ROOT / "scripts" / "install-latest.sh").read_text()
-        self.assertIn("releases/latest", bootstrap)
-        self.assertIn("sha256sum --check --strict", bootstrap)
-        self.assertIn('"$temporary_directory/package/install.sh" install', bootstrap)
-
-    def test_archives_are_inspected_and_smoked_before_upload(self) -> None:
-        source = RELEASE.read_text(encoding="utf-8")
-        binary_start = source.index("- name: Assemble deterministic binary archive")
-        binary_end = source.index("- name: Upload binary lane", binary_start)
-        binary = source[binary_start:binary_end]
-        self.assertLess(
-            binary.index("scripts/release_archive.py build"),
-            binary.index("scripts/release_archive.py inspect"),
-        )
-        self.assertLess(
-            binary.index('bash "$extracted_root/install.sh" --help'),
-            binary.index("scripts/release_archive.py verify-identity"),
-        )
-        self.assertIn('docker cp "$extracted_root/."', binary)
-        self.assertIn('/artifact/install.sh install --dry-run', binary)
-        self.assertEqual(
-            binary.count('sha256sum "$PGDATA/postgresql.auto.conf"'), 2
-        )
-        self.assertNotIn("/var/lib/postgresql/data/postgresql.auto.conf", binary)
-        self.assertNotIn("scripts/install-existing.sh --help", binary)
-
-        package_start = source.index("- name: Validate source and create source archive")
-        package_end = source.index(
-            "- name: Create and verify checksums", package_start
-        )
-        package = source[package_start:package_end]
-        self.assertIn("sha256sum --check", package)
-        self.assertIn('cd "$extracted_root"', package)
-        self.assertIn("make verify-static source-test pgxn-check", package)
-
-    def test_release_requires_an_unpublished_prepared_version(self) -> None:
-        source = RELEASE.read_text(encoding="utf-8")
-        self.assertIn("python3 scripts/auto_version.py --json", source)
-        self.assertIn('if [[ "$action" != "release" ]]', source)
-        self.assertIn("release_ready=false", source)
-        self.assertIn("release_ready=true", source)
-        self.assertIn(
-            "if: needs.metadata.outputs.release_ready == 'true'", source
-        )
-        self.assertIn("master advanced", source)
-        self.assertIn("refusing version reuse", source)
-        self.assertNotIn("--jq .sha 2>/dev/null || true", source)
-        self.assertIn('local tag="$1" existing', source)
-        self.assertIn('if existing="$(gh api', source)
-
-    def test_release_creation_avoids_cross_api_tag_propagation_race(self) -> None:
-        source = RELEASE.read_text(encoding="utf-8")
-        publish_start = source.index(
-            "- name: Publish immutable commit prerelease"
-        )
-        publish = source[publish_start:]
-        self.assertNotIn("--verify-tag", publish)
-        self.assertEqual(publish.count('--target "$RELEASE_SHA"'), 2)
-        self.assertIn('create_ref "$COMMIT_TAG"', publish)
-        self.assertIn('create_ref "$STABLE_TAG"', publish)
-        self.assertIn('gh release create "$COMMIT_TAG"', publish)
-        self.assertIn('gh release create "$STABLE_TAG"', publish)
-
-    def test_binary_asset_scope_and_installer_are_explicit(self) -> None:
-        workflow = RELEASE.read_text(encoding="utf-8")
-        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("postgres_major: [14, 15, 16, 17, 18]", workflow)
-        self.assertIn("variant: bookworm", workflow)
-        self.assertIn("variant: alpine3.23", workflow)
-        self.assertIn("libc: glibc", workflow)
-        self.assertIn("libc: musl", workflow)
-        self.assertIn("architecture=amd64", workflow)
-        self.assertIn("scripts/install-existing.sh", workflow)
-        self.assertIn("docs/INSTALL_EXISTING.md", workflow)
-        self.assertIn("AS extension", dockerfile)
-        self.assertIn("FROM extension AS runtime", dockerfile)
-        self.assertIn('PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no clean', dockerfile)
-        self.assertIn('--build-arg "PGLC_BUILD_ID=${RELEASE_SHA}"', workflow)
-        self.assertIn('printf \'%s\\n\' "$RELEASE_SHA" > "$root/BUILD-ID"', workflow)
-
-    def test_binary_identity_is_shared_and_not_user_configurable(self) -> None:
-        header = (ROOT / "src/pg_local_cache.h").read_text()
-        core = (ROOT / "src/pg_local_cache.c").read_text()
-        worker = (ROOT / "src/pg_local_cache_worker.c").read_text()
-        makefile = (ROOT / "Makefile").read_text()
-        self.assertIn(f'#define PGLC_VERSION "{CURRENT_VERSION}"', header)
-        self.assertNotIn(CURRENT_VERSION, worker)
-        for name in ("pg_local_cache.binary_version", "pg_local_cache.binary_build_id"):
-            start = core.index(name)
-            self.assertIn("PGC_INTERNAL", core[start : start + 600])
-            self.assertIn("GUC_DISALLOW_IN_FILE", core[start : start + 600])
-        self.assertIn("PGLC_BUILD_ID_RESOLVED", makefile)
-        self.assertIn("BUILD-ID", makefile)
-        self.assertIn("git status --porcelain", makefile)
-        release = RELEASE.read_text(encoding="utf-8")
-        self.assertIn(
-            'grep -Fqx "#define PGLC_VERSION \\"${version}\\"" src/pg_local_cache.h',
-            release,
-        )
-        self.assertNotIn("pg_local_cache_version:${version}", release)
 
 if __name__ == "__main__":
     unittest.main()

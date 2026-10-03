@@ -230,7 +230,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--base-url", default=BASE)
-    registry = Path(__file__).resolve().parents[1] / "_data/locales.yml"
+    registry = Path(__file__).resolve().parents[1] / "site/_data/locales.yml"
     parser.add_argument("--languages", nargs="+", default=re.findall(r'^([a-z]{2}):$', registry.read_text(), re.M))
     args = parser.parse_args()
     failures = check(args.directory, args.base_url, args.languages)

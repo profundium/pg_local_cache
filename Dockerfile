@@ -38,29 +38,33 @@ COPY Makefile pg_local_cache.control ./
 COPY sql/ ./sql/
 COPY src/ ./src/
 
-RUN case "$PGLC_BUILD_ID" in \
-        ''|*[!A-Za-z0-9._:-]*) printf 'invalid PGLC_BUILD_ID\n' >&2; exit 1 ;; \
-    esac \
-    && printf '%s\n' "$PGLC_BUILD_ID" > BUILD-ID \
-    && pg_config="$(cat /tmp/pg_config)" \
-    && installed_version="$("$pg_config" --version)" \
-    && case "$installed_version" in \
+RUN set -eu; \
+    pg_config="$(cat /tmp/pg_config)"; \
+    installed_version="$("$pg_config" --version)"; \
+    case "$installed_version" in \
         "PostgreSQL ${POSTGRES_MAJOR}."*) ;; \
         *) printf 'PostgreSQL major mismatch: expected %s, got: %s\n' \
             "$POSTGRES_MAJOR" "$installed_version" >&2; exit 1 ;; \
-    esac \
-    && make PG_CONFIG="$pg_config" PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no clean \
-    && make -j"$(nproc)" PG_CONFIG="$pg_config" PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no \
-    && make PG_CONFIG="$pg_config" PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no DESTDIR=/stage install \
-    && install -d /stage/extension/lib /stage/extension/share/extension \
-    && install -m 0644 BUILD-ID /stage/extension/BUILD-ID \
-    && install -m 0755 \
+    esac; \
+    make_extension() { \
+        if [ -n "${PGLC_BUILD_ID:-}" ]; then \
+            make PG_CONFIG="$pg_config" PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no "$@"; \
+        else \
+            unset PGLC_BUILD_ID; \
+            make PG_CONFIG="$pg_config" with_llvm=no "$@"; \
+        fi; \
+    }; \
+    make_extension clean; \
+    make_extension -j"$(nproc)"; \
+    make_extension DESTDIR=/stage install; \
+    install -d /stage/extension/lib /stage/extension/share/extension; \
+    install -m 0755 \
         "/stage$($pg_config --pkglibdir)/pg_local_cache.so" \
-        /stage/extension/lib/pg_local_cache.so \
-    && install -m 0644 \
+        /stage/extension/lib/pg_local_cache.so; \
+    install -m 0644 \
         "/stage$($pg_config --sharedir)/extension/pg_local_cache.control" \
-        /stage/extension/share/extension/pg_local_cache.control \
-    && for sql_file in "/stage$($pg_config --sharedir)/extension/pg_local_cache--"*.sql; do \
+        /stage/extension/share/extension/pg_local_cache.control; \
+    for sql_file in "/stage$($pg_config --sharedir)/extension/pg_local_cache--"*.sql; do \
         install -m 0644 "$sql_file" /stage/extension/share/extension/; \
     done
 

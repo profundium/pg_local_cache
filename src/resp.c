@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #ifdef PGLC_RESP_STANDALONE
 #include <ctype.h>
 #include <inttypes.h>

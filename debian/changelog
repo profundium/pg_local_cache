@@ -1,0 +1,5 @@
+pg-local-cache (2.0.4-1) unstable; urgency=medium
+
+  * Package pg_local_cache for PostgreSQL 14 and later.
+
+ -- maxbronnikov10 <bronnikovmr@gmail.com>  Sat, 03 Oct 2026 17:42:14 +0300

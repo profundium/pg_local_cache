@@ -123,6 +123,10 @@ Supported binary target: **Linux amd64, PostgreSQL 14-18, glibc or musl**.
 First activation adds `pg_local_cache` to `shared_preload_libraries` and requires
 one controlled PostgreSQL restart.
 
+Install from PGDG APT with `sudo apt install postgresql-<major>-pg-local-cache`
+or PGDG YUM with `sudo dnf install pg_local_cache_<major>`. Build Debian
+packages from a checkout with `pg_buildext updatecontrol && dpkg-buildpackage -b -us -uc`.
+
 For a local cluster managed by `pg_ctl`:
 
 ```bash

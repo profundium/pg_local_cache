@@ -1,0 +1,13 @@
+BUILD-ID export-subst
+site/ export-ignore
+docs/benchmarks/ export-ignore
+.github/ export-ignore
+examples/ export-ignore
+docker/ export-ignore
+Dockerfile export-ignore
+compose.yaml export-ignore
+.dockerignore export-ignore
+tests/browser/ export-ignore
+PRODUCT.md export-ignore
+debian/ export-ignore
+rpm/ export-ignore

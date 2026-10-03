@@ -6,14 +6,7 @@ on:
     paths-ignore:
       - "docs/**"
       - "examples/**"
-      - "assets/**"
-      - "_layouts/**"
-      - "_includes/**"
-      - "_data/**"
-      - "_config.yml"
-      - "index.html"
-      - "sitemap.xml"
-      - "robots.txt"
+      - "site/**"
       - "README.md"
       - "PRODUCT.md"
       - "CONTRIBUTING.md"
@@ -29,14 +22,7 @@ on:
     paths-ignore:
       - "docs/**"
       - "examples/**"
-      - "assets/**"
-      - "_layouts/**"
-      - "_includes/**"
-      - "_data/**"
-      - "_config.yml"
-      - "index.html"
-      - "sitemap.xml"
-      - "robots.txt"
+      - "site/**"
       - "README.md"
       - "PRODUCT.md"
       - "CONTRIBUTING.md"
@@ -48,13 +34,8 @@ on:
       - "tests/pages_contract_test.py"
       - "tests/browser/**"
       - "tests/*docs_smoke.py"
+  workflow_call:
   workflow_dispatch:
-    inputs:
-      release:
-        description: Dispatch release after successful CI
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -101,43 +82,21 @@ jobs:
           PG_LOCAL_CACHE_SMOKE_KEYS: "128"
         run: bash tests/docker_smoke.sh
 
-  docker-compatibility:
-    name: PostgreSQL ${{ matrix.postgres }} compile
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+  test:
+    name: PostgreSQL ${{ matrix.postgres }} on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         postgres: [14, 15, 16, 17, 18]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
-      - name: Compile extension
-        run: >-
-          docker build --target extension
-          --build-arg POSTGRES_MAJOR=${{ matrix.postgres }}
-          --build-arg POSTGRES_VARIANT=bookworm
-          --build-arg PGLC_BUILD_ID=${GITHUB_SHA}
-          .
-
-  dispatch-release:
-    name: dispatch release
-    if: github.event_name == 'workflow_dispatch' && inputs.release
-    needs: [source-unit, docker-integration, docker-compatibility]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      contents: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - name: Dispatch release for the successful version commit
-        run: |
-          gh workflow run release.yml \
-            --ref master \
-            --raw-field "ref=${GITHUB_SHA}" \
-            --raw-field "ci_run_id=${GITHUB_RUN_ID}" \
-            --field publish_pgxn=true
+      - name: Run regression, RESP, and upgrade tests
+        run: sudo test/ci.sh ${{ matrix.postgres }}

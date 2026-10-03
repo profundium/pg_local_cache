@@ -5,22 +5,13 @@ import importlib.util
 import json
 from pathlib import Path
 import re
-import runpy
 import statistics
 import tempfile
 import unittest
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-LANGUAGES = re.findall(r'^([a-z]{2}):$', (ROOT / '_data/locales.yml').read_text(), re.M)
-
-
-def documents():
-    return [ROOT / 'index.html', *(ROOT / 'docs').glob('*.md'), *(ROOT / 'blog').glob('*.md')]
-
-
-def metadata(text):
-    return {key: value.strip('"\'') for key, value in
-            re.findall(r'^([a-z_]+):\s*(.+)$', text.split('---', 2)[1], re.M)}
+LANGUAGES = re.findall(r'^([a-z]{2}):$', (ROOT / 'site/_data/locales.yml').read_text(), re.M)
 
 
 def module(name):
@@ -34,125 +25,222 @@ site = module('check_site')
 report = module('benchmark_report')
 
 
-class PagesContracts(unittest.TestCase):
-    def test_executable_docs_keep_heading_extraction_with_stable_anchors(self):
-        blocks = runpy.run_path(str(ROOT / 'tests/install_docs_smoke.py'))['blocks']
-        for filename, heading, language in [
-            ('INSTALL_EXISTING.md', 'Configure before restart', 'conf'),
-            ('INSTALL_EXISTING.md', 'Initialize a source installation', 'sql'),
-            ('QUICKSTART.md', 'Read as an application role', 'bash'),
-            ('QUICKSTART.md', 'Check commit and rollback', 'bash'),
-        ]:
-            document = (ROOT / 'docs' / filename).read_text()
-            self.assertEqual(blocks(document, heading, language),
-                             blocks(re.sub(r' \{#[^}]+\}', '', document), heading, language))
+def front_matter(path):
+    text = path.read_text(encoding='utf-8')
+    match = re.match(r'\A---\s*\n(.*?)\n---(?:\n|$)', text, re.S)
+    if match is None:
+        return {}
+    fields = {}
+    for key in ('lang', 'translation_key', 'title', 'description', 'permalink'):
+        value = re.search(rf'^{key}:\s*(.*?)\s*$', match.group(1), re.M)
+        if value:
+            fields[key] = value.group(1).strip('\"\'')
+    return fields
 
-    def test_complete_translations_preserve_code_and_section_anchors(self):
-        originals = documents()
-        self.assertEqual(len(originals), 19)
-        self.assertEqual(len(list((ROOT / 'docs').glob('*.md'))), 14)
-        self.assertEqual(len(list((ROOT / 'blog').glob('*.md'))), 4)
-        dictionary_keys = re.findall(r'^(\s*[a-z_]+):', (ROOT / '_data/en.yml').read_text(), re.M)
-        for language in LANGUAGES:
-            dictionary = (ROOT / f'_data/{language}.yml').read_text()
-            self.assertEqual(re.findall(r'^(\s*[a-z_]+):', dictionary, re.M), dictionary_keys, language)
-            for source in originals:
-                translated = source if language == 'en' else ROOT / language / source.relative_to(ROOT)
-                with self.subTest(path=translated):
-                    original, text = source.read_text(), translated.read_text()
-                    a, b = metadata(original), metadata(text)
-                    self.assertEqual(b['lang'], language)
-                    self.assertEqual(b['translation_key'], a['translation_key'])
-                    self.assertEqual(b['permalink'], ('' if language == 'en' else '/' + language) + a['permalink'])
-                    self.assertEqual(b['layout'], a['layout'])
-                    self.assertEqual(re.findall(r'\{#[^}]+\}', original), re.findall(r'\{#[^}]+\}', text))
-                    self.assertEqual(re.findall(r'^```[^\n]*\n(.*?)^```', original, re.M | re.S),
-                                     re.findall(r'^```[^\n]*\n(.*?)^```', text, re.M | re.S))
-                    for field in ('date', 'last_modified_at', 'topic'):
-                        self.assertEqual(b.get(field), a.get(field))
-                    if language != 'en':
-                        self.assertNotEqual(b['title'], a['title'])
-                        self.assertNotEqual(b['description'], a['description'])
-                        self.assertGreater(len(text), len(original) * .35)
 
-    def test_navigation_resolves_and_metadata_is_distinct(self):
-        paths, titles, descriptions = set(), set(), set()
-        for document in documents():
-            text = document.read_text()
-            self.assertTrue(text.startswith('---\n'), document)
-            frontmatter = text.split('---', 2)[1]
-            fields = dict(re.findall(r'^([a-z_]+):\s*(.+)$', frontmatter, re.M))
-            for key, seen in [('title', titles), ('description', descriptions), ('permalink', paths)]:
-                value = fields[key].strip('"\'')
-                self.assertNotIn(value, seen, document)
-                seen.add(value)
-        navigation = (ROOT / '_data/navigation.yml').read_text()
-        urls = re.findall(r'^  url: (.+)$', navigation, re.M)
-        for url in urls:
-            self.assertIn(url, paths)
-        self.assertEqual(len(urls), len(set(urls)))
+def locale_entries():
+    result = {}
+    language = None
+    for line in (ROOT / 'site/_data/locales.yml').read_text(encoding='utf-8').splitlines():
+        match = re.fullmatch(r'([a-z]{2}):', line)
+        if match:
+            language = match.group(1)
+            result[language] = {}
+        elif language and line.startswith('  '):
+            key, value = line.strip().split(':', 1)
+            result[language][key] = value.strip().strip('\"\'')
+    return result
 
-    def test_homepage_starts_with_demo_and_benchmark(self):
-        homepage = (ROOT / 'index.html').read_text()
-        hero = homepage.split('<section id="benchmarks"')[0]
-        self.assertIn('QUICKSTART.html', hero)
-        self.assertIn('BENCHMARKS.html', hero)
-        self.assertIn('local_cache.attach_table', hero)
-        self.assertIn('local_cache.mget', hero)
-        self.assertNotIn('curl -fsSL', hero)
-        self.assertNotIn('1.3.0', homepage)
 
+def locale_dictionary_entries(path):
+    result = {}
+    parents = []
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        match = re.fullmatch(r'(\s*)([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*))?', line)
+        if match is None:
+            continue
+        indentation, key, value = len(match.group(1)), match.group(2), (match.group(3) or '').strip()
+        while parents and parents[-1][0] >= indentation:
+            parents.pop()
+        key_path = tuple(parent_key for _, parent_key in parents) + (key,)
+        result[key_path] = value or None
+        if not value:
+            parents.append((indentation, key))
+    return result
+
+
+def code_blocks(text):
+    return re.findall(r'(?ms)^(`{3,})([^\n]*)\n(.*?)^\1[ \t]*$', text)
+
+
+class RepositoryContentChecks(unittest.TestCase):
     def test_local_markdown_links_resolve(self):
+        documents = [ROOT / 'README.md', *sorted((ROOT / 'docs').glob('*.md'))]
+        documents.extend(sorted((ROOT / 'site').rglob('*.md')))
         failures = []
-        translated = [ROOT / lang / source.relative_to(ROOT) for lang in LANGUAGES if lang != 'en'
-                      for source in documents() if source.suffix == '.md']
-        for document in [ROOT / 'README.md', ROOT / 'CONTRIBUTING.md',
-                         *(path for path in documents() if path.suffix == '.md'), *translated]:
-            for label, target in re.findall(r'\[([^]]*)\]\(([^)]+)\)', document.read_text()):
-                if target.startswith(('http://', 'https://', '#', 'mailto:')):
+        for document in documents:
+            for target in re.findall(r'\[[^]]*\]\(([^)]+)\)', document.read_text(encoding='utf-8')):
+                target = target.strip().split(maxsplit=1)[0].strip('<>')
+                parsed = urlsplit(target)
+                if parsed.scheme or parsed.netloc or not parsed.path:
                     continue
-                path = target.split('#', 1)[0]
-                if path.endswith('.md') and '\n' in label:
-                    failures.append(f'{document.relative_to(ROOT)}: Jekyll cannot rewrite a multiline link label')
-                if path and not (document.parent / path).resolve().exists():
+                path = Path(unquote(parsed.path))
+                candidate = (document.parent / path).resolve()
+                english_site_docs = (ROOT / 'site/docs').resolve()
+                if not candidate.exists():
+                    try:
+                        candidate = (ROOT / 'docs' / candidate.relative_to(english_site_docs)).resolve()
+                    except ValueError:
+                        pass
+                if not candidate.exists() and candidate.suffix == '.html':
+                    candidate = candidate.with_suffix('.md')
+                if not candidate.exists():
                     failures.append(f'{document.relative_to(ROOT)} -> {target}')
         self.assertEqual(failures, [])
 
-    def test_hero_benchmark_matches_recorded_medians(self):
-        data = json.loads((ROOT / 'assets/benchmarks/2026-09-15-m3-max-resp.json').read_text())
-        rows = data['runs']['initial_optimized_vm']['results']
-        medians = {
-            mode: statistics.median(row['requests_s'] for row in rows
-                                    if row['batch'] == 1 and row['clients'] == 256 and row['mode'] == mode)
-            for mode in ('postgres-any', 'mget', 'resp-mget')
+    def test_complete_translations_preserve_code_blocks_and_section_anchors(self):
+        failures = []
+        for section, english_root in (('docs', ROOT / 'docs'), ('blog', ROOT / 'site/blog')):
+            english_documents = {path.name: path for path in english_root.glob('*.md')}
+            for language in LANGUAGES:
+                if language == 'en':
+                    continue
+                translated = ROOT / 'site' / language / section
+                translated_documents = {path.name: path for path in translated.glob('*.md')}
+                self.assertEqual(set(translated_documents), set(english_documents), f'{language}/{section}')
+                for name, english_path in english_documents.items():
+                    translated_path = translated_documents[name]
+                    english = english_path.read_text(encoding='utf-8')
+                    localized = translated_path.read_text(encoding='utf-8')
+                    if code_blocks(localized) != code_blocks(english):
+                        failures.append(f'{language}/{section}/{name}: code blocks differ')
+                    english_anchors = re.findall(r'\{#([A-Za-z0-9_-]+)\}', english)
+                    localized_anchors = re.findall(r'\{#([A-Za-z0-9_-]+)\}', localized)
+                    if localized_anchors != english_anchors:
+                        failures.append(f'{language}/{section}/{name}: section anchors differ')
+        self.assertEqual(failures, [])
+
+    def test_locale_dictionaries_match_english_keys_and_have_values(self):
+        dictionary_files = {
+            path.stem: path for path in (ROOT / 'site/_data').glob('[a-z][a-z].yml')
         }
-        hero = (ROOT / 'index.html').read_text().split('</section>', 1)[0]
-        for value in medians.values():
-            self.assertIn(f'{value:,.0f}', hero)
-        self.assertIn(f'{medians["resp-mget"] / medians["postgres-any"]:.2f}×', hero)
-        self.assertIn('SQL mget was slower', hero)
-        self.assertIn('benchmarks-go.html', hero)
+        self.assertEqual(set(dictionary_files), set(LANGUAGES))
+        dictionaries = {
+            language: locale_dictionary_entries(path)
+            for language, path in dictionary_files.items()
+        }
+        english_keys = set(dictionaries['en'])
+        failures = []
+        for language, entries in dictionaries.items():
+            keys = set(entries)
+            missing = english_keys - keys
+            extra = keys - english_keys
+            if missing:
+                failures.append(f'{language}: missing keys {sorted(missing)}')
+            if extra:
+                failures.append(f'{language}: extra keys {sorted(extra)}')
+            empty = []
+            for key_path, value in entries.items():
+                if value is None:
+                    has_children = any(
+                        len(candidate) > len(key_path) and candidate[:len(key_path)] == key_path
+                        for candidate in entries
+                    )
+                    if not has_children:
+                        empty.append('.'.join(key_path))
+                else:
+                    normalized = value.strip()
+                    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in '\"\'':
+                        normalized = normalized[1:-1].strip()
+                    if normalized.lower() in ('', 'null', '~', '{}', '[]'):
+                        empty.append('.'.join(key_path))
+            if empty:
+                failures.append(f'{language}: empty values at {sorted(empty)}')
+        self.assertEqual(failures, [])
 
-    def test_sitemap_and_workflow_cover_the_built_pages(self):
-        self.assertIn('site.pages', (ROOT / 'sitemap.xml').read_text())
-        workflow = (ROOT / '.github/workflows/pages.yml').read_text()
-        self.assertIn('python3 scripts/check_site.py _site', workflow)
-        self.assertIn('needs: validate', workflow)
-        self.assertIn('site_smoke.py _site', workflow)
-        self.assertNotIn('docs/2.0-adoption', workflow)
-        self.assertNotIn('site_manifest', workflow)
-        layout = (ROOT / '_layouts/default.html').read_text()
-        self.assertIn('rel="canonical"', layout)
-        self.assertIn('application/ld+json', layout)
-        self.assertIn('google_site_verification', layout)
+    def test_navigation_and_locale_metadata_resolve_and_are_distinct(self):
+        locales = locale_entries()
+        self.assertEqual(set(locales), set(LANGUAGES))
+        self.assertEqual(set(locales), {'en', 'ru', 'es', 'de', 'fr', 'zh'})
+        for language, entry in locales.items():
+            self.assertEqual(entry.get('prefix'), '' if language == 'en' else f'/{language}')
+            self.assertTrue(entry.get('og_locale'))
+        self.assertEqual(len({entry['prefix'] for entry in locales.values()}), len(locales))
+        self.assertEqual(len({entry['og_locale'] for entry in locales.values()}), len(locales))
+        self.assertTrue(all(entry.get('label') and entry.get('og_locale') for entry in locales.values()))
 
-    def test_benchmark_defines_metrics_and_scope(self):
-        document = (ROOT / 'docs/BENCHMARKS.md').read_text()
-        self.assertIn('requests/s', document)
-        self.assertIn('benchmark.json', document)
-        self.assertNotIn('1.3.0', document)
-        self.assertIn('closed-loop', document.lower())
-        self.assertIn('coordinated omission', document)
+        navigation = (ROOT / 'site/_data/navigation.yml').read_text(encoding='utf-8')
+        targets = re.findall(r'^  url:\s*(\S+)\s*$', navigation, re.M)
+        self.assertTrue(targets)
+        failures = []
+        for target in targets:
+            source = Path(urlsplit(target).path.lstrip('/'))
+            if source.suffix == '.html':
+                source = source.with_suffix('.md')
+            for language, entry in locales.items():
+                localized = (ROOT / 'docs' / source.name if language == 'en'
+                             else ROOT / 'site' / language / 'docs' / source.name)
+                if not localized.is_file():
+                    failures.append(f'{language}: {target}')
+        self.assertEqual(failures, [])
+
+        pages = {'en': ROOT / 'site/index.html'}
+        pages.update({language: ROOT / 'site' / language / 'index.html'
+                      for language in locales if language != 'en'})
+        home_metadata = {language: front_matter(path) for language, path in pages.items()}
+        self.assertEqual(set(home_metadata), set(locales))
+        self.assertTrue(all(home_metadata[lang].get('lang') == lang for lang in locales))
+        for language, metadata in home_metadata.items():
+            self.assertEqual(metadata.get('permalink'), f"{locales[language]['prefix']}/")
+        for field in ('title', 'description', 'permalink'):
+            values = [metadata.get(field) for metadata in home_metadata.values()]
+            self.assertTrue(all(values), field)
+            self.assertEqual(len(set(values)), len(locales), field)
+
+        english_documents = {path.name: front_matter(path) for path in (ROOT / 'docs').glob('*.md')}
+        for name, english in english_documents.items():
+            localized_metadata = [
+                front_matter(ROOT / 'site' / language / 'docs' / name)
+                for language in locales if language != 'en'
+            ]
+            all_metadata = [english, *localized_metadata]
+            self.assertTrue(all(item.get('translation_key') == english.get('translation_key')
+                                for item in localized_metadata), name)
+            for field in ('title', 'description', 'permalink'):
+                values = [item.get(field) for item in all_metadata]
+                self.assertTrue(all(values), f'{name}: {field}')
+                self.assertEqual(len(set(values)), len(locales), f'{name}: {field}')
+
+    def test_homepage_benchmark_hero_matches_recorded_json_medians(self):
+        data = json.loads((ROOT / 'docs/benchmarks/2026-09-15-m3-max-resp.json').read_text(encoding='utf-8'))
+        rows = data['runs']['initial_optimized_vm']['results']
+        modes = {'resp-mget': 'resp', 'postgres-any': 'prepared', 'mget': 'mget'}
+        medians = {}
+        for mode, label in modes.items():
+            samples = [row['requests_s'] for row in rows
+                       if row.get('mode') == mode and row.get('clients') == 256
+                       and row.get('batch') == 1]
+            self.assertEqual(len(samples), 3, mode)
+            medians[label] = int(round(statistics.median(samples)))
+
+        for homepage in [ROOT / 'site/index.html', *(ROOT / 'site' / lang / 'index.html'
+                                                     for lang in LANGUAGES if lang != 'en')]:
+            text = homepage.read_text(encoding='utf-8')
+            figure = re.search(r'<figure class="hero-benchmark".*?</figure>', text, re.S)
+            self.assertIsNotNone(figure, homepage)
+            markup = figure.group(0)
+            resp = re.search(r'<p class="benchmark-number">\s*<strong>([\d,]+)</strong>', markup)
+            baselines = re.search(r'<dl class="benchmark-baselines">(.*?)</dl>', markup, re.S)
+            baseline_values = re.findall(r'<dd>\s*([\d,]+)', baselines.group(1)) if baselines else []
+            gain = re.search(r'<p class="benchmark-gain">\s*<strong>([\d.]+)×</strong>', markup)
+            self.assertTrue(resp and len(baseline_values) == 2 and gain, homepage)
+            displayed = {'resp': int(resp.group(1).replace(',', '')),
+                         'prepared': int(baseline_values[0].replace(',', '')),
+                         'mget': int(baseline_values[1].replace(',', ''))}
+            self.assertEqual(displayed, medians, homepage)
+            self.assertEqual(float(gain.group(1)), round(medians['resp'] / medians['prepared'], 2), homepage)
 
 
 class BuiltSiteChecks(unittest.TestCase):
