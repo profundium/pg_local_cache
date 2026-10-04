@@ -287,6 +287,7 @@ PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" \
     python3 "$repo/tests/tls_integration.py" --mtls
 
 default_version=$(sed -n "s/^default_version = '\([^']*\)'$/\1/p" "$repo/pg_local_cache.control")
+current_major=${default_version%%.*}
 mapfile -t sorted_versions < <(
     {
         git -C "$repo" tag --list 'v*' | sed -n 's/^v//p'
@@ -294,25 +295,40 @@ mapfile -t sorted_versions < <(
     } | sort -V
 )
 upgrade_tag=
+previous_major_tag=
 for version in "${sorted_versions[@]}"; do
     [[ "$version" != "$default_version" ]] || break
     upgrade_tag="v$version"
+    version_major=${version%%.*}
+    if [[ "$version_major" =~ ^[0-9]+$ ]] && (( 10#$version_major < 10#$current_major )); then
+        previous_major_tag=$upgrade_tag
+    fi
 done
 [[ -n "$upgrade_tag" ]] || {
     echo "no v* tag sorts below default_version $default_version for upgrade test" >&2
     exit 1
 }
-echo "==> upgrade from $upgrade_tag to $default_version"
-mkdir "$temp/old"
-git -C "$repo" archive "$upgrade_tag" | tar -C "$temp/old" -xf -
-# Old releases refuse to build from an archive without an explicit build id.
-make -C "$temp/old" PG_CONFIG="$pg_config" PGLC_BUILD_ID="$upgrade_tag" COPT=-Werror
-make -C "$temp/old" PG_CONFIG="$pg_config" PGLC_BUILD_ID="$upgrade_tag" install
-"$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d postgres -c 'CREATE DATABASE upgrade_old;'
-"$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d postgres -c 'CREATE DATABASE upgrade_new;'
-cat >/etc/postgresql/"$PG"/ci/pglc.conf <<CONF
+upgrade_tags=("$upgrade_tag")
+if [[ -n "$previous_major_tag" && "$previous_major_tag" != "$upgrade_tag" ]]; then
+    upgrade_tags+=("$previous_major_tag")
+fi
+
+run_upgrade_test() {
+    local upgrade_tag=$1 upgrade_n=$2
+    local db_old="upgrade_old_$upgrade_n" db_new="upgrade_new_$upgrade_n"
+    local old_dir="$temp/old_$upgrade_n" baseline_major=${upgrade_tag#v}
+    baseline_major=${baseline_major%%.*}
+    echo "==> upgrade from $upgrade_tag to $default_version"
+    mkdir "$old_dir"
+    git -C "$repo" archive "$upgrade_tag" | tar -C "$old_dir" -xf -
+    # Old releases refuse to build from an archive without an explicit build id.
+    make -C "$old_dir" PG_CONFIG="$pg_config" PGLC_BUILD_ID="$upgrade_tag" COPT=-Werror
+    make -C "$old_dir" PG_CONFIG="$pg_config" PGLC_BUILD_ID="$upgrade_tag" install
+    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d postgres -c "CREATE DATABASE $db_old;"
+    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d postgres -c "CREATE DATABASE $db_new;"
+    cat >/etc/postgresql/"$PG"/ci/pglc.conf <<CONF
 shared_preload_libraries = 'pg_local_cache'
-pg_local_cache.database = 'upgrade_old'
+pg_local_cache.database = '$db_old'
 pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6390
 pg_local_cache.bind_address = '127.0.0.1'
@@ -323,10 +339,10 @@ pg_local_cache.max_clients = 16
 pg_local_cache.max_clients_per_worker = 16
 pg_local_cache.memory_budget_mb = 64
 CONF
-pg_ctlcluster "$PG" ci restart
-"$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d upgrade_old <<'SQL'
+    pg_ctlcluster "$PG" ci restart
+    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" <<SQL
 CREATE EXTENSION pg_local_cache;
-GRANT CONNECT ON DATABASE upgrade_old TO local_cache_worker;
+GRANT CONNECT ON DATABASE $db_old TO local_cache_worker;
 GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
 GRANT SELECT ON local_cache.mapping TO local_cache_worker;
 CREATE TABLE public.upgrade_attached (id bigint PRIMARY KEY, value text);
@@ -339,12 +355,12 @@ CREATE VIEW public.upgrade_health_view AS SELECT local_cache.health() AS payload
 CREATE VIEW public.upgrade_metrics_dependency AS SELECT * FROM local_cache.metrics();
 SQL
 
-# Fill an attached key while the old library is loaded, then replace the
-# library and warm it again before the catalog migration.
-PG_LOCAL_CACHE_PSQL="$psql" PGPORT=5433 PGHOST=127.0.0.1 \
-    PGDATABASE=upgrade_old PGUSER=postgres \
-    PG_LOCAL_CACHE_RESP_HOST=127.0.0.1 PG_LOCAL_CACHE_RESP_PORT=6390 \
-    PG_LOCAL_CACHE_AUTH_TOKEN="$auth_token" python3 - "$repo" <<'PY'
+    # Fill an attached key while the old library is loaded, then replace the
+    # library and warm it again before the catalog migration.
+    PG_LOCAL_CACHE_PSQL="$psql" PGPORT=5433 PGHOST=127.0.0.1 \
+        PGDATABASE="$db_old" PGUSER=postgres \
+        PG_LOCAL_CACHE_RESP_HOST=127.0.0.1 PG_LOCAL_CACHE_RESP_PORT=6390 \
+        PG_LOCAL_CACHE_AUTH_TOKEN="$auth_token" python3 - "$repo" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1] + "/tests")
 from pipeline_integration import RespConnection, crud_key, wait_for_mapping
@@ -356,9 +372,9 @@ try:
 finally:
     client.close()
 PY
-make -C "$temp/current" PG_CONFIG="$pg_config" install
-pg_ctlcluster "$PG" ci restart
-"$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d upgrade_new <<'SQL'
+    make -C "$temp/current" PG_CONFIG="$pg_config" install
+    pg_ctlcluster "$PG" ci restart
+    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_new" <<'SQL'
 CREATE EXTENSION pg_local_cache;
 -- Same operator grants as upgrade_old, so the snapshots differ only by migration drift.
 GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
@@ -366,10 +382,10 @@ GRANT SELECT ON local_cache.mapping TO local_cache_worker;
 GRANT EXECUTE ON FUNCTION local_cache.invalidate(text) TO local_cache_test_app;
 GRANT EXECUTE ON FUNCTION local_cache.metrics() TO local_cache_test_monitor;
 SQL
-PG_LOCAL_CACHE_PSQL="$psql" PGPORT=5433 PGHOST=127.0.0.1 \
-    PGDATABASE=upgrade_old PGUSER=postgres \
-    PG_LOCAL_CACHE_RESP_HOST=127.0.0.1 PG_LOCAL_CACHE_RESP_PORT=6390 \
-    PG_LOCAL_CACHE_AUTH_TOKEN="$auth_token" python3 - "$repo" <<'PY'
+    PG_LOCAL_CACHE_PSQL="$psql" PGPORT=5433 PGHOST=127.0.0.1 \
+        PGDATABASE="$db_old" PGUSER=postgres \
+        PG_LOCAL_CACHE_RESP_HOST=127.0.0.1 PG_LOCAL_CACHE_RESP_PORT=6390 \
+        PG_LOCAL_CACHE_AUTH_TOKEN="$auth_token" python3 - "$repo" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1] + "/tests")
 from pipeline_integration import RespConnection, crud_key, wait_for_mapping
@@ -381,63 +397,73 @@ try:
 finally:
     client.close()
 PY
-if ! "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d upgrade_old \
-    -c 'ALTER EXTENSION pg_local_cache UPDATE;' >"$temp/dependency-error.log" 2>&1; then
-    grep -Eq 'cannot drop function (local_cache\.)?_metrics_2_0_4\(\) because other objects depend on it' \
-        "$temp/dependency-error.log" || {
-        cat "$temp/dependency-error.log" >&2
-        echo "upgrade failed for an unexpected dependency" >&2
+    if (( baseline_major < 3 )); then
+        if ! "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" \
+            -c 'ALTER EXTENSION pg_local_cache UPDATE;' >"$temp/dependency-error.log" 2>&1; then
+            grep -Eq 'cannot drop function (local_cache\.)?_metrics_2_0_4\(\) because other objects depend on it' \
+                "$temp/dependency-error.log" || {
+                cat "$temp/dependency-error.log" >&2
+                echo "upgrade failed for an unexpected dependency" >&2
+                exit 1
+            }
+        else
+            echo "upgrade unexpectedly dropped metrics() despite a dependent user view" >&2
+            exit 1
+        fi
+        "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" -c \
+            'DROP VIEW public.upgrade_metrics_dependency;'
+    fi
+    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" -c 'ALTER EXTENSION pg_local_cache UPDATE;'
+    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" -c \
+        "DO \$\$ BEGIN
+            IF NOT pg_catalog.has_function_privilege(
+                'local_cache_test_app', 'local_cache.invalidate(text)', 'EXECUTE') THEN
+                RAISE EXCEPTION 'custom extension function grant was lost';
+            END IF;
+            IF NOT pg_catalog.has_function_privilege(
+                'local_cache_test_monitor', 'local_cache.metrics()', 'EXECUTE') THEN
+                RAISE EXCEPTION 'custom metrics() grant was lost';
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_trigger
+                 WHERE tgrelid = 'public.upgrade_attached'::regclass
+                   AND tgname IN ('pg_local_cache_statement_guard',
+                                  'pg_local_cache_row_invalidate',
+                                  'pg_local_cache_truncate_invalidate')
+                 GROUP BY tgrelid HAVING count(*) = 3
+            ) THEN
+                RAISE EXCEPTION 'attached-table triggers were lost';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM public.upgrade_health_view
+                           WHERE payload ? 'ready') THEN
+                RAISE EXCEPTION 'dependent health view stopped working';
+            END IF;
+            IF to_regclass('public.upgrade_metrics_dependency') IS NOT NULL THEN
+                PERFORM 1 FROM public.upgrade_metrics_dependency;
+            END IF;
+            IF current_setting('pg_local_cache.binary_version') <> '$default_version' THEN
+                RAISE EXCEPTION 'loaded binary version is %',
+                    current_setting('pg_local_cache.binary_version');
+            END IF;
+         END \$\$;"
+    before_invalidations=$("$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 \
+        -d "$db_old" -c "SELECT (local_cache.stats() ->> 'invalidations')::bigint")
+    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" -c \
+        "UPDATE public.upgrade_attached SET value = 'after-upgrade' WHERE id = 1;"
+    after_invalidations=$("$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 \
+        -d "$db_old" -c "SELECT (local_cache.stats() ->> 'invalidations')::bigint")
+    (( after_invalidations > before_invalidations )) || {
+        echo "attached-table UPDATE did not increment invalidations" >&2
         exit 1
     }
-else
-    echo "upgrade unexpectedly dropped metrics() despite a dependent user view" >&2
-    exit 1
-fi
-"$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d upgrade_old -c \
-    'DROP VIEW public.upgrade_metrics_dependency;
-     ALTER EXTENSION pg_local_cache UPDATE;'
-"$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d upgrade_old -c \
-    "DO \$\$ BEGIN
-        IF NOT pg_catalog.has_function_privilege(
-            'local_cache_test_app', 'local_cache.invalidate(text)', 'EXECUTE') THEN
-            RAISE EXCEPTION 'custom extension function grant was lost';
-        END IF;
-        IF NOT pg_catalog.has_function_privilege(
-            'local_cache_test_monitor', 'local_cache.metrics()', 'EXECUTE') THEN
-            RAISE EXCEPTION 'custom metrics() grant was lost';
-        END IF;
-        IF NOT EXISTS (
-            SELECT 1 FROM pg_catalog.pg_trigger
-             WHERE tgrelid = 'public.upgrade_attached'::regclass
-               AND tgname IN ('pg_local_cache_statement_guard',
-                              'pg_local_cache_row_invalidate',
-                              'pg_local_cache_truncate_invalidate')
-             GROUP BY tgrelid HAVING count(*) = 3
-        ) THEN
-            RAISE EXCEPTION 'attached-table triggers were lost';
-        END IF;
-        IF NOT EXISTS (SELECT 1 FROM public.upgrade_health_view
-                       WHERE payload ? 'ready') THEN
-            RAISE EXCEPTION 'dependent health view stopped working';
-        END IF;
-        IF current_setting('pg_local_cache.binary_version') <> '$default_version' THEN
-            RAISE EXCEPTION 'loaded binary version is %',
-                current_setting('pg_local_cache.binary_version');
-        END IF;
-     END \$\$;"
-before_invalidations=$("$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 \
-    -d upgrade_old -c "SELECT (local_cache.stats() ->> 'invalidations')::bigint")
-"$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d upgrade_old -c \
-    "UPDATE public.upgrade_attached SET value = 'after-upgrade' WHERE id = 1;"
-after_invalidations=$("$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 \
-    -d upgrade_old -c "SELECT (local_cache.stats() ->> 'invalidations')::bigint")
-(( after_invalidations > before_invalidations )) || {
-    echo "attached-table UPDATE did not increment invalidations" >&2
-    exit 1
+    "$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" \
+        -f "$temp/current/test/extension_snapshot.sql" >"$temp/$db_old.snapshot"
+    "$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 -d "$db_new" \
+        -f "$temp/current/test/extension_snapshot.sql" >"$temp/$db_new.snapshot"
+    diff -u "$temp/$db_old.snapshot" "$temp/$db_new.snapshot"
 }
-"$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 -d upgrade_old \
-    -f "$temp/current/test/extension_snapshot.sql" >"$temp/upgrade_old.snapshot"
-"$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 -d upgrade_new \
-    -f "$temp/current/test/extension_snapshot.sql" >"$temp/new.snapshot"
-diff -u "$temp/upgrade_old.snapshot" "$temp/new.snapshot"
+
+for i in "${!upgrade_tags[@]}"; do
+    run_upgrade_test "${upgrade_tags[$i]}" "$((i + 1))"
+done
 echo "all PostgreSQL $PG regression, RESP, and upgrade checks passed"
