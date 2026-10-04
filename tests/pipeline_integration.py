@@ -1638,7 +1638,11 @@ def test_overlapping_publishers_on_one_key(
             after_first_read["database_reads"] + 1
         ), "remaining publisher fence did not block cache publication"
 
-        sql(f"SELECT local_cache.detach_table('{relation}'::regclass)")
+        # Forget cache identity while pinned without taking a table DDL lock.
+        sql(
+            f"SELECT local_cache._forget({sql_literal(namespace)}, "
+            f"'{relation}'::regclass::oid)"
+        )
         assert int(
             sql(
                 "SELECT public.pglc_test_relation_identity_pins("
@@ -1646,22 +1650,24 @@ def test_overlapping_publishers_on_one_key(
             )
         ) == 1
         assert read_cache_stats()["pending_forget"] >= 1
-        sql(
-            f"SELECT local_cache.attach_table('{relation}'::regclass, true, "
-            f"{sql_literal(namespace)})"
-        )
-        assert int(
-            sql(
-                "SELECT public.pglc_test_relation_incarnation("
-                f"'{relation}'::regclass, {sql_literal(namespace)})"
-            )
-        ) == 0, "remap reused relation identity while publisher still pinned it"
 
         finish_writer(second_locker, commit=True)
         second_locker = None
         finish_publishing_key_writer(second)
         second = None
+        assert int(
+            sql(
+                "SELECT public.pglc_test_relation_identity_pins("
+                f"'{relation}'::regclass, {sql_literal(namespace)})"
+            )
+        ) == 0
         assert read_cache_stats()["pending_forget"] == 0
+
+        sql(f"SELECT local_cache.detach_table('{relation}'::regclass)")
+        sql(
+            f"SELECT local_cache.attach_table('{relation}'::regclass, true, "
+            f"{sql_literal(namespace)})"
+        )
         new_incarnation = int(
             sql(
                 "SELECT public.pglc_test_relation_incarnation("
@@ -1669,7 +1675,17 @@ def test_overlapping_publishers_on_one_key(
             )
         )
         assert new_incarnation != original_incarnation
+        before_remap_read = read_cache_stats()
         assert wait_for_mapping(client, key) == row_bytes(row_id, value)
+        after_remap_read = read_cache_stats()
+        assert after_remap_read["database_reads"] == (
+            before_remap_read["database_reads"] + 1
+        ), "remap served the old cached value"
+        assert mget_one(client, key) == row_bytes(row_id, value)
+        assert (
+            read_cache_stats()["database_reads"]
+            == after_remap_read["database_reads"]
+        )
     finally:
         for locker in (first_locker, second_locker):
             if locker is not None:
