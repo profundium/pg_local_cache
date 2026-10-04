@@ -898,8 +898,13 @@ evict_one_cache_entry(void)
 	int			scanned = 0;
 	int			pass;
 	bool		have_victim = false;
+	bool		have_cached_relation_key = false;
+	Oid			cached_database_oid = InvalidOid;
+	char		cached_nspace[PGLC_NAMESPACE_MAX];
+	PgLocalCacheRelationState *cached_relation_state = NULL;
 	TimestampTz now = GetCurrentTimestamp();
 
+	/* Exclusive cache lock keeps relation state stable throughout this sample. */
 	/*
 	 * Rotate a strictly bounded dynahash sample so no bucket is permanently
 	 * pinned.  Reclaim a stale entry immediately when the sample encounters one;
@@ -923,10 +928,22 @@ evict_one_cache_entry(void)
 			if (entry->dirty_writers == 0 &&
 				!cache_load_is_active_locked(entry, now))
 			{
-				relation_state = get_relation_state(entry->key.database_oid,
-											entry->relation_oid,
-											entry->key.nspace,
-											false);
+				if (!have_cached_relation_key ||
+					cached_database_oid != entry->key.database_oid ||
+					memcmp(cached_nspace, entry->key.nspace,
+						   sizeof(cached_nspace)) != 0)
+				{
+					cached_database_oid = entry->key.database_oid;
+					memcpy(cached_nspace, entry->key.nspace,
+						   sizeof(cached_nspace));
+					cached_relation_state =
+						get_relation_state(entry->key.database_oid,
+										   entry->relation_oid,
+										   entry->key.nspace,
+										   false);
+					have_cached_relation_key = true;
+				}
+				relation_state = cached_relation_state;
 				if (!cache_entry_is_current_locked(entry, relation_state))
 				{
 					victim = entry->key;
@@ -1516,6 +1533,10 @@ pglc_cache_invalidate_database(Oid database_oid)
 	HASH_SEQ_STATUS relation_sequence;
 	PgLocalCacheCacheEntry *entry;
 	PgLocalCacheRelationState *relation_state;
+	PgLocalCacheRelationState *cached_relation_state = NULL;
+	Oid			cached_database_oid = InvalidOid;
+	char		cached_nspace[PGLC_NAMESPACE_MAX];
+	bool		have_cached_relation_key = false;
 	uint64		count = 0;
 
 	pglc_require_preload();
@@ -1526,8 +1547,20 @@ pglc_cache_invalidate_database(Oid database_oid)
 	{
 		if (entry->key.database_oid != database_oid)
 			continue;
-		relation_state = get_relation_state(database_oid, entry->relation_oid,
-										entry->key.nspace, false);
+		if (!have_cached_relation_key ||
+			cached_database_oid != entry->key.database_oid ||
+			memcmp(cached_nspace, entry->key.nspace,
+				   sizeof(cached_nspace)) != 0)
+		{
+			cached_database_oid = entry->key.database_oid;
+			memcpy(cached_nspace, entry->key.nspace, sizeof(cached_nspace));
+			cached_relation_state =
+				get_relation_state(database_oid,
+								   entry->relation_oid,
+								   entry->key.nspace, false);
+			have_cached_relation_key = true;
+		}
+		relation_state = cached_relation_state;
 		if (cache_entry_is_current_locked(entry, relation_state))
 			count++;
 	}
@@ -1549,6 +1582,10 @@ pglc_cache_invalidate_all(void)
 	HASH_SEQ_STATUS sequence;
 	PgLocalCacheCacheEntry *entry;
 	PgLocalCacheRelationState *relation_state;
+	PgLocalCacheRelationState *cached_relation_state = NULL;
+	Oid			cached_database_oid = InvalidOid;
+	char		cached_nspace[PGLC_NAMESPACE_MAX];
+	bool		have_cached_relation_key = false;
 	uint64		count = 0;
 
 	pglc_require_preload();
@@ -1556,9 +1593,20 @@ pglc_cache_invalidate_all(void)
 	hash_seq_init(&sequence, pglc_cache_hash);
 	while ((entry = hash_seq_search(&sequence)) != NULL)
 	{
-		relation_state = get_relation_state(entry->key.database_oid,
-										entry->relation_oid,
-										entry->key.nspace, false);
+		if (!have_cached_relation_key ||
+			cached_database_oid != entry->key.database_oid ||
+			memcmp(cached_nspace, entry->key.nspace,
+				   sizeof(cached_nspace)) != 0)
+		{
+			cached_database_oid = entry->key.database_oid;
+			memcpy(cached_nspace, entry->key.nspace, sizeof(cached_nspace));
+			cached_relation_state =
+				get_relation_state(entry->key.database_oid,
+								   entry->relation_oid,
+								   entry->key.nspace, false);
+			have_cached_relation_key = true;
+		}
+		relation_state = cached_relation_state;
 		if (cache_entry_is_current_locked(entry, relation_state))
 			count++;
 	}
@@ -2458,16 +2506,30 @@ pglc_stats_json(void)
 	PgLocalCacheRelationState *relation_state;
 	uint32		global_dirty_writers;
 	TimestampTz now = GetCurrentTimestamp();
+	PgLocalCacheRelationState *cached_relation_state = NULL;
+	Oid			cached_database_oid = InvalidOid;
+	char		cached_nspace[PGLC_NAMESPACE_MAX];
+	bool		have_cached_relation_key = false;
 
 	pglc_require_preload();
 	LWLockAcquire(pglc_shared->lock, LW_SHARED);
 	hash_seq_init(&sequence, pglc_cache_hash);
 	while ((entry = hash_seq_search(&sequence)) != NULL)
 	{
-		relation_state = get_relation_state(entry->key.database_oid,
-										   entry->relation_oid,
-										   entry->key.nspace,
-										   false);
+		if (!have_cached_relation_key ||
+			cached_database_oid != entry->key.database_oid ||
+			memcmp(cached_nspace, entry->key.nspace,
+				   sizeof(cached_nspace)) != 0)
+		{
+			cached_database_oid = entry->key.database_oid;
+			memcpy(cached_nspace, entry->key.nspace, sizeof(cached_nspace));
+			cached_relation_state =
+				get_relation_state(entry->key.database_oid,
+								   entry->relation_oid,
+								   entry->key.nspace, false);
+			have_cached_relation_key = true;
+		}
+		relation_state = cached_relation_state;
 		if (cache_entry_is_current_locked(entry, relation_state) &&
 			entry->negative)
 			negative++;
