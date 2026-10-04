@@ -2,41 +2,30 @@
 layout: doc
 lang: es
 translation_key: postgresql-redis-cache
-title: Caché aparte de PostgreSQL y Redis
-seo_title: "Caché aparte de PostgreSQL y Redis: invalidación y condiciones de carrera"
-description: Usa PostgreSQL como fuente de verdad con un recorrido de caché aparte de Redis, entiende las carreras de lecturas obsoletas y descubre dónde encaja pg_local_cache.
+title: PostgreSQL y Redis cache-aside
+seo_title: "PostgreSQL y Redis cache-aside: invalidación y condiciones de carrera"
+description: Compare Redis cache-aside gestionado por la aplicación con las lecturas RESP de pg_local_cache, incluidas las carreras por cargas obsoletas y la invalidación de escrituras.
 section: Guías
 permalink: /es/docs/postgresql-redis-cache.html
 last_modified_at: "2026-10-04"
 ---
 
-# Caché aparte de PostgreSQL y Redis {#postgresql-and-redis-cache-aside}
+# PostgreSQL y Redis cache-aside {#postgresql-and-redis-cache-aside}
 
-La caché aparte de Redis sitúa la aplicación entre una lectura y su almacenamiento autoritativo. En un fallo, lee PostgreSQL, devuelve ese valor y lo escribe en Redis; en una escritura, actualiza PostgreSQL e invalida la clave de Redis correspondiente. La [guía del patrón de Redis](https://redis.io/docs/latest/develop/use-cases/cache-aside/) describe este flujo, pero no hace que una caché de aplicación sea coherente transaccionalmente con PostgreSQL.
+Esta guía explica Redis cache-aside con PostgreSQL como fuente de verdad, la carrera por cargas obsoletas y cómo `pg_local_cache` gestiona la invalidación de filas adjuntas.
 
-Para una fila identificada por `public.items.id`, el esquema es:
-
-```text
-GET item:42
-miss -> SELECT * FROM public.items WHERE id = $1
-     -> SET item:42 <serialized row> EX <ttl>
-write -> UPDATE public.items ...
-      -> COMMIT
-      -> DEL item:42
-```
-
-Usa SQL parametrizado y un espacio de nombres para las claves. Un TTL limita cuánto tiempo permanece un valor almacenado en Redis; no demuestra que esté actualizado respecto a un commit de PostgreSQL. La eliminación explícita gestiona las escrituras habituales, pero no elimina todas las carreras.
+Cuando se produce un fallo de caché en Redis, la aplicación lee la fila de PostgreSQL, la devuelve y la almacena con una clave de aplicación. Al escribir, confirma los datos de PostgreSQL y elimina la clave de Redis. Un TTL limita cuánto tiempo se conserva un valor, pero no demuestra que siga actualizado. Consulte la [guía de Redis sobre cache-aside](https://redis.io/docs/latest/develop/use-cases/cache-aside/).
 
 ## La carrera de invalidación {#the-invalidation-race}
 
-Considera dos solicitudes. El lector R1 no encuentra la clave en Redis y lee la fila antigua de PostgreSQL. El escritor W confirma una fila nueva y elimina `item:42`. Después R1 continúa y almacena su valor antiguo en Redis. El siguiente lector ve datos obsoletos hasta que esa clave caduca o una escritura posterior la elimina.
+Un lector puede cargar una fila antigua de PostgreSQL, detenerse y guardarla después de que un escritor confirme los cambios y elimine la clave. El siguiente lector ve datos obsoletos hasta que caduque la entrada o se vuelva a eliminar.
 
-Entre las posibles mitigaciones están volver a eliminar después de que termine un loader, almacenar una versión de la base de datos y rechazar valores antiguos, serializar las cargas por clave o publicar los cambios confirmados mediante un outbox o un consumidor CDC. Cada una añade coordinación y casos de fallo. La [guía de invalidación de caché](cache-invalidation.md) demuestra el problema análogo del llenado tardío dentro de PostgreSQL.
+Entre las mitigaciones están rechazar cargas con una versión antigua de la base de datos, serializar las cargas por clave o publicar los cambios confirmados mediante un consumidor de outbox o CDC. Cada opción añade coordinación. La [guía de invalidación consciente de las transacciones](cache-invalidation.md) describe el límite equivalente para cargas tardías dentro de PostgreSQL.
 
 ## Dónde encaja pg_local_cache {#where-pg_local_cache-fits}
 
-`pg_local_cache` es una opción más acotada y local a PostgreSQL para filas completas identificadas por clave primaria. `RESP `MGET`` es explícito; un `SELECT` normal y una forma de consulta arbitraria nunca leen la caché. Los triggers de tablas asociadas ponen vallas a las claves o relaciones afectadas en el recorrido de escritura de la base de datos, y las lecturas elegibles pueden volver a PostgreSQL cuando las reglas de transacción o snapshot impiden un acierto. Empieza por la [guía de consultas por lotes](batch-primary-key-lookups.md) y el [contrato técnico](TECHNICAL.md).
+`pg_local_cache` almacena filas completas por clave primaria en la memoria compartida acotada de PostgreSQL. Las aplicaciones solicitan filas mediante `MGET` autenticado con RESP2; ni el SQL ordinario ni los resultados de consultas arbitrarias usan esta caché. Los triggers de tablas adjuntas ponen barreras a las escrituras, y las lecturas usan PostgreSQL cuando las comprobaciones de elegibilidad impiden un acierto de caché.
 
-Esta extensión no ofrece compatibilidad general con Redis, TTL de Redis ni un protocolo distribuido de caché de aplicaciones. Su endpoint RESP2 expone un conjunto limitado de comandos autenticados sobre los mismos mapeos y tiene su propio modelo de seguridad; el soporte TLS nativo se planifica por separado. Úsala cuando el problema sean las lecturas de filas completas locales a PostgreSQL y conscientes de las transacciones. Usa Redis cuando varias instancias de la aplicación necesiten objetos compartidos, frescura basada en TTL o estructuras de datos de Redis. Combinar ambos requiere claves, invalidación y métricas separadas para cada capa.
+A diferencia de Redis cache-aside, esta ruta usa la ruta de escritura de la base de datos para invalidar y no usa TTL ni estructuras de datos generales de Redis. Los workers RESP usan el rol de PostgreSQL configurado en transacciones breves e independientes. Consulte [Clientes RESP](resp.md) y la [referencia técnica](TECHNICAL.md) para información de conexión y seguridad.
 
-Ejecuta el [quickstart](QUICKSTART.md), compara con la consulta normal del cliente en el [ejemplo de node-postgres](node-postgres.md) e inspecciona los contadores de caché y RESP. La [guía de decisión sobre caché](postgresql-caching.md) enumera las demás opciones de PostgreSQL.
+Use Redis para objetos de aplicación compartidos, frescura gestionada por TTL o estructuras de datos de Redis. Use `pg_local_cache` para lecturas repetidas de filas completas de una base de datos PostgreSQL. Si combina ambas capas, mantenga claves, invalidación y monitorización separadas.

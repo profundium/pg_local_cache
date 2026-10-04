@@ -52,7 +52,7 @@ Los valores son solicitudes/s medianas con mínimo–máximo entre paréntesis. 
 
 ## Configuración histórica del benchmark SQL {#query-setup}
 
-La consulta SQL `mget` histórica se conserva en los datos brutos enlazados para reproducibilidad. No está disponible en 3.0.0. El benchmark actual compara SQL preparado con RESP `MGET`; consulta el [ejemplo de Node.js](node-postgres.md).
+La consulta SQL `mget` histórica se conserva en los datos brutos enlazados para reproducibilidad. No está disponible en 3.0.0. El benchmark actual compara SQL preparado con RESP `MGET`; consulta el [ejemplo de Node.js](resp.md#nodejs).
 
 ## Reproduce {#reproduce}
 

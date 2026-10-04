@@ -97,6 +97,14 @@ class RepositoryContentChecks(unittest.TestCase):
                 if not candidate.exists() and candidate.suffix == '.html':
                     candidate = candidate.with_suffix('.md')
                 if not candidate.exists():
+                    try:
+                        relative = candidate.relative_to(ROOT).as_posix()
+                    except ValueError:
+                        relative = ''
+                    if relative.startswith('site/'):
+                        relative = relative[len('site/'):]
+                    if relative.endswith('.md'):
+                        relative = relative[:-3] + '.html'
                     failures.append(f'{document.relative_to(ROOT)} -> {target}')
         self.assertEqual(failures, [])
 
@@ -342,6 +350,22 @@ class BuiltSiteChecks(unittest.TestCase):
             root = Path(directory)
             self.fixture(root)
             self.assertEqual(site.check(root), [])
+
+    def test_redirect_artifacts_only_require_existing_destinations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            redirects = []
+            for index in range(12):
+                path = root / f'redirect-{index}.html'
+                path.write_text(
+                    f'<meta http-equiv="refresh" content="0; url={site.BASE}">')
+                redirects.append(path)
+            self.assertEqual(site.check(root), [])
+            redirects[-1].write_text(
+                f'<meta http-equiv="refresh" content="0; url={site.BASE}missing.html">')
+            errors = site.check(root)
+            self.assertTrue(any('redirect target is missing' in error for error in errors))
 
     def test_svg_title_does_not_change_page_title(self):
         with tempfile.TemporaryDirectory() as directory:

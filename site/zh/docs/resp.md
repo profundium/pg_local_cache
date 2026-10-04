@@ -2,38 +2,91 @@
 layout: doc
 lang: zh
 translation_key: resp
-title: 通过 RESP 连接
-description: 使用 redis-cli 或 Node.js 通过 RESP2 读取 PostgreSQL 行，包含认证、客户端配置、可运行示例和清理步骤。
+title: RESP 客户端
+description: 使用 RESP2、MGET、令牌认证和原生 TLS，将 Redis 兼容客户端连接到 pg_local_cache。
 section: RESP
 permalink: /zh/docs/resp.html
-last_modified_at: '2026-09-16'
+redirect_from:
+  - /zh/docs/go.html
+  - /zh/docs/node-postgres.html
+last_modified_at: "2026-10-04"
 ---
 
-# 通过 RESP 连接 {#connect-over-resp}
+# RESP 客户端 {#resp-clients}
 
-使用 RESP2 客户端的 `MGET` 读取缓存的 PostgreSQL 行。通过 RESP 配置启动[一次性演示](QUICKSTART.md)：
+连接 Redis 兼容客户端，通过主键读取完整的 PostgreSQL 行。本页介绍键编码、身份验证、响应行为、错误和 TLS。
 
-```bash
-docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build --wait
+<a id="connect-over-resp"></a>
+
+## 键与响应约定 {#key-and-response-contract}
+
+RESP 键用于标识一个已附加的表和一个主键对象：
+
+```text
+CRUD:<db>.<schema>.<table>:<json pk>
+CRUD:app.public.items:{"id":42}
+CRUD:app.public.orders:{"tenant_id":7,"id":42}
 ```
 
-这会在 `127.0.0.1:56379` 启用 RESP。重新创建演示会丢弃其数据。下方令牌是公开的，仅适用于本地演示。
+`MGET key [key ...]` 按请求顺序返回 RESP2 数组。重复键保留各自位置。存在的行以 JSON bulk string 返回，不存在的行为 nil 元素。
 
-## TLS 与 mTLS 客户端 {#tls-mtls-clients}
+| 限制 | 行为 |
+|---|---|
+| 每条命令最多 1,024 个键 | 超出时返回 `ERR MGET accepts at most 1024 keys`。 |
+| 每行 JSON 最大 65,536 字节 | 超大行无法通过 RESP 返回。 |
+| 编码后的 MGET 响应最大 66,560 字节 | 聚合响应超出时返回 `ERR response exceeds limit`。 |
 
-连接 loopback 之外的 RESP listener 时建议使用 TLS。RESP 原生 TLS 配置独立于 PostgreSQL 的 `ssl_*`
-配置。以下示例使用 RESP2 和双向 TLS (mTLS)：`cache.example` 必须与服务器证书匹配，`./ca.crt`
-必须信任该证书，客户端证书必须由 `pg_local_cache.tls_ca_file` 配置的 CA 签发。仅验证服务器的 TLS
-连接可省略客户端证书和密钥选项。
+批次大小同时受键数量和响应字节数限制。如果大行可能接近响应上限，请拆分批次。
 
-**redis-cli**
+## AUTH {#auth}
 
-```bash
+发送其他命令前，先发送 `AUTH <token>`。客户端也可以发送 `AUTH <username> <token>`；用户名必须与 `pg_local_cache.role` 一致。所有 RESP 客户端共用该令牌，它不会为每个客户端选择不同的 PostgreSQL 权限。将令牌保存在权限为 `0400` 或 `0600` 的 `pg_local_cache.auth_token_file` 中；内联 `auth_token` 仅用于开发。非 loopback 监听器要求令牌至少为 32 字节。
+
+## TLS {#tls}
+
+原生 RESP TLS 使用 `pg_local_cache.tls_*` 设置，与 PostgreSQL 的 SQL TLS 分开。它要求 PostgreSQL 使用 OpenSSL 构建，并配置服务器证书和私钥。设置 `tls_ca_file` 后还会要求并验证客户端证书（mTLS）。如果只需验证服务器，请省略客户端证书选项。默认最低版本为 TLS 1.2。
+
+监听器默认绑定到 loopback。关闭 TLS 时，非 loopback 明文监听器必须设置 `pg_local_cache.allow_plaintext_network=on`。监听器和安全设置请参阅[技术参考](TECHNICAL.md#optional-resp2-endpoint)。
+
+## redis-cli {#redis-cli}
+
+将 `PGLC_RESP_TOKEN` 设置为已配置的令牌。本地快速入门还提供了一个演示令牌。
+
+```sh
 export REDISCLI_AUTH="$PGLC_RESP_TOKEN"
+redis-cli -2 -h 127.0.0.1 -p 56379 MGET 'CRUD:pglc_demo.public.items:{"id":42}'
 redis-cli -2 --tls --cacert ./ca.crt --cert ./client.crt --key ./client.key -h cache.example -p 6380 MGET 'CRUD:app.public.items:{"id":42}'
 ```
 
-**go-redis**
+## Go {#go}
+
+安装 `github.com/redis/go-redis/v9`。设置 `PGLC_RESP_TOKEN`；TLS 示例使用 CA 和客户端证书文件。
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/redis/go-redis/v9"
+)
+
+func main() {
+	client := redis.NewClient(&redis.Options{
+		Addr: "127.0.0.1:56379", Password: os.Getenv("PGLC_RESP_TOKEN"), Protocol: 2,
+	})
+	defer client.Close()
+	rows, err := client.MGet(context.Background(), `CRUD:pglc_demo.public.items:{"id":42}`).Result()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%v\n", rows)
+}
+```
+
+TLS 变体：
 
 ```go
 package main
@@ -42,137 +95,125 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"log"
+	"fmt"
 	"os"
 
 	"github.com/redis/go-redis/v9"
 )
 
 func main() {
-	caPEM, err := os.ReadFile("./ca.crt")
-	if err != nil {
-		log.Fatal(err)
-	}
+	ca, err := os.ReadFile("./ca.crt")
+	if err != nil { panic(err) }
 	roots := x509.NewCertPool()
-	if ok := roots.AppendCertsFromPEM(caPEM); !ok {
-		log.Fatal("no CA certificates found")
-	}
-	clientCert, err := tls.LoadX509KeyPair("./client.crt", "./client.key")
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	if !roots.AppendCertsFromPEM(ca) { panic("invalid CA") }
+	cert, err := tls.LoadX509KeyPair("./client.crt", "./client.key")
+	if err != nil { panic(err) }
 	client := redis.NewClient(&redis.Options{
-		Addr:            "cache.example:6380",
-		Password:        os.Getenv("PGLC_RESP_TOKEN"),
-		Protocol:        2,
-		DisableIdentity: true,
-		TLSConfig: &tls.Config{
-			RootCAs:      roots,
-			MinVersion:   tls.VersionTLS12,
-			ServerName:   "cache.example",
-			Certificates: []tls.Certificate{clientCert},
-		},
+		Addr: "cache.example:6380", Password: os.Getenv("PGLC_RESP_TOKEN"), Protocol: 2,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "cache.example", RootCAs: roots, Certificates: []tls.Certificate{cert}},
 	})
 	defer client.Close()
-
 	rows, err := client.MGet(context.Background(), `CRUD:app.public.items:{"id":42}`).Result()
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("%v", rows)
+	if err != nil { panic(err) }
+	fmt.Printf("%v\n", rows)
 }
 ```
 
-**node-redis**
+## Node.js (redis v4) {#nodejs}
+
+使用 `npm install redis@^4` 安装。Redis v4 默认使用 RESP2。
+
+```js
+import { createClient } from 'redis';
+
+const client = createClient({
+  socket: { host: '127.0.0.1', port: 56379 },
+  password: process.env.PGLC_RESP_TOKEN,
+});
+client.on('error', console.error);
+await client.connect();
+try {
+  console.log(await client.mGet(['CRUD:pglc_demo.public.items:{"id":42}']));
+} finally {
+  await client.quit();
+}
+```
+
+TLS 变体：
 
 ```js
 import { readFileSync } from 'node:fs';
-import { createClient } from '@redis/client';
+import { createClient } from 'redis';
 
 const client = createClient({
   socket: {
-    host: 'cache.example',
-    port: 6380,
-    tls: true,
-    servername: 'cache.example',
-    ca: readFileSync('./ca.crt'),
-    cert: readFileSync('./client.crt'),
-    key: readFileSync('./client.key'),
+    host: 'cache.example', port: 6380, tls: true, servername: 'cache.example',
+    ca: [readFileSync('./ca.crt')],
+    cert: readFileSync('./client.crt'), key: readFileSync('./client.key'),
   },
   password: process.env.PGLC_RESP_TOKEN,
-  RESP: 2,
-  disableClientInfo: true,
 });
 client.on('error', console.error);
 await client.connect();
-
 try {
-  const values = await client.mGet(['CRUD:app.public.items:{"id":42}']);
-  const rows = values.map(value => value === null ? null : JSON.parse(value));
-  console.log(rows);
+  console.log(await client.mGet(['CRUD:app.public.items:{"id":42}']));
 } finally {
-  await client.close();
+  await client.quit();
 }
 ```
 
-## redis-cli {#redis-cli}
+## Python (redis-py) {#python}
 
-```bash
-export REDISCLI_AUTH=DemoRespToken_0123456789abcdef0123456789
-redis-cli -2 -p 56379 MGET 'CRUD:pglc_demo.public.items:{"id":42}'
+使用 `python -m pip install redis` 安装。
+
+```python
+import os
+import redis
+
+client = redis.Redis(host="127.0.0.1", port=56379,
+                     password=os.environ["PGLC_RESP_TOKEN"],
+                     decode_responses=True, protocol=2)
+print(client.execute_command('MGET', 'CRUD:pglc_demo.public.items:{"id":42}'))
+client.close()
 ```
 
-响应以 JSON 返回行 42。缺失行返回 `nil`。[redis-cli](https://redis.io/docs/latest/develop/tools/cli/) 从 `REDISCLI_AUTH` 读取令牌。
+TLS 变体：
 
-## Node.js {#nodejs}
+```python
+import os
+import redis
 
-```bash
-npm --prefix examples/node-postgres ci --ignore-scripts
-npm --prefix examples/node-postgres run resp
+client = redis.Redis(host="cache.example", port=6380,
+                     password=os.environ["PGLC_RESP_TOKEN"],
+                     decode_responses=True, protocol=2, ssl=True,
+                     ssl_ca_certs="./ca.crt", ssl_certfile="./client.crt",
+                     ssl_keyfile="./client.key", ssl_cert_reqs="required",
+                     ssl_check_hostname=True)
+print(client.execute_command('MGET', 'CRUD:app.public.items:{"id":42}'))
+client.close()
 ```
 
-示例使用官方 `@redis/client` 包，检查顺序、重复项、空输入位置和缺失行。辅助函数发送请求时省略空键，并在解码后恢复其位置。从应用连接：
+## 错误与边界 {#errors}
 
-```js
-import { createClient } from '@redis/client';
+| 响应 | 原因 |
+|---|---|
+| `NOAUTH Authentication required` | 请先对连接进行身份验证。 |
+| `WRONGPASS invalid authentication token` | 令牌或可选用户名不正确。 |
+| `ERR MGET accepts at most 1024 keys` | 请拆分批次。 |
+| `ERR response exceeds limit` | 请缩小批次或行负载。 |
+| `ERR MGET deadline exceeded` | 源数据读取和等待同一键的操作超过了命令期限。 |
+| `ERR KVik key targets a different database` | 使用 RESP 端点配置的数据库。 |
+| `ERR unknown KVik table mapping` | 检查键中的模式和表是否已映射。 |
+| `ERR key must use CRUD:database.schema.table:{primary-key-json}` | 使用完整的 CRUD 键格式。 |
+| `ERR KVik key must end with a primary-key JSON object` | 在表范围后提供主键 JSON 对象。 |
+| `ERR invalid CRUD cache scope` | 仅适用于 `INVALIDATE`：提供的范围不是受支持的 CRUD 范围。 |
 
-const client = createClient({
-  url: 'redis://127.0.0.1:56379',
-  password: process.env.PGLC_RESP_TOKEN,
-  RESP: 2,
-  disableClientInfo: true,
-});
-client.on('error', console.error);
-await client.connect();
+RESP 与调用方的 SQL 连接、角色、事务和快照相互独立。SQL 事务请直接使用 PostgreSQL；参见[失效指南](cache-invalidation.md)。
 
-try {
-  const values = await client.mGet(['CRUD:pglc_demo.public.items:{"id":42}']);
-  const rows = values.map(value => value === null ? null : JSON.parse(value));
-  console.log(rows);
-} finally {
-  await client.close();
-}
-```
+## 清理演示环境 {#stop-the-demo}
 
-将 `PGLC_RESP_TOKEN` 设置为服务器令牌。跨请求复用此连接。这些[客户端配置](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md)选择 RESP2，并跳过 Redis 特有的客户端元数据命令。使用仅令牌认证，不要指定用户名或 Redis 数据库编号。
-
-RESP 工作进程为所有客户端使用一个配置的 PostgreSQL 角色。如果需要在 SQL 事务内读取，请使用 [Node.js SQL](node-postgres.md) 或 [Go SQL](go.md)。支持的命令与限制见 [RESP 参考](TECHNICAL.md#optional-resp2-endpoint)。
-
-监听器默认绑定到 loopback。loopback 之外建议使用 TLS；RESP TLS 使用独立配置，与 PostgreSQL 的 `ssl_*`
-配置互不影响。TLS 关闭时，loopback 之外的明文 listener 必须显式设置
-`pg_local_cache.allow_plaintext_network=on`，且仅限可信网络。演示仅在其容器网络内启用该项。参阅 [TLS 与
-mTLS 客户端](#tls-mtls-clients)。 `pg_local_cache.enabled` 是 SIGHUP 紧急开关。每个 RESP
-worker 都会在下一个命令边界异步应用重载，且会等当前执行的命令结束。`local_cache.health()` 中的 `cache_enabled`
-字段报告调用它的 SQL 会话所见设置；它不表示所有 worker 都已应用该设置。若要在不重启的情况下关闭缓存读取，请执行 `ALTER SYSTEM SET pg_local_cache.enabled = off;` 和 `SELECT pg_reload_conf();`。关闭期间，RESP
-会为每次读取直接查询源表。
-
-## 与 SQL 比较 {#compare-with-sql}
-
-[统一基准测试](BENCHMARKS.md#run-the-same-comparison-on-every-client)在 Node.js 和 Go 中使用相同的键与解码结果，运行 RESP `MGET` 与预备 SQL。已发布的 2.x SQL `mget` 测量属于历史数据；该测试路径已在 3.0.0 中移除。更广泛的应用缓存场景，请阅读 [PostgreSQL 与 Redis cache-aside 指南](postgresql-redis-cache.md)。
-
-## 停止演示 {#stop-the-demo}
-
-```bash
+```sh
 docker compose -f examples/compose.yaml -f examples/compose.resp.yaml down
 ```
+
+2.x 中的 `local_cache.mget(regclass, anyarray)` 已在 3.0.0 中移除；请参阅[升级指南](UPGRADING.md)。

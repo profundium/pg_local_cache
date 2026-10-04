@@ -3,14 +3,12 @@ layout: post
 lang: en
 translation_key: blog-ordered-batch-reads
 title: "Batch PostgreSQL reads without losing order or missing keys"
-description: Replace N+1 primary-key queries while preserving duplicate IDs, input order, NULL positions and missing rows. Compare ANY, WITH ORDINALITY and SQL mget.
+description: Replace N+1 primary-key queries while preserving duplicate IDs, input order, NULL positions and missing rows. Compare ANY, WITH ORDINALITY and RESP MGET.
 permalink: /blog/ordered-batch-reads/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: application
 ---
-
-> **2026-10-04 release note:** SQL `mget` was removed in 3.0.0; RESP `MGET` replaces it.
 
 # Batch reads need a result contract {#batch-reads-need-a-result-contract}
 
@@ -18,6 +16,8 @@ Replacing a loop of primary-key queries with one `ANY` query removes round
 trips. It can also change the response shape. A caller might ask for
 `[42, 7, 42, NULL, -1]` and expect five result positions. SQL set semantics do
 not promise that alignment.
+
+> **2026-10-04 release note:** The 2.x SQL row-cache API local_cache.mget(regclass, anyarray) was removed in 3.0.0; use RESP MGET for current whole-row reads.
 
 ## A set of rows is not a list of answers {#set-versus-list}
 
@@ -52,24 +52,21 @@ The ordinality column distinguishes both occurrences of 42. The left join
 retains all five positions, including the null input and any absent key.
 For a missing key, `row` is SQL `NULL`. In application code, pass the array as a
 parameter rather than concatenating IDs into SQL. The
-[Node.js example](../docs/node-postgres.md) demonstrates client-side alignment.
+[Node.js helper source](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/queries.mjs)
+shows client-side result alignment.
 
 ## Compare the whole-row API {#whole-row-api}
 
-On an attached table, the corresponding explicit cache call is:
+Use RESP MGET to read complete rows from attached tables. Encode each primary key in a CRUD:<db>.<schema>.<table>:<json pk> key:
 
-```sql
-SELECT local_cache.mget(
-  'public.items'::regclass,
-  ARRAY[42, 7, 42, NULL, -1]::bigint[]
-) AS rows;
+RESP MGET returns a RESP2 array in request order. Duplicate keys retain their positions; a missing row returns nil. RESP keys identify primary-key values, so they do not provide a SQL NULL array position. Use the WITH ORDINALITY SQL path above when every SQL input, including NULL, needs an aligned result. Each command accepts at most 1,024 keys, each JSON row is limited to 65,536 bytes, and the encoded reply to 66,560 bytes. RESP MGET does not replace projections, joins, row locks, or arbitrary query-result caching.
+
+```bash
+REDISCLI_AUTH=DemoRespToken_0123456789abcdef0123456789 redis-cli -2 -p 56379 MGET 'CRUD:pglc_demo.public.items:{"id":42}' \
+  'CRUD:pglc_demo.public.items:{"id":7}' \
+  'CRUD:pglc_demo.public.items:{"id":42}' \
+  'CRUD:pglc_demo.public.items:{"id":-1}'
 ```
-
-It returns `text[]`, with input order and duplicates preserved. Missing keys
-and input nulls produce aligned SQL `NULL` elements; each present element is a
-serialized complete row. A cache miss or bypass reads PostgreSQL. The API
-accepts at most 1,024 keys per call. It is not a replacement for projections,
-joins, row locks or arbitrary query-result caching.
 
 ## Keep batching bounded and observable {#bounded-batches}
 

@@ -9,6 +9,7 @@ blog: Blog
 releases: Versiones
 docs: Documentación
 docs_sections: Secciones de la documentación
+docs_2x: Documentación de 2.x
 on_this_page: En esta página
 breadcrumb: Ruta de navegación
 updated: Actualizado

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 650" role="img" aria-labelledby="title desc">
+<title id="title">pg_local_cache architecture</title>
+<desc id="desc">RESP clients send MGET through background workers to a bounded shared-memory cache. Misses read PostgreSQL tables. Ordinary SQL writers activate row and statement triggers that publish invalidation fences before commit.</desc>
+<style>
+:root{color-scheme:light dark;--bg:#f8fafc;--panel:#fff;--ink:#17212b;--muted:#526170;--line:#526b80;--blue:#dceefe;--green:#e2f4e8;--amber:#fff0cf;--stroke:#52738e}
+*{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.bg{fill:var(--bg)}.box{fill:var(--panel);stroke:var(--stroke);stroke-width:2.5;rx:18}.app{fill:var(--blue)}.cache{fill:var(--green)}.write{fill:var(--amber)}
+.title{fill:var(--ink);font-size:25px;font-weight:700;text-anchor:middle}.body{fill:var(--muted);font-size:19px;text-anchor:middle}.label{fill:var(--ink);font-size:17px;font-weight:600;text-anchor:middle}
+.arrow{fill:none;stroke:var(--line);stroke-width:3;marker-end:url(#arrow)}.bi{fill:none;stroke:var(--line);stroke-width:3;marker-start:url(#arrow);marker-end:url(#arrow)}
+@media(prefers-color-scheme:dark){:root{--bg:#101820;--panel:#17232d;--ink:#eef4f8;--muted:#c0ccd5;--line:#90a9bc;--blue:#18384e;--green:#1c4034;--amber:#4a3820;--stroke:#7899b1}}
+</style>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--line)"/></marker></defs>
+<rect class="bg" width="1200" height="650"/>
+<text class="title" x="600" y="52">Read path and write invalidation</text>
+<rect class="box app" x="45" y="122" width="215" height="142"/><text class="title" x="152" y="166">Application</text><text class="body" x="152" y="202">Redis client</text><text class="body" x="152" y="231">RESP2 MGET</text>
+<rect class="box" x="330" y="122" width="260" height="142"/><text class="title" x="460" y="166">RESP listener</text><text class="body" x="460" y="211">PostgreSQL workers</text>
+<rect class="box cache" x="668" y="122" width="230" height="142"/><text class="title" x="783" y="166">Bounded cache</text><text class="body" x="783" y="202">PostgreSQL shared</text><text class="body" x="783" y="231">memory</text>
+<rect class="box" x="976" y="122" width="190" height="142"/><text class="title" x="1071" y="166">PostgreSQL</text><text class="body" x="1071" y="202">source tables</text>
+<path class="arrow" d="M260 193H322"/><text class="label" x="291" y="105">MGET</text><path class="bi" d="M600 193H660"/><text class="label" x="625" y="105">lookup / fill</text><path class="bi" d="M908 193H968"/><text class="label" x="933" y="105">miss / row</text>
+<rect class="box app" x="45" y="420" width="245" height="142"/><text class="title" x="167" y="465">SQL writer</text><text class="body" x="167" y="502">ordinary PostgreSQL</text><text class="body" x="167" y="531">session</text>
+<rect class="box write" x="354" y="420" width="250" height="142"/><text class="title" x="479" y="465">Table triggers</text><text class="body" x="479" y="495">row + statement</text><text class="body" x="479" y="519">UPDATE / DELETE</text><text class="body" x="479" y="544">INSERT</text>
+<rect class="box write" x="672" y="420" width="230" height="142"/><text class="title" x="787" y="465">Invalidation</text><text class="body" x="787" y="502">transaction fences</text><text class="body" x="787" y="531">published pre-commit</text>
+<path class="arrow" d="M290 491H346"/><text class="label" x="318" y="474">write</text><path class="arrow" d="M604 491H664"/><text class="label" x="634" y="474">dirty key</text><path class="arrow" d="M787 420V284"/><text class="label" x="820" y="344">invalidate</text>
+<text class="body" x="1067" y="464">PostgreSQL remains</text><text class="body" x="1067" y="493">source of truth</text>
+<text class="body" x="600" y="617">Only eligible whole-row primary-key reads use the cache.</text>
+</svg>

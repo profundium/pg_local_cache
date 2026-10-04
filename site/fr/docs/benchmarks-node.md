@@ -68,7 +68,7 @@ de latence, trop peu pour une estimation p99 utile.
 
 ## Requête de benchmark SQL historique {#query-setup}
 
-La requête SQL `mget` historique est conservée dans les données brutes liées pour la reproductibilité. Elle n’est pas disponible en 3.0.0. Le benchmark actuel compare SQL préparé et RESP `MGET` ; voir [l’exemple Node.js](node-postgres.md).
+La requête SQL `mget` historique est conservée dans les données brutes liées pour la reproductibilité. Elle n’est pas disponible en 3.0.0. Le benchmark actuel compare SQL préparé et RESP `MGET` ; voir [l’exemple Node.js](resp.md#nodejs).
 
 ## Reproduire {#reproduce}
 

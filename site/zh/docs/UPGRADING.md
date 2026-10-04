@@ -80,3 +80,5 @@ SELECT local_cache.attach_table('public.items'::regclass);
 PostgreSQL 通过 `dynamic_library_path` 查找它（默认值包含 `$libdir`）。
 如果服务器覆盖了该设置，请在重启前将软件包安装
 `pg_local_cache` 的目录加入该路径。
+
+2.x 版本文档：https://github.com/profundium/pg_local_cache/tree/v2.0.4/docs

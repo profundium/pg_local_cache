@@ -3,18 +3,18 @@ layout: post
 lang: zh
 translation_key: blog-ordered-batch-reads
 title: 批量读取 PostgreSQL：保留顺序与缺失键
-description: 替代 N+1 主键查询，同时保留重复 ID、输入顺序、NULL 位置和缺失行，比较 ANY、WITH ORDINALITY 与 SQL mget。
+description: 替代 N+1 主键查询，同时保留重复 ID、输入顺序、NULL 位置和缺失行，比较 ANY、WITH ORDINALITY 与 RESP MGET。
 permalink: /zh/blog/ordered-batch-reads/
 date: '2026-09-22'
-last_modified_at: '2026-09-22'
+last_modified_at: '2026-10-04'
 topic: application
 ---
-
-> **2026-10-04 更新：** SQL `mget` 已在 3.0.0 中移除；现在由 RESP `MGET` 提供替代功能。
 
 # 批量读取需要结果约定 {#batch-reads-need-a-result-contract}
 
 用一次 `ANY` 查询替代逐个主键查询，可以减少往返，但也可能改变响应形状。调用者可能请求 `[42, 7, 42, NULL, -1]`，并期待五个结果位置。SQL 集合语义并不保证这种对齐。
+
+> **2026-10-04 更新：** 2.x 的 SQL 整行缓存 API local_cache.mget(regclass, anyarray) 已在 3.0.0 中移除；请使用 RESP MGET 读取完整行。
 
 ## 行集合不等于答案列表 {#set-versus-list}
 
@@ -41,20 +41,20 @@ LEFT JOIN public.items AS items ON items.id = requested.key
 ORDER BY requested.position;
 ```
 
-ordinality 列能区分两次出现的 42。左连接保留全部五个位置，包括空输入和任何不存在的键。对于缺失键，`row` 是 SQL `NULL`。在应用代码中应将数组作为参数传入，而不是把 ID 拼接进 SQL。[Node.js 示例](../docs/node-postgres.md)展示了客户端位置对齐。
+ordinality 列能区分两次出现的 42。左连接保留全部五个位置，包括空输入和任何不存在的键。对于缺失键，`row` 是 SQL `NULL`。在应用代码中应将数组作为参数传入，而不是把 ID 拼接进 SQL。[Node.js 辅助函数源码](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/queries.mjs)展示了客户端结果对齐。
 
 ## 比较整行 API {#whole-row-api}
 
-对于已关联的表，对应的显式缓存调用如下：
+要从已关联的表读取完整行，请使用 RESP MGET。每个主键都编码为以下格式的键：CRUD:<db>.<schema>.<table>:<json pk>：
 
-```sql
-SELECT local_cache.mget(
-  'public.items'::regclass,
-  ARRAY[42, 7, 42, NULL, -1]::bigint[]
-) AS rows;
+RESP MGET 按请求顺序返回 RESP2 数组。重复键保留其位置；缺失行返回 nil。RESP 键标识主键值，因此不包含 SQL 数组中的 NULL 位置。如果每个 SQL 输入（包括 NULL）都需要对齐结果，请使用上面的 WITH ORDINALITY SQL 查询。每条命令最多接受 1,024 个键，每个 JSON 行限 65,536 字节，编码后的响应限 66,560 字节。RESP MGET 不能替代投影、连接、行锁或任意查询结果缓存。
+
+```bash
+REDISCLI_AUTH=DemoRespToken_0123456789abcdef0123456789 redis-cli -2 -p 56379 MGET 'CRUD:pglc_demo.public.items:{"id":42}' \
+  'CRUD:pglc_demo.public.items:{"id":7}' \
+  'CRUD:pglc_demo.public.items:{"id":42}' \
+  'CRUD:pglc_demo.public.items:{"id":-1}'
 ```
-
-它返回 `text[]`，保留输入顺序与重复项。缺失键和空输入产生位置对应的 SQL `NULL`；每个非空元素都是序列化的完整行。缓存未命中或被绕过时会读取 PostgreSQL。此 API 每次调用最多接受 1,024 个键，不能替代投影、连接、行锁或任意查询结果缓存。
 
 ## 保持批次有界并可观测 {#bounded-batches}
 

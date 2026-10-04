@@ -50,7 +50,7 @@ Node.js 应用测试程序使用 **64 个连接**、**每样本 50,000 个请求
 
 ## 历史 SQL 基准查询 {#query-setup}
 
-为便于复现，历史 SQL `mget` 查询仍保留在链接的原始测量数据中。3.0.0 已不提供该查询。当前基准比较预备 SQL 与 RESP `MGET`；参阅 [Node.js 示例](node-postgres.md)。
+为便于复现，历史 SQL `mget` 查询仍保留在链接的原始测量数据中。3.0.0 已不提供该查询。当前基准比较预备 SQL 与 RESP `MGET`；参阅 [Node.js 示例](resp.md#nodejs)。
 
 ## 复现 {#reproduce}
 

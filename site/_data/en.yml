@@ -9,6 +9,7 @@ blog: Blog
 releases: Releases
 docs: Documentation
 docs_sections: Documentation sections
+docs_2x: Documentation for 2.x
 on_this_page: On this page
 breadcrumb: Breadcrumb
 updated: Updated

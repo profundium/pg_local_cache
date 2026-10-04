@@ -3,75 +3,29 @@ layout: doc
 lang: fr
 translation_key: postgresql-redis-cache
 title: Cache-aside PostgreSQL et Redis
-seo_title: "Cache-aside PostgreSQL et Redis : invalidation et courses"
-description: Utilisez PostgreSQL comme source de vérité avec un chemin cache-aside Redis, comprenez les courses de lectures obsolètes et voyez où se place pg_local_cache.
+seo_title: "PostgreSQL et Redis cache-aside : invalidation et conditions de course"
+description: Comparez le cache-aside Redis géré par l’application aux lectures RESP de pg_local_cache, notamment les courses de remplissage obsolète et l’invalidation des écritures.
 section: Guides
 permalink: /fr/docs/postgresql-redis-cache.html
 last_modified_at: "2026-10-04"
 ---
 
-# Cache-aside PostgreSQL et Redis {#postgresql-and-redis-cache-aside}
+# PostgreSQL et Redis cache-aside {#postgresql-and-redis-cache-aside}
 
-Le cache-aside Redis place l'application entre une lecture et son stockage
-faisant autorité. En cas de miss, lisez PostgreSQL, renvoyez cette valeur et
-écrivez-la dans Redis ; lors d'une écriture, mettez PostgreSQL à jour et
-invalidez la clé Redis correspondante. Le [guide du pattern Redis](https://redis.io/docs/latest/develop/use-cases/cache-aside/)
-décrit ce flux, mais il ne rend pas un cache applicatif cohérent
-transactionnellement avec PostgreSQL.
+Ce guide présente le cache-aside Redis avec PostgreSQL comme source de vérité, sa course de remplissage obsolète et la façon dont `pg_local_cache` invalide les lignes attachées.
 
-Pour une ligne indexée par `public.items.id`, le schéma est :
+Lors d’un miss Redis, l’application lit la ligne PostgreSQL, la renvoie et la stocke sous une clé applicative. Lors d’une écriture, elle valide les données PostgreSQL puis supprime la clé Redis. Un TTL limite la durée de conservation ; il ne garantit pas la fraîcheur. Consultez le [guide Redis sur le cache-aside](https://redis.io/docs/latest/develop/use-cases/cache-aside/).
 
-```text
-GET item:42
-miss -> SELECT * FROM public.items WHERE id = $1
-     -> SET item:42 <serialized row> EX <ttl>
-write -> UPDATE public.items ...
-      -> COMMIT
-      -> DEL item:42
-```
+## La course d’invalidation {#the-invalidation-race}
 
-Utilisez du SQL paramétré et un namespace de clés. Un TTL limite la durée
-pendant laquelle une valeur stockée reste éligible dans Redis ; il ne prouve
-pas sa fraîcheur par rapport à un commit PostgreSQL. La suppression explicite
-gère les écritures ordinaires, mais ne supprime pas toutes les courses.
+Un lecteur peut charger une ancienne ligne PostgreSQL, s’interrompre, puis la stocker après qu’un écrivain a validé ses changements et supprimé la clé. Le lecteur suivant voit alors des données obsolètes jusqu’à l’expiration du TTL ou une autre suppression.
 
-## La course d'invalidation {#the-invalidation-race}
-
-Considérez deux requêtes. Le lecteur R1 rate Redis et lit l'ancienne ligne dans
-PostgreSQL. L'écrivain W valide une nouvelle ligne et supprime `item:42`. R1
-reprend ensuite et stocke son ancienne valeur dans Redis. Le lecteur suivant
-voit une valeur obsolète jusqu'à l'expiration de la clé ou une autre écriture
-qui la supprime.
-
-Les mesures possibles incluent une nouvelle suppression après la fin du
-chargeur, le stockage d'une version de la base et le rejet des valeurs plus
-anciennes, la sérialisation des chargements par clé ou la publication des
-changements validés via un outbox ou un consommateur CDC. Chacune ajoute de la
-coordination et des cas d'échec. Le [guide d'invalidation du cache](cache-invalidation.md)
-montre le problème analogue de remplissage tardif dans PostgreSQL.
+Pour atténuer cette course, on peut rejeter les remplissages portant une ancienne version de la base, sérialiser les chargements d’une même clé ou publier les changements validés via un outbox ou un consommateur CDC. Chaque méthode ajoute de la coordination. Consultez le [guide d’invalidation transactionnelle](cache-invalidation.md) pour la frontière équivalente des remplissages tardifs dans PostgreSQL.
 
 ## Où se place pg_local_cache {#where-pg_local_cache-fits}
 
-`pg_local_cache` est une option PostgreSQL locale plus étroite pour des lignes
-complètes indexées par clé primaire. `RESP `MGET`` est explicite ; un
-`SELECT` normal et une forme de requête arbitraire ne lisent jamais le cache.
-Les triggers des tables attachées mettent en place une barrière pour les clés ou relations concernées
-sur le chemin d'écriture de la base, et les lectures éligibles peuvent revenir
-à PostgreSQL lorsque les règles de transaction ou de snapshot interdisent un
-hit. Commencez par le [guide des recherches par lots](batch-primary-key-lookups.md)
-et le [contrat technique](TECHNICAL.md).
+`pg_local_cache` stocke des lignes complètes par clé primaire dans la mémoire partagée limitée de PostgreSQL. Les applications demandent ces lignes avec `MGET` authentifié via RESP2 ; le SQL ordinaire et les résultats arbitraires de requêtes n’utilisent pas ce cache. Les triggers des tables attachées établissent des barrières pour les écritures ; si les contrôles d’admissibilité échouent, la lecture passe par PostgreSQL.
 
-Cette extension ne fournit ni compatibilité Redis générale, ni TTL Redis, ni
-protocole de cache applicatif distribué. Son point de terminaison RESP2
-optionnel expose un ensemble limité de commandes authentifiées sur les mêmes
-mappings et possède son propre modèle de sécurité ; il n'a pas de TLS.
-Utilisez-le lorsque le problème est la lecture transactionnelle de lignes
-complètes locale à PostgreSQL. Utilisez Redis lorsque plusieurs instances
-applicatives ont besoin d'objets partagés, d'une fraîcheur fondée sur le TTL ou
-de structures de données Redis. Combiner les deux exige des clés,
-invalidations et métriques séparées pour chaque couche.
+Contrairement au cache-aside Redis, ce chemin utilise le processus d’écriture de la base pour invalider les données et n’utilise ni TTL ni structures de données Redis générales. Les workers RESP utilisent le rôle PostgreSQL configuré dans des transactions courtes indépendantes. Consultez [Clients RESP](resp.md) et la [référence technique](TECHNICAL.md) pour les détails de connexion et de sécurité.
 
-Lancez le [démarrage rapide](QUICKSTART.md), comparez avec la requête client
-ordinaire dans [l'exemple node-postgres](node-postgres.md) et inspectez les
-compteurs du cache et RESP. Le [guide de décision sur la mise en cache](postgresql-caching.md)
-liste les autres options PostgreSQL.
+Utilisez Redis pour les objets applicatifs partagés, une fraîcheur gérée par TTL ou les structures de données Redis. Utilisez `pg_local_cache` pour relire souvent des lignes complètes par clé primaire dans une seule base PostgreSQL. Si vous combinez ces couches, prévoyez des clés, une invalidation et une supervision distinctes.

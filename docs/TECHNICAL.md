@@ -4,54 +4,26 @@ lang: en
 translation_key: TECHNICAL
 title: pg_local_cache technical reference
 seo_title: pg_local_cache RESP API, consistency, memory, and configuration
-description: Technical reference for pg_local_cache RESP reads, transaction-aware invalidation, bounded PostgreSQL shared memory, monitoring, and configuration.
+description: Reference for RESP reads, supported tables, transaction fences, TLS, shared memory, metrics, and PostgreSQL settings.
 section: Technical
 permalink: /docs/TECHNICAL.html
 ---
 
 # pg_local_cache technical reference {#pg_local_cache-technical-reference}
 
-`pg_local_cache` caches whole rows by complete primary key in bounded PostgreSQL
-shared memory. Applications read rows through the authenticated RESP2 endpoint.
-
-> **Ordinary SQL stays ordinary:** the extension installs no planner or executor
-> hooks. A normal `SELECT` always uses PostgreSQL and never reads this cache.
+Technical reference for the RESP2 endpoint, cache consistency, resource bounds, and security. See [quickstart](QUICKSTART.md) and [installation](INSTALL_EXISTING.md) for setup steps.
 
 ## Supported tables and keys {#supported-tables-and-keys}
 
-Source tables must be permanent heap tables with a valid primary key and
-without RLS, partitioning, inheritance, or extension ownership.
+Attach permanent heap tables with a valid primary key. Partitioned, inherited, row-level-security, temporary, foreign, and extension-owned tables are unsupported. Supported primary-key types are `smallint`, `integer`, `bigint`, `text`, `varchar`, `char` with deterministic collations, and `uuid`; composite keys may use these types, up to 16 columns.
 
-Supported key types:
-
-- `smallint`, `integer`, and `bigint`;
-- `text`, `varchar`, and `char` with deterministic collations;
-- `uuid`;
-- composite primary keys made only from those types.
-
-Unsupported relations are rejected during attachment instead of producing an
-unsafe partial mapping.
-
-## Attach, reconcile, and detach tables {#attach-reconcile-and-detach-tables}
-
-`local_cache.attach_table(regclass)` performs one guarded setup sequence:
-
-1. lock and validate the relation;
-2. record its namespace, relation OID, and ordered primary-key columns;
-3. install extension-owned statement, row, and truncate triggers;
-4. reload worker mappings.
-
-DDL event triggers invalidate cached mapping metadata. Run
-`local_cache.reconcile_table(...)` or `local_cache.reconcile_all()` after
-intentional schema changes. `local_cache.detach_table(...)` removes the mapping
-and its triggers.
+DDL changes require mapping reconciliation. See [installation](INSTALL_EXISTING.md#attach-a-table).
 
 ## Read path and safe fallback {#read-path-and-safe-fallback}
 
-Each RESP `MGET` key checks shared cache when caching is enabled. On each
-cache miss, the worker reads the source row in its own short transaction. Rows
-larger than the cache payload limit still return from PostgreSQL but are not
-cached.
+![RESP MGET read path: cache hit, fenced source fill, and kill-switch bypass.](diagrams/read-path.svg)
+
+Each RESP `MGET` key is validated and canonicalized before lookup. An eligible hit returns JSON for the complete row. On a miss, the worker reads the source table in a short transaction, then publishes a fill only if its read fence is still current. Missing rows return nil. Rows whose payload cannot fit shared cache may still return from PostgreSQL if their JSON fits the RESP value limit.
 
 ### Deferred misses and lock deadlines
 
@@ -83,18 +55,15 @@ RESP `STAT` JSON reports `deferred_misses_total`,
 
 ## Transaction consistency {#transaction-consistency}
 
-Mapped-write triggers in any PostgreSQL session publish per-key or
-per-relation dirty-writer fences and advance generations before the commit
-becomes visible. Fenced entries bypass the cache until the write finishes;
-generation checks prevent stale in-flight reads from publishing, so a committed
-write cannot be followed by a stale cache hit.
+![Write invalidation: pre-commit fences protect committed writes; rollback before fence publication preserves prior entries.](diagrams/write-invalidation.svg)
 
-RESP reads use `pg_local_cache.role`, not the client's PostgreSQL role, in
-independent short transactions. They do not see the client's uncommitted changes,
-share its snapshot, or participate in its transaction. Setting
-`pg_local_cache.enabled = off` bypasses the cache.
+Mapped-table row and statement triggers collect dirty keys or a relation in transaction-local state. The pre-commit callback publishes invalidation fences before the write becomes visible. After commit, readers cannot use an old entry; stale in-flight fills fail their generation check. A rollback before fence publication discards the dirty state and leaves the prior entry valid.
 
-## Shared memory and configuration {#shared-memory-and-configuration}
+RESP reads use `pg_local_cache.role` in independent short transactions. They do not share a client's SQL role, transaction, uncommitted writes, or snapshot.
+
+## Memory sizing and settings {#shared-memory-and-configuration}
+
+The extension preallocates bounded shared cache, mapping, and worker/client state at PostgreSQL startup. `memory_budget_mb` limits the deterministic extension allocation. Admission failures and eviction do not allocate beyond configured capacity; reads fall back to PostgreSQL.
 
 Cache descriptors, indexes, dirty markers, relation states, counters, worker
 generations, and RESP client slots are allocated at postmaster startup.
@@ -104,17 +73,19 @@ the key hash and length, and a 32-bit arena block reference; key and value
 bytes live in the partition arena. Each partition indexes descriptors with
 4-byte IDs in an open-addressed table sized to keep load at or below 0.5. A
 separate bucket-sized scratch array rebuilds tombstoned indexes. Probes stop at
-64 buckets, and rebuild starts after tombstones exceed one eighth of the table.
+64 buckets; rebuild starts after tombstones exceed one eighth of the table.
 
 The partition-local arena assigns 64 KiB pages on demand to power-of-two block
-classes from 256 bytes through 16 KiB. Positive blocks hold canonical key bytes
-and the validated JSON payload (header, JSON and CRC); negative blocks hold
-only key bytes. Empty pages return to that partition's free-page pool and can
-be assigned to another class. Admission evicts eligible entries from the
-requested class using the bounded sampling policy, skipping dirty entries and
-active loads. If the requested class remains unavailable, the row is served
-from PostgreSQL and is not cached. Index, descriptor or arena pressure never
-turns a successful source read into an error.
+classes from 256 bytes through 16 KiB. Each positive block holds canonical key
+bytes and complete-row JSON wrapped in a versioned header with length,
+descriptor fingerprint, and CRC; no SQL tuple bytes are cached. Negative
+blocks hold only key bytes. Empty pages return to that
+partition's free-page pool and can be assigned to another class. Admission
+evicts eligible entries from the requested class using bounded sampling,
+skipping dirty entries and active loads. If the requested class remains
+unavailable, the row is served from PostgreSQL and is not cached. Index,
+descriptor, or arena pressure never turns a successful source read into an
+error.
 
 Dirty keys without cache entries use a separate bounded marker table and key
 arena. Markers are split across partitions, cannot evict cached values, and
@@ -124,9 +95,9 @@ relation, then global scope if relation state is unavailable.
 By default, marker capacity scales with the configured cache: the entry limit
 is `min(16384, max(1024, floor(cache_entries / 4)))`. The key-memory limit is
 `min(16 MiB, max(1 MiB, floor(memory_budget_mb / 25) MiB))`; the actual key
-arena also cannot exceed the marker entry limit. Set either marker option to a
-positive value to override its automatic limit. Explicit limits retain their
-supported ranges and remain part of the exact startup budget check.
+arena also cannot exceed the marker entry limit. Set either marker option
+within its explicit supported range to override automatic sizing. Explicit
+limits remain part of the exact startup budget check.
 
 The default `cache_entries` is derived at startup as the largest power of two
 that leaves at least half of the default 384 MiB budget for arena pages after
@@ -149,93 +120,62 @@ such rows need about 244.2 MiB; a 512 MiB budget fits this with a smaller
 worker configuration such as one RESP worker. The exact startup estimate is
 authoritative for each configuration.
 
-| Setting | Default | Meaning |
-|---|---:|---|
-| `pg_local_cache.database` | `postgres` | database served by the extension |
-| `pg_local_cache.cache_entries` | `262144` | hard global maximum number of compact shared row-cache descriptors; derived from the 384 MiB default budget; range `128`–`16777216` |
-| `pg_local_cache.dirty_marker_entries` | `-1` | maximum number of shared dirty-key markers; `-1` selects the automatic limit above; explicit range `128`–`1048576` |
-| `pg_local_cache.dirty_marker_memory_mb` | `-1` | maximum memory for dirty-marker keys; `-1` selects the automatic limit above; explicit range `1`–`1024` MiB |
-| `pg_local_cache.lock_partitions` | `64` | maximum cache lock partitions; small caches may use fewer; power of two from `16` to `256`; requires restart (`PGC_POSTMASTER`) |
-| `pg_local_cache.relation_states` | `1024` | shared mapping-state capacity |
-| `pg_local_cache.memory_budget_mb` | `384` | hard extension startup budget for shared cache storage and bounded RESP worker memory |
-| `pg_local_cache.port` | `6380` | RESP port; `0` is for regression tests and diagnostics only, and serves no reads |
-| `pg_local_cache.bind_address` | `127.0.0.1` | RESP bind address |
-| `pg_local_cache.workers` | `4` | RESP workers |
-| `pg_local_cache.role` | `local_cache_worker` | RESP PostgreSQL role |
-| `pg_local_cache.max_clients` | `256` | global RESP client limit |
-| `pg_local_cache.max_clients_per_worker` | `64` | slots per worker |
-| `pg_local_cache.idle_timeout_ms` | `300000` | idle and slow-client deadline |
-| `pg_local_cache.statement_timeout_ms` | `2000` | worker statement deadline |
-| `pg_local_cache.lock_timeout_ms` | `250` | worker lock deadline |
-| `pg_local_cache.singleflight_wait_ms` | `25` | same-key follower wait |
-| `pg_local_cache.max_deferred_misses` | `8` | maximum queued deferred cache misses per worker (range `1`–`64`); retained request bytes also share a fixed 512 KiB per-worker limit; requires restart |
-| `pg_local_cache.max_pipeline_commands` | `256` | commands per event-loop turn |
-| `pg_local_cache.max_dirty_keys` | `4096` | transaction key-fence bound |
-| `pg_local_cache.auth_token_file` | empty | preferred RESP credential |
-| `pg_local_cache.auth_token` | empty | development-only inline token |
-| `pg_local_cache.enabled` | `on` | SIGHUP cache kill switch; RESP reads go directly to source while off |
-| `pg_local_cache.tls` | `off` | enable TLS on the RESP listener; requires PostgreSQL built with OpenSSL |
-| `pg_local_cache.tls_cert_file` | empty | PEM server certificate/chain; required when TLS is on |
-| `pg_local_cache.tls_key_file` | empty | PEM server private key; required when TLS is on |
-| `pg_local_cache.tls_ca_file` | empty | trusted client CA; setting it enables mutual TLS |
-| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | minimum TLS version (`TLSv1.2` or `TLSv1.3`) |
-| `pg_local_cache.allow_plaintext_network` | `off` | postmaster opt-in for plaintext listeners outside IPv4 loopback |
-| `pg_local_cache.allow_superuser` | `off` | development-only role override |
+| Setting | Default | Range | Reload |
+|---|---:|---|---|
+| `pg_local_cache.enabled` | `on` | `on` / `off` | SIGHUP |
+| `pg_local_cache.allow_plaintext_network` | `off` | `on` / `off` | Restart |
+| `pg_local_cache.tls` | `off` | `on` / `off` | Restart |
+| `pg_local_cache.tls_cert_file` | empty | PEM file path | Restart |
+| `pg_local_cache.tls_key_file` | empty | PEM file path | Restart |
+| `pg_local_cache.tls_ca_file` | empty | CA PEM file path | Restart |
+| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | `TLSv1.2` / `TLSv1.3` | Restart |
+| `pg_local_cache.port` | `6380` | `0`–`65535`; `0` is for tests and diagnostics and serves no reads | Restart |
+| `pg_local_cache.workers` | `4` | `1`–`32` | Restart |
+| `pg_local_cache.cache_entries` | `262144` | `128`–`16777216` | Restart |
+| `pg_local_cache.dirty_marker_entries` | `-1` | `-1` or `128`–`1048576` | Restart |
+| `pg_local_cache.dirty_marker_memory_mb` | `-1` | `-1` or `1`–`1024` MiB | Restart |
+| `pg_local_cache.lock_partitions` | `64` | maximum power of two, `16`–`256`; small caches may use fewer | Restart |
+| `pg_local_cache.relation_states` | `1024` | `128`–`8192` | Restart |
+| `pg_local_cache.max_clients` | `256` | `1`–`4096`; at most worker slots | Restart |
+| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`4096` | Restart |
+| `pg_local_cache.memory_budget_mb` | `384` | `64`–`8192` MB | Restart |
+| `pg_local_cache.idle_timeout_ms` | `300000` | `1000`–`86400000` | Restart |
+| `pg_local_cache.statement_timeout_ms` | `2000` | `100`–`60000` | Restart |
+| `pg_local_cache.lock_timeout_ms` | `250` | `10`–`60000` | Restart |
+| `pg_local_cache.singleflight_wait_ms` | `25` | `0`–`1000` | Restart |
+| `pg_local_cache.max_deferred_misses` | `8` | `1`–`64` per worker | Restart |
+| `pg_local_cache.max_pipeline_commands` | `256` | `1`–`4096` | Restart |
+| `pg_local_cache.max_dirty_keys` | `4096` | `128`–`16384` | Restart |
+| `pg_local_cache.bind_address` | `127.0.0.1` | IPv4 address | Restart |
+| `pg_local_cache.database` | `postgres` | Database name | Restart |
+| `pg_local_cache.role` | `local_cache_worker` | PostgreSQL LOGIN role | Restart |
+| `pg_local_cache.auth_token_file` | empty | PostgreSQL OS-user-owned mode `0400` or `0600` file | Restart |
+| `pg_local_cache.auth_token` | empty | Inline token; development only | Restart |
+| `pg_local_cache.allow_superuser` | `off` | `on` / `off`; development only | Restart |
 
-Most settings are postmaster settings. See the
-[installation guide](INSTALL_EXISTING.md) for package installation and restart
-steps.
+All settings except `enabled` are postmaster settings and require restart. Client slots require `max_clients <= workers × max_clients_per_worker`.
 
 ## RESP2 endpoint {#optional-resp2-endpoint}
 
-RESP2 uses the same mappings and shared cache. Wire keys use this shape:
+The endpoint accepts RESP2. Keys use `CRUD:<db>.<schema>.<table>:<json pk>`. `MGET` preserves request order and duplicates; a missing row is a nil element. Each request accepts at most 1,024 keys, each JSON row is limited to 65,536 bytes, and the encoded reply is limited to 66,560 bytes.
 
-```text
-CRUD:database.schema.table:{"pk_column":<json-scalar>,...}
-```
+Supported data commands are `MGET`, `SET`, and `DEL`; `AUTH` is required. The endpoint also supports `PING`, `ECHO`, `INFO`, `STAT`/`STATS`, scoped `INVALIDATE`, `HELLO 2`, `QUIT`, `CLIENT SETINFO`/`SETNAME`/`GETNAME`/`ID`, `COMMAND`, and `SELECT 0`. Unsupported commands return an error. RESP clients use database 0; database and table scope come from each cache key.
 
-Supported commands are authenticated, bounded `MGET`, `SET`, `DEL`, and scoped
-invalidation. RESP workers use one configured PostgreSQL role; they do not
-inherit each network client's database ACLs.
+## TLS and security model {#security-model}
 
-RESP TLS uses dedicated `pg_local_cache.tls_*` settings and is independent of
-PostgreSQL `ssl_*` settings. PostgreSQL TLS on the SQL port does not secure
-RESP, and RESP TLS does not change the SQL listener. Enable `pg_local_cache.tls`
-and provide a server certificate and key; setting `pg_local_cache.tls_ca_file`
-verifies client certificates and enables mutual TLS. The minimum protocol
-defaults to `TLSv1.2` and can be raised to `TLSv1.3`. OpenSSL system cipher
-defaults apply. The private key follows [PostgreSQL's server key file
-rule](https://www.postgresql.org/docs/current/ssl-tcp.html). Prefer TLS beyond
-loopback. With TLS off, plaintext on a non-loopback listener requires the
-explicit `pg_local_cache.allow_plaintext_network = on` opt-in, limited to
-trusted networks. A non-loopback listener still requires a token of at least 32
-bytes; prefer a mode-restricted token file over an inline token.
+The listener binds to IPv4 loopback by default. RESP TLS uses extension-specific settings, not PostgreSQL `ssl_*`. It requires a PostgreSQL build with OpenSSL, a PEM server certificate and key, and a restart. Setting `tls_ca_file` enables required client-certificate verification (mTLS); minimum TLS version defaults to 1.2.
 
-`pg_local_cache.enabled` is a SIGHUP setting. Each RESP worker applies a reload
-asynchronously at its next command boundary, after any command it is executing
-finishes. `local_cache.health()` reports `cache_enabled` as seen by the SQL
-session that calls it; it does not acknowledge that every worker has applied
-the setting. Turning it on advances the global cache epoch before workers resume
-cached reads. To disable cache lookups without restarting PostgreSQL:
+With TLS disabled, non-loopback plaintext requires `allow_plaintext_network=on` and a trusted network. Non-loopback listeners require a token of at least 32 bytes. Prefer a mode-restricted token file. All RESP clients share one configured PostgreSQL LOGIN role; PostgreSQL grants to each network client are not evaluated separately. Superuser workers are off by default and intended only for development.
 
-```sql
-ALTER SYSTEM SET pg_local_cache.enabled = off;
-SELECT pg_reload_conf();
-```
+## Cache kill switch {#cache-kill-switch}
 
-`SET` and `DEL` continue writing the mapped table while caching is disabled;
-table-trigger invalidation also remains active. To re-enable cached reads:
+`pg_local_cache.enabled` is a SIGHUP cache kill switch. When off, RESP reads bypass shared cache and read source tables; `SET` and `DEL` continue to write through PostgreSQL. Workers apply reloads asynchronously at command boundaries. `local_cache.health()` reports the calling SQL session's setting, not acknowledgement from every worker. Re-enabling advances the cache epoch before workers resume cache reads.
 
-```sql
-ALTER SYSTEM SET pg_local_cache.enabled = on;
-SELECT pg_reload_conf();
-```
+## Metrics and health {#health-and-monitoring}
 
-## Health and monitoring {#health-and-monitoring}
+`local_cache.health()` reports readiness, cache state, and mapping convergence. `local_cache.stats()` returns JSON counters; `local_cache.metrics()` returns the typed exporter row.
 
-`local_cache.health()` reports readiness, `cache_enabled`, and mapping convergence.
-`local_cache.stats()` returns JSON counters. `local_cache.metrics()` exposes the
-typed metrics row used by the exporter.
+Metrics include cache hits, misses and negative hits; source reads and writes; invalidations and evictions; single-flight leaders, waiters, reuse and timeouts; active and peak clients; connection-limit rejections; authentication and protocol errors; output backpressure and slow-client drops; worker starts; dirty-key fallback; mapping reload failures and retries; TLS handshakes and failures. Gauges include entry and relation capacities, client and worker counts, mapping convergence, shared/worker/estimated memory, and the configured budget.
 
 TLS counters `tls_handshakes_total` and `tls_handshake_failures_total` are
 exposed in `stats()` and `metrics()`.
@@ -257,7 +197,6 @@ and `dirty_marker_memory_mb_effective` report resolved marker limits after
 automatic sizing; `dirty_marker_memory_capacity_bytes` reports allocated key
 storage, which can be lower when the entry limit is binding.
 
-Next: use the [installation guide](INSTALL_EXISTING.md) for Debian and RPM
-package verification, PGXS source builds, configuration, restarts, upgrades,
-and uninstall. For breaking changes and rollback steps, see the
+Next: [quickstart](QUICKSTART.md), [installation](INSTALL_EXISTING.md), and
+[upgrading](UPGRADING.md). For breaking changes and rollback steps, see the
 [2.x to 3.0 upgrade guide](UPGRADING.md).

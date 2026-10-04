@@ -3,14 +3,12 @@ layout: post
 lang: de
 translation_key: blog-measure-postgresql-row-cache
 title: "Wann ein PostgreSQL-Zeilen-Cache hilft: den gesamten Lesepfad messen"
-description: Einen fairen Vergleich für PostgreSQL-Zeilen-Caching mit vorbereitetem SQL, SQL mget und RESP MGET entwerfen. Warme Lesevorgänge, Fehltreffer, Batch-Größen, Schreibvorgänge und Client-Kosten trennen.
+description: Einen fairen Vergleich des PostgreSQL-Zeilen-Caches mit vorbereitetem SQL und RESP MGET entwerfen. Warme Lesevorgänge, Fehltreffer, Batch-Größen, Schreibvorgänge und Client-Kosten getrennt messen.
 permalink: /de/blog/measure-postgresql-row-cache/
 date: "2026-09-22"
 last_modified_at: "2026-10-04"
 topic: performance
 ---
-
-> **Hinweis vom 04.10.2026:** SQL-`mget` wurde in 3.0.0 entfernt; RESP-`MGET` ersetzt es.
 
 # Wann ein PostgreSQL-Zeilen-Cache hilft {#when-a-postgresql-row-cache-helps}
 
@@ -21,10 +19,9 @@ Er fügt aber auch Schlüsselverarbeitung, Cache-Prüfungen und
 Serialisierungskosten hinzu. Die nützliche Frage ist, ob die vollständige
 Anwendungsanfrage für Ihre Arbeitslast günstiger wird.
 
-`pg_local_cache` stellt eine explizite `local_cache.mget`-API bereit. Gewöhnliche
-`SELECT`-Abfragen behalten ihren normalen PostgreSQL-Ausführungspfad. Ein warmer
-`shared_buffers`-Cache und ein warmer Zeilen-Cache sind daher unterschiedliche
-Versuchsbedingungen.
+> **Versionshinweis vom 04.10.2026:** Die SQL-API `local_cache.mget(regclass, anyarray)` aus 2.x wurde in 3.0.0 entfernt; verwenden Sie RESP `MGET` für Zeilen-Lesevorgänge.
+
+`pg_local_cache` stellt für Lesezugriffe auf vollständige Zeilen den expliziten RESP-Endpunkt `MGET` bereit. Gewöhnliche `SELECT`-Abfragen behalten ihren normalen PostgreSQL-Ausführungspfad. Ein warmer `shared_buffers`-Cache und ein warmer Zeilen-Cache sind daher unterschiedliche Versuchsbedingungen.
 
 ## Ergebnisvertrag zuerst festhalten {#result-contract}
 
@@ -34,10 +31,10 @@ mit vollständigen serialisierten Zeilen unterschiedliche Arbeit. Wenn Aufrufer
 Duplikate, Eingabereihenfolge und ein Null-Ergebnis für jeden fehlenden Schlüssel
 erwarten, beziehen Sie diese Ausrichtung in jeden Client ein.
 
-Der [Leitfaden zu Batch-Abfragen](../docs/batch-primary-key-lookups.md) liefert
-sowohl eine `ANY`-Baseline als auch eine geordnete `WITH ORDINALITY`-Baseline.
-Keine von beiden erfordert die Erweiterung. Ermitteln Sie die SQL-Baseline,
-bevor Sie einen Cache hinzufügen.
+Der erhaltene [Node.js-Quellcode](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/queries.mjs)
+enthält die vorbereitete `ANY`-Baseline und eine Hilfsfunktion, die die
+Eingabepositionen wiederherstellt. Das [geordnete `WITH ORDINALITY`-Beispiel](ordered-batch-reads.md#explicit-positions)
+zeigt die Positionsbehandlung in SQL. Beides benötigt die Erweiterung nicht.
 
 ## Pro Experiment nur eine Arbeitslastdimension ändern {#workload-dimensions}
 
@@ -74,15 +71,6 @@ Korrektheits-Smoke-Lauf ist kein veröffentlichbares Geschwindigkeitsergebnis.
 
 ## An der Anwendungsgrenze entscheiden {#application-boundary}
 
-SQL `mget` und RESP `MGET` verwenden unterschiedliche Transporte und
-Ergebnisverarbeitung. Ein Gewinn für das eine belegt keinen Gewinn für das
-andere. Die [datierten Go-Messungen](../docs/benchmarks-go.md) enthalten einen
-Fall mit einem Schlüssel, in dem SQL `mget` langsamer als vorbereitetes SQL war.
-Das ist ein Grund zum Testen, keine allgemeine Vorhersage.
+Vorbereitetes SQL und RESP `MGET` verwenden unterschiedliche Lesewege und Ergebnisverarbeitung. Ein Gewinn für das eine belegt keinen Gewinn für das andere. Messen Sie beide mit dem tatsächlichen Anfragemuster Ihrer Anwendung; ein einzelnes Ergebnis sagt die Leistung für andere Arbeitslasten nicht voraus.
 
-Behalten Sie gewöhnliches SQL bei, wenn Joins, Projektionen, Sperren oder nicht
-unterstützte Tabellenformen erforderlich sind oder der Cache keinen gemessenen
-Nutzen bringt. Testen Sie bei wiederholten vollständigen Zeilen-Lesevorgängen per
-Primärschlüssel die explizite API mit derselben Clientarbeit, die Ihre Anwendung
-tatsächlich ausführt. Fahren Sie mit dem [Leitfaden zur Caching-Entscheidung](../docs/postgresql-caching.md)
-und dem [Invalidation-Experiment](../docs/cache-invalidation.md) fort.
+Behalten Sie gewöhnliches SQL bei, wenn Joins, Projektionen, Sperren oder nicht unterstützte Tabellenformen erforderlich sind oder der Cache keinen messbaren Nutzen bringt. Testen Sie für wiederholte Lesezugriffe auf vollständige Zeilen per Primärschlüssel RESP `MGET` mit derselben Clientarbeit, die Ihre Anwendung tatsächlich ausführt. Lesen Sie weiter im [Leitfaden zur Caching-Entscheidung](../docs/postgresql-caching.md) und beim [Invalidation-Experiment](../docs/cache-invalidation.md).

@@ -71,12 +71,12 @@ npm --prefix examples/node-postgres run demo
 
 Le test utilise RESP pour les lectures et PostgreSQL pour les écritures. Il vérifie un hit chaud, l’ordre d’entrée, les doublons et clés absentes, l’invalidation du cache et la visibilité des mises à jour validées. Les workers RESP utilisent un rôle PostgreSQL configuré et ne partagent ni la transaction SQL ni le snapshot de l’application.
 
-Consultez le [guide d’invalidation du cache](cache-invalidation.md) ou [l’explication des requêtes Node.js](node-postgres.md).
+Consultez le [guide d’invalidation du cache](cache-invalidation.md) ou [l’explication des requêtes Node.js](resp.md#nodejs).
 
 ## Connecter votre application {#connect-your-application}
 
-- [Node.js](node-postgres.md) : utilisez RESP pour les lectures mises en cache et `pg` pour les écritures SQL.
-- [Go](go.md) : utilisez RESP pour les lectures mises en cache et `pgx` pour les écritures SQL.
+- [Node.js](resp.md#nodejs) : utilisez RESP pour les lectures mises en cache et `pg` pour les écritures SQL.
+- [Go](resp.md#go) : utilisez RESP pour les lectures mises en cache et `pgx` pour les écritures SQL.
 - [RESP](resp.md) : connectez-vous avec un client Redis.
 
 Ensuite, [comparez la même charge en SQL préparé et RESP](BENCHMARKS.md#run-the-same-comparison-on-every-client). Pour signaler des résultats ou un problème de configuration, ouvrez un [rapport de charge](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml) avec l’environnement, le JSON du benchmark ou le journal d’erreur.

@@ -3,14 +3,12 @@ layout: post
 lang: fr
 translation_key: blog-ordered-batch-reads
 title: "Lectures PostgreSQL par lots sans perdre l'ordre ni les clés absentes"
-description: Remplacez les requêtes de clés primaires N+1 en conservant les ID dupliqués, l'ordre d'entrée, les positions NULL et les lignes absentes. Comparez ANY, WITH ORDINALITY et SQL mget.
+description: Remplacez les requêtes de clés primaires N+1 en conservant les ID dupliqués, l'ordre d'entrée, les positions NULL et les lignes absentes. Comparez ANY, WITH ORDINALITY et RESP MGET.
 permalink: /fr/blog/ordered-batch-reads/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: application
 ---
-
-> **Note du 04/10/2026 :** SQL `mget` a été supprimé en 3.0.0 ; RESP `MGET` le remplace.
 
 # Les lectures par lots ont besoin d'un contrat de résultat {#batch-reads-need-a-result-contract}
 
@@ -18,6 +16,8 @@ Remplacer une boucle de requêtes par clé primaire par une seule requête `ANY`
 supprime des allers-retours. Cela peut aussi modifier la forme de la réponse.
 Un appelant peut demander `[42, 7, 42, NULL, -1]` et attendre cinq positions de
 résultat. La sémantique des ensembles SQL ne promet pas cet alignement.
+
+> **Note du 04/10/2026 :** l’API SQL de cache de lignes local_cache.mget(regclass, anyarray) de la version 2.x a été supprimée en 3.0.0 ; utilisez RESP MGET pour lire les lignes complètes.
 
 ## Un ensemble de lignes n'est pas une liste de réponses {#set-versus-list}
 
@@ -55,26 +55,21 @@ La colonne d'ordinalité distingue les deux occurrences de 42. La jointure
 externe gauche conserve les cinq positions, y compris l'entrée nulle et toute
 clé absente. Pour une clé manquante, `row` vaut `NULL` SQL. Dans le code
 applicatif, passez le tableau comme paramètre plutôt que de concaténer les ID
-dans le SQL. [L'exemple Node.js](../docs/node-postgres.md) montre l'alignement
-côté client.
+dans le SQL. Le [code source de l’assistant Node.js](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/queries.mjs)
+montre l’alignement des résultats côté client.
 
 ## Comparer l'API de lignes complètes {#whole-row-api}
 
-Sur une table attachée, l'appel de cache explicite correspondant est :
+Pour lire des lignes complètes dans les tables attachées, utilisez RESP MGET. Encodez chaque clé primaire dans une clé de la forme CRUD:<db>.<schema>.<table>:<json pk> :
 
-```sql
-SELECT local_cache.mget(
-  'public.items'::regclass,
-  ARRAY[42, 7, 42, NULL, -1]::bigint[]
-) AS rows;
+RESP MGET renvoie un tableau RESP2 dans l’ordre de la requête. Les clés dupliquées gardent leur position ; une ligne absente renvoie nil. Les clés RESP identifient des valeurs de clé primaire et ne portent pas de position SQL NULL dans un tableau. Si chaque entrée SQL, y compris NULL, doit produire un résultat aligné, utilisez la requête SQL avec WITH ORDINALITY présentée plus haut. Une commande accepte au plus 1 024 clés, chaque ligne JSON est limitée à 65 536 octets et la réponse encodée à 66 560 octets. RESP MGET ne remplace ni les projections, ni les jointures, ni les verrous de lignes, ni la mise en cache de résultats arbitraires.
+
+```bash
+REDISCLI_AUTH=DemoRespToken_0123456789abcdef0123456789 redis-cli -2 -p 56379 MGET 'CRUD:pglc_demo.public.items:{"id":42}' \
+  'CRUD:pglc_demo.public.items:{"id":7}' \
+  'CRUD:pglc_demo.public.items:{"id":42}' \
+  'CRUD:pglc_demo.public.items:{"id":-1}'
 ```
-
-Il renvoie `text[]`, en conservant l'ordre d'entrée et les doublons. Les clés
-absentes et les entrées nulles produisent des éléments `NULL` SQL alignés ;
-chaque élément présent est une ligne complète sérialisée. Un miss ou un
-contournement du cache lit PostgreSQL. L'API accepte au plus 1 024 clés par
-appel. Elle ne remplace ni les projections, ni les jointures, ni les verrous de
-lignes, ni la mise en cache arbitraire des résultats de requêtes.
 
 ## Garder les lots bornés et observables {#bounded-batches}
 

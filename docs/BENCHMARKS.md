@@ -34,7 +34,7 @@ The [Node.js measurements](benchmarks-node.md) use a macOS client and Docker
 server; [Go and RESP measurements](benchmarks-go.md) put both inside the Docker
 VM. Each page links raw repetitions, exact versions and server resource costs.
 These separate setups do not rank languages. For connection examples, see
-[Node.js](node-postgres.md), [Go](go.md) or [RESP](resp.md).
+[Node.js](resp.md#nodejs), [Go](resp.md#go) or [RESP](resp.md).
 
 ## Run the same comparison on every client {#run-the-same-comparison-on-every-client}
 

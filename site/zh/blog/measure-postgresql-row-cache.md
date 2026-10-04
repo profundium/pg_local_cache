@@ -3,26 +3,26 @@ layout: post
 lang: zh
 translation_key: blog-measure-postgresql-row-cache
 title: PostgreSQL 行缓存何时有效：测量完整读取路径
-description: 使用预备 SQL、SQL mget 与 RESP MGET 设计公平的 PostgreSQL 行缓存比较，分别考察热读取、未命中、批次大小、写入和客户端成本。
+description: 使用预备 SQL 和 RESP MGET 设计公平的 PostgreSQL 行缓存比较，分别考察热读取、未命中、批次大小、写入和客户端成本。
 permalink: /zh/blog/measure-postgresql-row-cache/
 date: '2026-09-22'
 last_modified_at: "2026-10-04"
 topic: performance
 ---
 
-> **2026-10-04 版本说明：** SQL `mget` 已在 3.0.0 中移除；现在由 RESP `MGET` 提供替代功能。
-
 # PostgreSQL 行缓存何时有效 {#when-a-postgresql-row-cache-helps}
 
 即使所有数据库页都从内存读取，数据库仍可能花时间执行查询、检查可见性和构造结果。行缓存试图避免其中一部分重复工作，但也引入键处理、缓存检查和序列化成本。真正有用的问题是：对你的工作负载而言，完整应用请求的成本是否下降。
 
-`pg_local_cache` 提供显式 `local_cache.mget` API。普通 `SELECT` 保留原有 PostgreSQL 执行路径。因此，已预热的 `shared_buffers` 与已预热的行缓存，是不同的实验条件。
+> **2026-10-04 版本说明：** 2.x 的 SQL API `local_cache.mget(regclass, anyarray)` 已在 3.0.0 中移除；读取行请使用 RESP `MGET`。
+
+`pg_local_cache` 提供显式 RESP `MGET` 端点，用于读取完整行。普通 `SELECT` 查询仍沿用 PostgreSQL 原有执行路径。因此，预热的 `shared_buffers` 缓存与预热的行缓存属于不同的实验条件。
 
 ## 先写清结果约定 {#result-contract}
 
 比较相同的键、列和输出形状。如果应用只需要两列，将这样的 SQL 投影与序列化整行比较，测量的就不是同一工作。如果调用者要求保留重复项、输入顺序，并为每个缺失键返回空结果，应在所有客户端中都计入位置对齐工作。
 
-[批量查找指南](../docs/batch-primary-key-lookups.md)给出了 `ANY` 基线与带顺序的 `WITH ORDINALITY` 基线，两者都不需要扩展。添加缓存前，先建立 SQL 基线。
+[保留的 Node.js 示例源码](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/queries.mjs)包含预备语句 `ANY` 基线，以及用于恢复输入位置的辅助函数。[有序 `WITH ORDINALITY` 示例](ordered-batch-reads.md#explicit-positions)展示了如何在 SQL 中保留位置。两种方法都不需要扩展。
 
 ## 每次只改变一个负载维度 {#workload-dimensions}
 
@@ -49,6 +49,6 @@ python3 scripts/benchmark_report.py comparison.json
 
 ## 从应用边界作出决定 {#application-boundary}
 
-SQL `mget` 与 RESP `MGET` 使用不同传输方式和结果处理流程。一种路径的收益不能证明另一种也有收益。项目[注明日期的 Go 测量](../docs/benchmarks-go.md)包含 SQL `mget` 慢于预备 SQL 的单键场景。这说明需要实测，而不是给出普遍预测。
+预备 SQL 与 RESP `MGET` 使用不同的读取路径和结果处理方式。一种方式有收益并不能证明另一种也有收益。应使用应用的实际请求模式分别测量；单个结果无法预测所有工作负载的性能。
 
-需要连接、投影、锁定或不支持的表形状时，或者缓存没有可测收益时，应保留普通 SQL。对于按主键重复读取整行的场景，请在测试显式 API 时包含应用实际执行的同等客户端工作。继续阅读[缓存选择指南](../docs/postgresql-caching.md)和[失效实验](../docs/cache-invalidation.md)。
+如果需要连接查询、列投影、锁定、不支持的表结构，或缓存没有可测收益，请保留普通 SQL。对于按主键反复读取整行的场景，请使用应用实际执行的同等客户端工作测试 RESP `MGET`。继续阅读[缓存选择指南](../docs/postgresql-caching.md)和[失效实验](../docs/cache-invalidation.md)。

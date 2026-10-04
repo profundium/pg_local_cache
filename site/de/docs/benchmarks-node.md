@@ -67,7 +67,7 @@ Schätzung.
 
 ## Historische SQL-Benchmark-Abfrage {#query-setup}
 
-Die historische SQL-`mget`-Abfrage bleibt in den verknüpften Rohdaten zur Reproduzierbarkeit erhalten. In 3.0.0 ist sie nicht verfügbar. Der aktuelle Benchmark vergleicht vorbereitetes SQL mit RESP `MGET`; siehe das [Node.js-Beispiel](node-postgres.md).
+Die historische SQL-`mget`-Abfrage bleibt in den verknüpften Rohdaten zur Reproduzierbarkeit erhalten. In 3.0.0 ist sie nicht verfügbar. Der aktuelle Benchmark vergleicht vorbereitetes SQL mit RESP `MGET`; siehe das [Node.js-Beispiel](resp.md#nodejs).
 
 ## Reproduzieren {#reproduce}
 

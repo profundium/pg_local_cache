@@ -184,3 +184,5 @@ sudo dnf remove pg_local_cache_<major>
 ```
 
 下一步：参阅[技术参考](TECHNICAL.md)，了解 SQL、内存规划、监控和 RESP 安全性。
+
+2.x 版本文档：https://github.com/profundium/pg_local_cache/tree/v2.0.4/docs

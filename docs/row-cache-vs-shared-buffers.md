@@ -4,78 +4,44 @@ lang: en
 translation_key: row-cache-vs-shared-buffers
 title: PostgreSQL row cache vs shared_buffers
 seo_title: "PostgreSQL Row Cache vs shared_buffers | pg_local_cache"
-description: Compare PostgreSQL page caching with pg_local_cache 3.0 whole-row caching. See what a row-cache hit avoids, what it still costs, and when not to add another cache.
+description: Compare PostgreSQL page caching with pg_local_cache whole-row caching: source work avoided, cache costs, and workloads that should keep ordinary SQL.
 section: Read paths
 permalink: /docs/row-cache-vs-shared-buffers.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
 # PostgreSQL row cache vs shared_buffers {#postgresql-row-cache-vs-shared_buffers}
 
-PostgreSQL's [`shared_buffers`](https://www.postgresql.org/docs/16/runtime-config-resource.html#GUC-SHARED-BUFFERS)
-contains database pages. pg_local_cache separately stores serialized whole-row
-payloads under their complete primary keys. A page already in memory can avoid
-a storage read, but a query still has to produce a result from the database's
-tuples. A row-cache hit can return the stored payload after eligibility and
-snapshot checks.
+This guide compares PostgreSQL page caching with `pg_local_cache` whole-row caching and shows what each read path still does.
 
-The operating system may also cache file contents. Use a warm database as the
-baseline.
+[`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS) keeps database pages in memory. A warm page can avoid storage I/O, but PostgreSQL still checks tuple visibility, executes the query, and builds the result. An eligible RESP `MGET` hit can return a stored whole-row payload after key, cache, and snapshot checks.
 
-{% include diagrams/read-path.html id="buffers-read" %}
+See the [technical read-path reference](TECHNICAL.md#read-path-and-safe-fallback).
 
 ## Does PostgreSQL cache SELECT results? {#does-postgresql-cache-select-results}
 
-`shared_buffers` caches pages used by a query, rather than its final result set.
-A [prepared statement](https://www.postgresql.org/docs/18/sql-prepare.html)
-reuses parsing work and may reuse a plan, but PostgreSQL still executes it.
-pg_local_cache adds whole-row caching through authenticated RESP `MGET`; it
-does not cache arbitrary SELECT results or rewrite existing queries. The
-[Node.js example](node-postgres.md) shows the separate RESP and SQL paths.
+No. PostgreSQL page caches store pages, not final query results. A [prepared statement](https://www.postgresql.org/docs/18/sql-prepare.html) can reuse parse and planning work; PostgreSQL still executes it. `pg_local_cache` exposes whole-row caching through RESP `MGET`, not arbitrary `SELECT` caching. See [RESP clients](resp.md).
 
 ## Compare the work, not just the storage medium {#compare-the-work-not-just-the-storage-medium}
 
-| Read | Work remaining |
+| Read path | Work remaining |
 |---|---|
-| Prepared primary-key SQL over warm pages | Protocol handling, plan execution, row visibility checks, and result conversion |
-| Eligible RESP MGET cache hit | Protocol handling, key conversion, cache synchronization, snapshot checks, and returning the stored payload |
-| RESP MGET miss or bypass | Cache checks plus a source-table query; a successful eligible fill can populate the cache |
+| Prepared primary-key SQL over warm pages | Protocol, query execution, visibility checks, and result conversion |
+| Eligible RESP `MGET` hit | Protocol, key conversion, cache synchronization, eligibility checks, and payload return |
+| RESP miss or bypass | Cache checks and a source-table read; eligible rows may fill the cache |
 
-A row-cache hit avoids repeated source-table execution and whole-row
-serialization. Cache checks and synchronization also consume CPU, and a hit still
-uses a PostgreSQL worker and its configured database role. RESP does not share
-the caller's SQL transaction or snapshot.
+A hit avoids repeating source-table execution and whole-row serialization. It still uses a PostgreSQL worker and cache synchronization. RESP does not share the caller's SQL transaction or snapshot.
 
 ## Costs to include {#costs-to-include}
 
-A cached row takes additional shared memory even when its source page is
-already in memory. The extension also maintains mapping and invalidation
-state. Updates to attached tables run the extension's triggers. When the
-working set exceeds capacity, an apparent read optimization can become mostly
-miss and eviction overhead.
+Rows and mapping state use additional shared memory. Writes to attached tables run invalidation triggers. A working set larger than cache capacity can increase misses and evictions.
 
-The default demo deliberately compares a 128-row hot set with 1,024 cache slots,
-then a first pass over 4,096 rows. The [benchmark guide](BENCHMARKS.md) explains
-both cases and measures attached-table writes separately.
+Measure the same key set, row shape, connection count, and request mix on both paths. Keep batched SQL separate from single-row reads; batching alone can reduce round trips without a cache.
 
 ## When to leave the application alone {#when-to-leave-the-application-alone}
 
-Keep the existing query when its end-to-end latency is already acceptable,
-when the application needs only a small projection of a large row, or when
-joins, ranges, and aggregation dominate. First compare an ordinary batched
-query with the application's current per-key calls. A gain from batching is
-not evidence of a gain from caching.
-
-pg_local_cache 3.0 requires explicit RESP `MGET` calls, extension installation,
-and a startup preload. It rejects RLS, partitioned, and inherited tables.
+Keep ordinary SQL when its end-to-end latency is acceptable, when the application needs only a projection, or when joins, ranges, and aggregation dominate. Use SQL for row locks and reads that must share a transaction.
 
 ## Row cache or an external cache? {#row-cache-or-an-external-cache}
 
-For data that remains authoritative in PostgreSQL, this design keeps
-invalidation on the database write path and avoids maintaining an application
-cache-aside protocol. It does not provide general Redis semantics. The optional
-RESP2 endpoint has a limited command set and a separate security model.
-
-A PostgreSQL row cache cannot stand in for TTL-based application state, pub/sub, or
-distributed coordination. See the [technical contract](TECHNICAL.md) and
-[transaction examples](cache-invalidation.md).
+Use `pg_local_cache` when PostgreSQL remains authoritative and whole rows are repeatedly read by primary key. Use an external cache for TTL-based application state, pub/sub, distributed coordination, or shared objects across services. The [technical reference](TECHNICAL.md) describes the RESP security boundary.

@@ -71,12 +71,12 @@ npm --prefix examples/node-postgres run demo
 
 Der Test verwendet RESP für Lesevorgänge und PostgreSQL für Schreibvorgänge. Er prüft einen warmen Treffer, Eingabereihenfolge, doppelte und fehlende Schlüssel, Cache-Invalidierung und Sichtbarkeit bestätigter Änderungen. RESP-Worker verwenden eine konfigurierte PostgreSQL-Rolle und teilen weder SQL-Transaktion noch Snapshot der Anwendung.
 
-Siehe den [Leitfaden zur Cache-Invalidierung](cache-invalidation.md) oder die [Erklärung der Node.js-Abfrage](node-postgres.md).
+Siehe den [Leitfaden zur Cache-Invalidierung](cache-invalidation.md) oder die [Erklärung der Node.js-Abfrage](resp.md#nodejs).
 
 ## Ihre Anwendung verbinden {#connect-your-application}
 
-- [Node.js](node-postgres.md): Verwenden Sie RESP für gecachte Lesevorgänge und `pg` für SQL-Schreibvorgänge.
-- [Go](go.md): Verwenden Sie RESP für gecachte Lesevorgänge und `pgx` für SQL-Schreibvorgänge.
+- [Node.js](resp.md#nodejs): Verwenden Sie RESP für gecachte Lesevorgänge und `pg` für SQL-Schreibvorgänge.
+- [Go](resp.md#go): Verwenden Sie RESP für gecachte Lesevorgänge und `pgx` für SQL-Schreibvorgänge.
 - [RESP](resp.md): Verbinden Sie sich mit einem Redis-Client.
 
 Als Nächstes [vergleichen Sie dieselbe vorbereitete SQL- und RESP-Arbeitslast](BENCHMARKS.md#run-the-same-comparison-on-every-client). Bei Ergebnis- oder Einrichtungsproblemen öffnen Sie einen [Workload-Bericht](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml) mit Umgebung, Benchmark-JSON oder Fehlerprotokoll.

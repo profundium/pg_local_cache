@@ -3,14 +3,12 @@ layout: post
 lang: fr
 translation_key: blog-measure-postgresql-row-cache
 title: "Quand un cache de lignes PostgreSQL aide : mesurer toute la lecture"
-description: Concevez une comparaison équitable d'un cache de lignes PostgreSQL avec SQL préparé, SQL mget et RESP MGET. Séparez lectures chaudes, misses, tailles de lots, écritures et coûts clients.
+description: Concevez une comparaison équitable du cache de lignes PostgreSQL avec SQL préparé et RESP MGET. Distinguez lectures chaudes, misses, tailles de lots, écritures et coûts clients.
 permalink: /fr/blog/measure-postgresql-row-cache/
 date: "2026-09-22"
 last_modified_at: "2026-10-04"
 topic: performance
 ---
-
-> **Note du 04/10/2026 :** SQL `mget` a été supprimé en 3.0.0 ; RESP `MGET` le remplace.
 
 # Quand un cache de lignes PostgreSQL aide {#when-a-postgresql-row-cache-helps}
 
@@ -21,10 +19,9 @@ Il ajoute aussi la gestion des clés, les vérifications du cache et les coûts 
 sérialisation. La bonne question est de savoir si la requête applicative
 complète devient moins coûteuse pour votre charge.
 
-`pg_local_cache` expose une API `local_cache.mget` explicite. Les requêtes
-`SELECT` ordinaires conservent leur chemin d'exécution PostgreSQL normal. Un
-cache `shared_buffers` chaud et un cache de lignes chaud sont donc des
-conditions expérimentales différentes.
+> **Note de version du 04/10/2026 :** L’API SQL `local_cache.mget(regclass, anyarray)` de 2.x a été supprimée en 3.0.0 ; utilisez RESP `MGET` pour lire les lignes.
+
+`pg_local_cache` propose un endpoint RESP `MGET` explicite pour lire des lignes complètes. Les requêtes `SELECT` ordinaires conservent leur chemin d’exécution PostgreSQL habituel. Un cache `shared_buffers` chaud et un cache de lignes chaud sont donc des conditions expérimentales différentes.
 
 ## Écrire d'abord le contrat de résultat {#result-contract}
 
@@ -34,9 +31,10 @@ complètes sérialisées mesure des travaux différents. Si les appelants attend
 des doublons, l'ordre d'entrée et un résultat nul pour chaque clé absente,
 incluez ce travail d'alignement dans chaque client.
 
-Le [guide des recherches par lots](../docs/batch-primary-key-lookups.md) donne
-une référence `ANY` et une référence ordonnée `WITH ORDINALITY`. Aucune
-n'exige l'extension. Établissez la référence SQL avant d'ajouter un cache.
+Le [code source conservé de l’exemple Node.js](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/queries.mjs)
+contient la référence préparée `ANY` et une fonction qui restaure les positions
+d’entrée. L’[exemple ordonné `WITH ORDINALITY`](ordered-batch-reads.md#explicit-positions)
+montre la gestion des positions en SQL. Aucun des deux n’exige l’extension.
 
 ## Modifier une seule dimension de charge à la fois {#workload-dimensions}
 
@@ -73,15 +71,6 @@ Un court smoke test de correction n'est pas un résultat de vitesse publiable.
 
 ## Décider depuis la limite applicative {#application-boundary}
 
-SQL `mget` et RESP `MGET` utilisent des transports et une gestion des résultats
-différents. Un gain pour l'un ne prouve pas un gain pour l'autre. Les
-[mesures Go datées du projet](../docs/benchmarks-go.md) incluent un cas à clé
-unique où SQL `mget` était plus lent que le SQL préparé. C'est une raison de
-tester, pas une prédiction universelle.
+SQL préparé et RESP `MGET` utilisent des chemins de lecture et un traitement des résultats différents. Un gain pour l’un ne prouve pas un gain pour l’autre. Mesurez chaque chemin avec le profil réel des requêtes de votre application ; un résultat ne prédit pas les performances de toutes les charges.
 
-Gardez le SQL ordinaire lorsque des jointures, projections, verrous ou formes
-de tables non prises en charge sont nécessaires, ou lorsque le cache n'apporte
-aucun bénéfice mesuré. Pour des lectures répétées de lignes complètes par clé
-primaire, testez l'API explicite avec le même travail client que celui effectué
-par votre application. Continuez avec le [guide de décision sur la mise en cache](../docs/postgresql-caching.md)
-et [l'expérience d'invalidation](../docs/cache-invalidation.md).
+Gardez le SQL ordinaire lorsque des jointures, projections, verrous ou formes de tables non prises en charge sont nécessaires, ou si le cache n’apporte aucun bénéfice mesuré. Pour des lectures répétées de lignes complètes par clé primaire, testez RESP `MGET` avec le même travail client que celui effectué par votre application. Consultez le [guide de décision sur la mise en cache](../docs/postgresql-caching.md) et [l’expérience d’invalidation](../docs/cache-invalidation.md).

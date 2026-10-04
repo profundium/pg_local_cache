@@ -22,6 +22,8 @@ class Page(HTMLParser):
         self.feed_url = None
         self.h1 = 0
         self.canonical = None
+        self.is_redirect = False
+        self.redirect_target = None
         self.title = ""
         self.structured = []
         self.errors = []
@@ -53,6 +55,14 @@ class Page(HTMLParser):
             self.in_title = True
         if tag == "meta":
             self.meta[attrs.get("name", attrs.get("property"))] = attrs.get("content", "")
+            if attrs.get("http-equiv", "").lower() == "refresh":
+                self.is_redirect = True
+                refresh = attrs.get("content", "")
+                target = re.search(
+                    r"(?:^|;)\s*url\s*=\s*(?:['\"](?P<quoted>[^'\"]+)['\"]|(?P<plain>.*))\s*$",
+                    refresh, re.I)
+                if target:
+                    self.redirect_target = (target.group("quoted") or target.group("plain")).strip()
         if tag == "link" and attrs.get("rel") == "canonical":
             if self.canonical is not None:
                 self.errors.append("duplicate canonical")
@@ -97,6 +107,8 @@ def check(root, base=BASE, languages=None):
         url = base + (relative[:-10] if relative.endswith("index.html") else relative)
         page = Page(path.read_text())
         pages[url] = page
+        if page.is_redirect:
+            continue
         for error in page.errors:
             errors.append(f"{relative}: {error}")
         if page.h1 != 1 or "main-content" not in page.ids:
@@ -127,6 +139,20 @@ def check(root, base=BASE, languages=None):
                 errors.append(f"{relative}: copy target not found: {target}")
     if not pages:
         errors.append("no HTML pages were built")
+    for url, page in pages.items():
+        if not page.is_redirect:
+            continue
+        if not page.redirect_target:
+            errors.append(f"{url}: redirect has no valid refresh target")
+            continue
+        parsed = urlsplit(urljoin(url, page.redirect_target))
+        destination = parsed._replace(query="", fragment="").geturl()
+        if parsed.netloc != urlsplit(base).netloc or not destination.startswith(base):
+            errors.append(f"{url}: redirect target escapes built site: {page.redirect_target}")
+        elif destination not in pages:
+            errors.append(f"{url}: redirect target is missing: {page.redirect_target}")
+        elif parsed.fragment and unquote(parsed.fragment) not in pages[destination].ids:
+            errors.append(f"{url}: redirect target fragment is missing: {page.redirect_target}")
     reachable, pending = set(), [base]
     while pending:
         url = pending.pop()
@@ -135,9 +161,12 @@ def check(root, base=BASE, languages=None):
         reachable.add(url)
         for target in pages[url].anchors:
             pending.append(urlsplit(urljoin(url, target))._replace(query="", fragment="").geturl())
-    for url in sorted(pages.keys() - reachable):
+    crawlable = {url for url, page in pages.items() if not page.is_redirect}
+    for url in sorted(crawlable - reachable):
         errors.append(f"{url}: page is not reachable through links from the homepage")
     for url, page in pages.items():
+        if page.is_redirect:
+            continue
         for target in page.links:
             absolute = urljoin(url, target)
             parsed = urlsplit(absolute)
@@ -156,6 +185,8 @@ def check(root, base=BASE, languages=None):
     if languages:
         expected_languages = set(languages)
         for url, page in pages.items():
+            if page.is_redirect:
+                continue
             if page.lang not in expected_languages:
                 errors.append(f"{url}: wrong HTML language: {page.lang}")
             if set(page.alternates) != expected_languages | {"x-default"}:
@@ -218,7 +249,8 @@ def check(root, base=BASE, languages=None):
     try:
         sitemap = ET.parse(root / "sitemap.xml")
         urls = [node.text for node in sitemap.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
-        expected = {url for url, page in pages.items() if "noindex" not in page.meta.get("robots", "")}
+        expected = {url for url, page in pages.items()
+                    if not page.is_redirect and "noindex" not in page.meta.get("robots", "")}
         if len(urls) != len(set(urls)) or set(urls) != expected:
             errors.append("sitemap does not match the indexable canonical pages")
     except (OSError, ET.ParseError) as error:

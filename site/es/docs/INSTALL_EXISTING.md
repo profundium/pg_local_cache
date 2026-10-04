@@ -199,3 +199,5 @@ sudo dnf remove pg_local_cache_<major>
 ```
 
 A continuación, consulta la [referencia técnica](TECHNICAL.md) sobre SQL, memoria, monitorización y seguridad de RESP.
+
+Documentación de 2.x: https://github.com/profundium/pg_local_cache/tree/v2.0.4/docs

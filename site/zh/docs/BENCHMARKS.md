@@ -19,7 +19,7 @@ last_modified_at: '2026-09-16'
 
 Node.js 和 Go 会解码 RESP JSON 行；这些客户端开销计入计时。历史 SQL mget 比较均标注为 2.x 数据。
 
-[Node.js 测量](benchmarks-node.md)使用 macOS 客户端与 Docker 服务器；[Go 与 RESP 测量](benchmarks-go.md)将两者均置于 Docker VM 内。每个页面都链接到原始重复测量、精确版本和服务器资源成本。这些不同配置不能用来给语言排名。连接示例见 [Node.js](node-postgres.md)、[Go](go.md) 或 [RESP](resp.md)。
+[Node.js 测量](benchmarks-node.md)使用 macOS 客户端与 Docker 服务器；[Go 与 RESP 测量](benchmarks-go.md)将两者均置于 Docker VM 内。每个页面都链接到原始重复测量、精确版本和服务器资源成本。这些不同配置不能用来给语言排名。连接示例见 [Node.js](resp.md#nodejs)、[Go](resp.md#go) 或 [RESP](resp.md)。
 
 ## 在每种客户端运行相同比较 {#run-the-same-comparison-on-every-client}
 

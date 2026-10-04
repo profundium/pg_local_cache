@@ -95,3 +95,5 @@ Die Control-Datei verwendet den einfachen Bibliotheksnamen `pg_local_cache` in
 (der Standard enthält `$libdir`). Wenn der Server diese Einstellung
 überschreibt, nehmen Sie vor dem Neustart das Verzeichnis auf, in dem das Paket
 `pg_local_cache` installiert hat.
+
+Dokumentation für 2.x: https://github.com/profundium/pg_local_cache/tree/v2.0.4/docs

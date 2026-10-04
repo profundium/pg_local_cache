@@ -3,139 +3,91 @@ layout: doc
 lang: zh
 translation_key: TECHNICAL
 title: pg_local_cache 技术参考
-seo_title: pg_local_cache 技术参考 | pg_local_cache
-description: "pg_local_cache 技术参考：RESP MGET、事务感知失效、有界 PostgreSQL 共享内存与监控。"
-section: 技术参考
+seo_title: pg_local_cache RESP API、一致性、内存与配置
+description: 参考文档涵盖 RESP 读取、支持的表、事务屏障、TLS、共享内存、指标和 PostgreSQL 设置。
+section: 技术
 permalink: /zh/docs/TECHNICAL.html
 ---
 
 # pg_local_cache 技术参考 {#pg_local_cache-technical-reference}
 
-`pg_local_cache` 在有界 PostgreSQL 共享内存中按完整主键缓存整行数据。RESP2 接口提供 `MGET`、`SET` 和 `DEL` 命令。
+本文介绍 RESP2 端点、缓存一致性、资源限制和安全性。配置步骤请参阅[快速入门](QUICKSTART.md)和[安装指南](INSTALL_EXISTING.md)。
 
-> **普通 SQL 保持原有行为：** 扩展不安装规划器或执行器钩子。普通 `SELECT` 始终由 PostgreSQL 执行，不会读取此缓存。
+## 支持的表和键 {#supported-tables-and-keys}
 
-## 支持的表与键 {#supported-tables-and-keys}
+可附加具有有效主键的永久堆表。不支持分区表、继承表、启用行级安全性（RLS）的表、临时表、外部表以及归扩展所有的表。支持的主键类型包括 `smallint`、`integer`、`bigint`、`text`、`varchar`、使用确定性排序规则的 `char`，以及 `uuid`；复合键最多可包含 16 列，且列类型必须来自上述类型。
 
-源表必须是具有有效主键的永久堆表，且不能启用 RLS、分区、继承，也不能归扩展所有。
-
-支持的键类型：
-
-- `smallint`、`integer` 和 `bigint`；
-- 使用确定性排序规则的 `text`、`varchar` 和 `char`；
-- `uuid`；
-- 仅由上述类型组成的复合主键。
-
-不支持的关系会在关联时被拒绝，不会生成不安全的部分映射。
-
-## 关联、协调与解除关联 {#attach-reconcile-and-detach-tables}
-
-`local_cache.attach_table(regclass)` 执行一组受保护的初始化操作：
-
-1. 锁定并验证关系；
-2. 记录命名空间、关系 OID 及按顺序排列的主键列；
-3. 安装归扩展所有的语句级、行级和截断触发器；
-4. 重新加载工作进程映射。
-
-DDL 事件触发器会使已缓存的映射元数据失效。主动修改表结构后，运行 `local_cache.reconcile_table(...)` 或 `local_cache.reconcile_all()`。`local_cache.detach_table(...)` 会移除映射及其触发器。
+DDL 变更后必须重新协调映射。请参阅[安装指南](INSTALL_EXISTING.md#attach-a-table)。
 
 ## 读取路径与安全回退 {#read-path-and-safe-fallback}
 
-启用缓存时，每个 RESP `MGET` 键都会先查询共享缓存。每次未命中时，worker 都会
-在自己的短事务中读取源表行。超过缓存载荷上限的行仍由 PostgreSQL 返回，但不会
-写入缓存。
+![RESP MGET 读取路径：缓存命中、受屏障保护的源数据填充，以及通过紧急开关绕过缓存。](../../docs/diagrams/read-path.svg)
+
+每个 RESP `MGET` 键都会在查找前经过校验和规范化。符合条件的缓存命中会返回完整行的 JSON。未命中时，worker 会在一个简短事务中读取源表；只有读取屏障仍有效时才会发布缓存填充。不存在的行返回 `nil`。如果行的负载无法放入共享缓存，只要 JSON 未超过 RESP 值大小限制，仍可由 PostgreSQL 返回。
 
 ## 事务一致性 {#transaction-consistency}
 
-任意 PostgreSQL 会话中的映射表写入触发器，都会在提交变得可见前，通过
-dirty-writer 计数为受影响的键或关系发布屏障并推进代次。写入完成前，读取会
-绕过这些缓存项；代次检查会阻止过期的进行中读取发布结果，因此已提交写入之后
-不会命中旧缓存。
+![写入失效：提交前的屏障保护已提交写入；仅在屏障发布前回滚才会保留原缓存项。](../../docs/diagrams/write-invalidation.svg)
 
-RESP 读取使用 `pg_local_cache.role`，而不是客户端的 PostgreSQL 角色，并在各自
-独立的短事务中执行。它们看不到客户端未提交的更改，不共享客户端的快照，也不
-属于客户端的事务。设置 `pg_local_cache.enabled = off` 会绕过缓存。
+映射表上的行级和语句级触发器会在事务本地状态中记录脏键或受影响的关系。提交前回调会发布失效屏障并递增代数。屏障建立前开始的填充无法发布过期数据。仅在屏障发布前回滚，事务的脏状态才会被丢弃，原缓存项仍然有效。若屏障发布后事务中止，失效不会撤销，受影响的缓存项仍为无效。
 
-## 共享内存与配置 {#shared-memory-and-configuration}
+RESP 读取在独立的短事务中使用 `pg_local_cache.role`。它们不会共享客户端的 SQL 角色、事务、未提交写入或快照。
 
-缓存项、关系状态、计数器、工作进程代次和 RESP 客户端槽位都在 postmaster 启动时分配，容量有明确上限。淘汰策略会检查一个大小有界、轮转取样的集合，并优先移除过期项；无法接纳新项时，回退读取源表，不会无限分配内存。
+## 内存与设置 {#shared-memory-and-configuration}
 
-| 配置项 | 默认值 | 含义 |
-|---|---:|---|
-| `pg_local_cache.database` | `postgres` | 扩展服务的数据库 |
-| `pg_local_cache.cache_entries` | `16384` | 共享行缓存容量 |
-| `pg_local_cache.relation_states` | `1024` | 共享映射状态容量 |
-| `pg_local_cache.memory_budget_mb` | `384` | 扩展启动内存预算 |
-| `pg_local_cache.port` | `6380` | RESP 端口；`0` 仅用于回归测试和诊断，不提供读取服务 |
-| `pg_local_cache.bind_address` | `127.0.0.1` | RESP 绑定地址 |
-| `pg_local_cache.workers` | `4` | RESP 工作进程数 |
-| `pg_local_cache.role` | `local_cache_worker` | RESP 使用的 PostgreSQL 角色 |
-| `pg_local_cache.max_clients` | `256` | RESP 全局客户端上限 |
-| `pg_local_cache.max_clients_per_worker` | `64` | 每个工作进程的槽位数 |
-| `pg_local_cache.idle_timeout_ms` | `300000` | 空闲与慢客户端截止时间 |
-| `pg_local_cache.statement_timeout_ms` | `2000` | 工作进程语句截止时间 |
-| `pg_local_cache.lock_timeout_ms` | `250` | 工作进程锁等待截止时间 |
-| `pg_local_cache.singleflight_wait_ms` | `25` | 同键后续请求的等待时间 |
-| `pg_local_cache.max_pipeline_commands` | `256` | 每轮事件循环的命令数 |
-| `pg_local_cache.max_dirty_keys` | `4096` | 事务键屏障数量上限 |
-| `pg_local_cache.auth_token_file` | 空 | 首选 RESP 凭据文件 |
-| `pg_local_cache.auth_token` | 空 | 仅供开发使用的内联令牌 |
-| `pg_local_cache.enabled` | `on` | SIGHUP 缓存紧急开关；关闭时 RESP 直接读取源表 |
-| `pg_local_cache.tls` | `off` | 启用 RESP listener TLS；PostgreSQL 构建须支持 OpenSSL |
-| `pg_local_cache.tls_cert_file` | 空 | PEM 格式的服务器证书/链；启用 TLS 时必需 |
-| `pg_local_cache.tls_key_file` | 空 | PEM 格式的服务器私钥；启用 TLS 时必需 |
-| `pg_local_cache.tls_ca_file` | 空 | 受信任的客户端 CA；设置后启用双向 TLS (mTLS) |
-| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | 最低 TLS 版本（`TLSv1.2` 或 `TLSv1.3`） |
-| `pg_local_cache.allow_plaintext_network` | `off` | postmaster 设置，用于允许 IPv4 loopback 之外的明文监听 |
-| `pg_local_cache.allow_superuser` | `off` | 仅供开发使用的角色限制覆盖 |
+扩展会在 PostgreSQL 启动时预分配有界的共享缓存、映射以及 worker/客户端状态。`memory_budget_mb` 限制扩展可确定性分配的内存。准入失败和逐出都不会突破配置容量；读取会回退到 PostgreSQL。
 
-这些都是 postmaster 配置项。应在重启前设定容量。参阅[安装指南](INSTALL_EXISTING.md)了解软件包和重启步骤。
+| 设置 | 默认值 | 范围 | 重载方式 |
+|---|---:|---|---|
+| `pg_local_cache.enabled` | `on` | `on` / `off` | SIGHUP |
+| `pg_local_cache.allow_plaintext_network` | `off` | `on` / `off` | 重启 |
+| `pg_local_cache.tls` | `off` | `on` / `off` | 重启 |
+| `pg_local_cache.tls_cert_file` | 空 | PEM 文件路径 | 重启 |
+| `pg_local_cache.tls_key_file` | 空 | PEM 文件路径 | 重启 |
+| `pg_local_cache.tls_ca_file` | 空 | CA PEM 文件路径 | 重启 |
+| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | `TLSv1.2` / `TLSv1.3` | 重启 |
+| `pg_local_cache.port` | `6380` | `0`–`65535`；`0` 表示禁用 RESP | 重启 |
+| `pg_local_cache.workers` | `4` | `1`–`32` | 重启 |
+| `pg_local_cache.cache_entries` | `16384` | `128`–`65536` | 重启 |
+| `pg_local_cache.relation_states` | `1024` | `128`–`8192` | 重启 |
+| `pg_local_cache.max_clients` | `256` | `1`–`4096`；不得超过 worker 槽位数 | 重启 |
+| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`128` | 重启 |
+| `pg_local_cache.memory_budget_mb` | `384` | `64`–`8192` MB | 重启 |
+| `pg_local_cache.idle_timeout_ms` | `300000` | `1000`–`86400000` | 重启 |
+| `pg_local_cache.statement_timeout_ms` | `2000` | `100`–`60000` | 重启 |
+| `pg_local_cache.lock_timeout_ms` | `250` | `10`–`60000` | 重启 |
+| `pg_local_cache.singleflight_wait_ms` | `25` | `0`–`1000` | 重启 |
+| `pg_local_cache.max_pipeline_commands` | `256` | `1`–`4096` | 重启 |
+| `pg_local_cache.max_dirty_keys` | `4096` | `128`–`16384` | 重启 |
+| `pg_local_cache.bind_address` | `127.0.0.1` | IPv4 地址 | 重启 |
+| `pg_local_cache.database` | `postgres` | 数据库名称 | 重启 |
+| `pg_local_cache.role` | `local_cache_worker` | PostgreSQL LOGIN 角色 | 重启 |
+| `pg_local_cache.auth_token_file` | 空 | 由 PostgreSQL 操作系统用户拥有、权限为 `0400` 或 `0600` 的文件 | 重启 |
+| `pg_local_cache.auth_token` | 空 | 内联令牌；仅用于开发 | 重启 |
+| `pg_local_cache.allow_superuser` | `off` | `on` / `off`；仅用于开发 | 重启 |
 
-## RESP2 接口 {#optional-resp2-endpoint}
+除 `enabled` 外，所有设置都是 postmaster 参数，修改后需重启。客户端槽位要求 `max_clients <= workers × max_clients_per_worker`。
 
-RESP2 使用相同的映射和共享缓存。协议键格式如下：
+## RESP2 端点 {#optional-resp2-endpoint}
 
-```text
-CRUD:database.schema.table:{"pk_column":<json-scalar>,...}
-```
+端点接受 RESP2。键格式为 `CRUD:<db>.<schema>.<table>:<json pk>`。`MGET` 按请求顺序返回结果并保留重复项；不存在的行对应一个 `nil` 元素。每个请求最多包含 1,024 个键，每行 JSON 最大为 65,536 字节，编码后的响应最大为 66,560 字节。
 
-RESP TLS 使用独立的 `pg_local_cache.tls_*` 配置，与 PostgreSQL 的 `ssl_*` 配置互不影响。SQL 端口上的
-PostgreSQL TLS 不会保护 RESP；RESP TLS 也不会更改 SQL listener。启用 `pg_local_cache.tls`
-并提供服务器证书和密钥；设置 `pg_local_cache.tls_ca_file` 后会验证客户端证书并启用双向 TLS (mTLS)。最低协议版本默认为
-`TLSv1.2`，可提高到 `TLSv1.3`。使用 OpenSSL 系统默认密码套件。私钥须遵循 [PostgreSQL
-服务器密钥文件规则](https://www.postgresql.org/docs/current/ssl-tcp.html)。loopback 之外建议使用
-TLS。TLS 关闭时，loopback 之外的明文 listener 必须显式设置
-`pg_local_cache.allow_plaintext_network = on`，且仅限可信网络。非 loopback listener 仍要求至少
-32 字节的令牌；应优先使用权限受限的令牌文件，而非内联令牌。
+支持的数据命令包括 `MGET`、`SET` 和 `DEL`；必须先执行 `AUTH`。端点还支持 `PING`、`ECHO`、`INFO`、`STAT`/`STATS`、有作用域限制的 `INVALIDATE`、`HELLO 2`、`QUIT`、`CLIENT SETINFO`/`SETNAME`/`GETNAME`/`ID`、`COMMAND` 和 `SELECT 0`。不支持的命令会返回错误。RESP 客户端使用数据库 0；数据库和表的作用域由每个缓存键指定。
 
-运维参数 `pg_local_cache.enabled` 是 SIGHUP 参数，可用作缓存服务的紧急开关。要禁用缓存服务：
+## TLS 与安全模型 {#security-model}
 
-```sql
-ALTER SYSTEM SET pg_local_cache.enabled = off;
-SELECT pg_reload_conf();
-```
+默认情况下，监听器绑定到 IPv4 loopback。RESP TLS 使用扩展专属设置，与 PostgreSQL 的 `ssl_*` 设置无关。它要求 PostgreSQL 使用 OpenSSL 构建、配置 PEM 格式的服务器证书和密钥，并重启 PostgreSQL。设置 `tls_ca_file` 后，必须验证客户端证书（mTLS）；默认最低 TLS 版本为 1.2。
 
-每个 RESP worker 都会在下一个命令边界异步应用重载，且会等当前执行的命令结束。`local_cache.health()` 中的 `cache_enabled` 字段报告调用它的 SQL 会话所见设置；它不表示所有 worker 都已应用该设置。要重新启用，请同时执行：
+关闭 TLS 时，非 loopback 的明文监听器必须启用 `allow_plaintext_network=on`，且只能用于可信网络。非 loopback 监听器要求令牌至少为 32 字节。建议使用权限受限的令牌文件。所有 RESP 客户端共用一个已配置的 PostgreSQL LOGIN 角色；PostgreSQL 不会分别检查每个网络客户端的授权。默认禁用超级用户 worker，且仅建议在开发环境中使用。
 
-```sql
-ALTER SYSTEM SET pg_local_cache.enabled = on;
-SELECT pg_reload_conf();
-```
+## 缓存紧急开关 {#cache-kill-switch}
 
-## 健康状态与监控 {#health-and-monitoring}
+`pg_local_cache.enabled` 是通过 SIGHUP 重载的缓存紧急开关。关闭后，RESP 读取会绕过共享缓存并读取源表；`SET` 和 `DEL` 仍会通过 PostgreSQL 写入。worker 会在命令边界异步应用重载。`local_cache.health()` 报告发起调用的 SQL 会话设置，不代表每个 worker 都已确认。重新启用时，会先递增缓存 epoch，然后 worker 才恢复缓存读取。
 
-`local_cache.health()` 报告就绪状态与映射收敛情况。`local_cache.stats()` 返回 JSON 计数器。`local_cache.metrics()` 提供导出器使用的有类型指标行。
+## 指标与健康状态 {#health-and-monitoring}
 
-`stats()` 和 `metrics()` 中的 RESP 计数器包括：
+`local_cache.health()` 报告就绪状态、缓存状态和映射收敛情况。`local_cache.stats()` 返回 JSON 计数器；`local_cache.metrics()` 返回供 exporter 使用的类型化指标行。
 
-- `sql_gets`
-- `sql_meta`
-- `sql_sets`
-- `sql_dels`
-- `sql_result_reuses`
-- `tls_handshakes_total`
-- `tls_handshake_failures_total`
+指标包括缓存命中、未命中和负缓存命中；源数据读写；失效和逐出；singleflight 的 leader、等待者、复用次数和超时；当前及峰值客户端数；连接数限制导致的拒绝；认证和协议错误；输出背压和慢客户端断开；worker 启动；脏键回退；映射重载失败和重试；TLS 握手及失败。Gauge 指标包括缓存项和关系容量、客户端和 worker 数量、映射收敛情况、共享/worker/估算内存以及配置的内存预算。
 
-数据库读取、失效、接纳拒绝、脏键回退、singleflight、工作进程和 RESP 的计数器分别统计。
-
-下一步：参阅[安装指南](INSTALL_EXISTING.md)，了解 Debian 和 RPM 软件包验证、PGXS 源码构建、配置、重启、升级与卸载。
+接下来请参阅[快速入门](QUICKSTART.md)、[安装指南](INSTALL_EXISTING.md)和[升级指南](UPGRADING.md)。

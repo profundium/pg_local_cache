@@ -71,12 +71,12 @@ npm --prefix examples/node-postgres run demo
 
 Тест использует RESP для чтения и PostgreSQL для записи. Он проверяет прогретое попадание, порядок входных данных, дубликаты и отсутствующие ключи, инвалидацию кэша и видимость подтверждённых обновлений. RESP-воркеры используют настроенную роль PostgreSQL и не разделяют SQL-транзакцию или снимок приложения.
 
-См. [руководство по инвалидации кэша](cache-invalidation.md) или [объяснение запросов Node.js](node-postgres.md).
+См. [руководство по инвалидации кэша](cache-invalidation.md) или [объяснение запросов Node.js](resp.md#nodejs).
 
 ## Подключите приложение {#connect-your-application}
 
-- [Node.js](node-postgres.md): используйте RESP для чтения из кэша и `pg` для SQL-записи.
-- [Go](go.md): используйте RESP для чтения из кэша и `pgx` для SQL-записи.
+- [Node.js](resp.md#nodejs): используйте RESP для чтения из кэша и `pg` для SQL-записи.
+- [Go](resp.md#go): используйте RESP для чтения из кэша и `pgx` для SQL-записи.
 - [RESP](resp.md): подключайтесь клиентом Redis.
 
 Далее [сравните одинаковую нагрузку подготовленного SQL и RESP](BENCHMARKS.md#run-the-same-comparison-on-every-client). Для сообщения о результатах или проблемах настройки создайте [отчёт о нагрузке](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml), приложив окружение, JSON бенчмарка или журнал ошибок.

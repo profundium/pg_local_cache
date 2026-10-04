@@ -93,3 +93,5 @@ SELECT local_cache.attach_table('public.items'::regclass);
 (по умолчанию он включает `$libdir`). Если сервер переопределяет этот
 параметр, до перезапуска добавьте каталог, куда пакет установил
 `pg_local_cache`.
+
+Документация для 2.x: https://github.com/profundium/pg_local_cache/tree/v2.0.4/docs

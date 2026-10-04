@@ -3,175 +3,91 @@ layout: doc
 lang: de
 translation_key: TECHNICAL
 title: Technische Referenz für pg_local_cache
-seo_title: pg_local_cache SQL-API, Konsistenz, Speicher und RESP2
-description: "Technische Referenz zu pg_local_cache: RESP-MGET, transaktionsbewusste Invalidierung, begrenzter PostgreSQL-Shared-Memory, Monitoring und RESP2."
+seo_title: pg_local_cache RESP-API, Konsistenz, Speicher und Konfiguration
+description: Referenz zu RESP-Lesevorgängen, unterstützten Tabellen, Transaktionssperren, TLS, Shared Memory, Metriken und PostgreSQL-Einstellungen.
 section: Technik
 permalink: /de/docs/TECHNICAL.html
 ---
 
 # Technische Referenz für pg_local_cache {#pg_local_cache-technical-reference}
 
-`pg_local_cache` speichert vollständige Zeilen anhand des vollständigen Primärschlüssels im begrenzten PostgreSQL-Shared-Memory. Der RESP2-Endpunkt stellt `MGET`, `SET` und `DEL` bereit.
-
-> **Gewöhnliches SQL bleibt gewöhnlich:** Die Erweiterung installiert keine
-> Planner- oder Executor-Hooks. Ein normales `SELECT` verwendet immer PostgreSQL
-> und liest niemals diesen Cache.
+Technische Referenz zum RESP2-Endpunkt, zur Cache-Konsistenz, zu Ressourcenlimits und zur Sicherheit. Einrichtungsschritte finden Sie im [Schnellstart](QUICKSTART.md) und in der [Installation](INSTALL_EXISTING.md).
 
 ## Unterstützte Tabellen und Schlüssel {#supported-tables-and-keys}
 
-Quelltabellen müssen dauerhafte Heap-Tabellen mit einem gültigen Primärschlüssel
-sein und dürfen weder RLS, Partitionierung, Vererbung noch Erweiterungsbesitz
-haben.
+Hängen Sie dauerhafte Heap-Tabellen mit einem gültigen Primärschlüssel an. Nicht unterstützt werden partitionierte, vererbte, durch Zeilensicherheit (RLS) geschützte, temporäre und Fremdtabellen sowie Tabellen im Besitz einer Erweiterung. Unterstützte Primärschlüsseltypen sind `smallint`, `integer`, `bigint`, `text`, `varchar`, `char` mit deterministischen Kollationen sowie `uuid`; zusammengesetzte Schlüssel dürfen diese Typen verwenden und höchstens 16 Spalten umfassen.
 
-Unterstützte Schlüsseltypen:
+Schemaänderungen erfordern einen Abgleich der Zuordnungen. Siehe [Installation](INSTALL_EXISTING.md#attach-a-table).
 
-- `smallint`, `integer` und `bigint`;
-- `text`, `varchar` und `char` mit deterministischen Kollationen;
-- `uuid`;
-- zusammengesetzte Primärschlüssel, die ausschließlich aus diesen Typen bestehen.
+## Leseweg und sicherer Fallback {#read-path-and-safe-fallback}
 
-Nicht unterstützte Relationen werden beim Anhängen abgelehnt, statt eine unsichere
-unvollständige Zuordnung zu erzeugen.
+![RESP-MGET-Leseweg: Cache-Treffer, abgesicherte Befüllung aus der Quelle und Umgehung per Notausschalter.](../../docs/diagrams/read-path.svg)
 
-## Tabellen anhängen, abgleichen und trennen {#attach-reconcile-and-detach-tables}
-
-`local_cache.attach_table(regclass)` führt eine einmalig abgesicherte
-Einrichtungssequenz aus:
-
-1. Relation sperren und validieren;
-2. Namespace, Relations-OID und geordnete Primärschlüsselspalten aufzeichnen;
-3. von der Erweiterung verwaltete Statement-, Row- und Truncate-Trigger installieren;
-4. Worker-Zuordnungen neu laden.
-
-DDL-Event-Trigger invalidieren gecachte Zuordnungsmetadaten. Führen Sie nach
-beabsichtigten Schemaänderungen `local_cache.reconcile_table(...)` oder
-`local_cache.reconcile_all()` aus. `local_cache.detach_table(...)` entfernt die
-Zuordnung und ihre Trigger.
-
-## Lesepfad und sicherer Fallback {#read-path-and-safe-fallback}
-
-Bei aktiviertem Cache wird für jeden RESP-`MGET`-Schlüssel zuerst der gemeinsame
-Cache geprüft. Bei jedem Cache-Miss liest der Worker die Quellzeile in einer
-eigenen kurzen Transaktion. Zeilen über dem Payload-Limit werden weiterhin von
-PostgreSQL zurückgegeben, aber nicht gecacht.
+Jeder RESP-`MGET`-Schlüssel wird vor der Suche validiert und kanonisiert. Ein zulässiger Treffer liefert die vollständige Zeile als JSON. Bei einem Fehltreffer liest der Worker die Quelltabelle in einer kurzen Transaktion und veröffentlicht einen Cache-Eintrag nur, wenn sein Lesefence noch aktuell ist. Fehlende Zeilen liefern `nil`. Zeilen, deren Payload nicht in den gemeinsamen Cache passt, können trotzdem aus PostgreSQL zurückgegeben werden, sofern ihr JSON innerhalb des RESP-Wertlimits liegt.
 
 ## Transaktionskonsistenz {#transaction-consistency}
 
-Trigger für Schreibvorgänge an zugeordneten Tabellen veröffentlichen in jeder
-PostgreSQL-Sitzung vor Commit-Sichtbarkeit Dirty-Writer-Sperren pro Schlüssel
-oder Relation und erhöhen Generationen. Betroffene Cache-Einträge werden bis zum
-Ende des Schreibvorgangs umgangen; Generationsprüfungen verhindern die
-Veröffentlichung veralteter laufender Lesevorgänge. Daher kann nach einem Commit
-kein veralteter Cache-Treffer folgen.
+![Schreibinvalidierung: Fences vor dem Commit schützen bestätigte Schreibvorgänge; ein Rollback vor Veröffentlichung des Fence erhält vorherige Einträge.](../../docs/diagrams/write-invalidation.svg)
 
-RESP-Lesezugriffe verwenden `pg_local_cache.role`, nicht die PostgreSQL-Rolle des
-Clients, und laufen in unabhängigen kurzen Transaktionen. Sie sehen keine
-uncommitteten Client-Änderungen, teilen nicht dessen Snapshot und sind nicht Teil
-seiner Transaktion. `pg_local_cache.enabled = off` umgeht den Cache.
+Zeilen- und Statement-Trigger an zugeordneten Tabellen sammeln geänderte Schlüssel oder eine betroffene Relation im transaktionslokalen Zustand. Der Pre-Commit-Callback veröffentlicht Invalidation-Fences und erhöht Generationen. Eine Befüllung, die vor dem Fence begonnen hat, kann keine veralteten Daten veröffentlichen. Ein Rollback vor Veröffentlichung des Fence verwirft den Änderungszustand; vorherige Cache-Einträge bleiben gültig. Wird die Transaktion nach der Veröffentlichung abgebrochen, bleibt die Invalidierung bestehen und betroffene Einträge bleiben ungültig.
 
-## Shared Memory und Konfiguration {#shared-memory-and-configuration}
+RESP-Lesevorgänge verwenden `pg_local_cache.role` in unabhängigen kurzen Transaktionen. Sie teilen weder die SQL-Rolle noch Transaktion, uncommittete Änderungen oder Snapshot eines Clients.
 
-Cache-Einträge, Relationszustände, Zähler, Worker-Generationen und RESP-
-Client-Slots werden beim Start des Postmasters allokiert. Die Kapazität ist
-begrenzt. Die Verdrängung prüft eine begrenzte rotierende Menge und bevorzugt
-veraltete Einträge; wenn die Aufnahme scheitert, geht der Vorgang zur Quelltabelle
-zurück, statt unbegrenzt Speicher zu allokieren.
+## Speicherbedarf und Einstellungen {#shared-memory-and-configuration}
 
-| Einstellung | Standard | Bedeutung |
-|---|---:|---|
-| `pg_local_cache.database` | `postgres` | Von der Erweiterung bediente Datenbank |
-| `pg_local_cache.cache_entries` | `16384` | Gemeinsame Zeilenkapazität |
-| `pg_local_cache.relation_states` | `1024` | Kapazität des gemeinsamen Zuordnungszustands |
-| `pg_local_cache.memory_budget_mb` | `384` | Erweiterungsbudget beim Start |
-| `pg_local_cache.port` | `6380` | RESP-Port; `0` nur für Regressionstests und Diagnose, keine Lesezugriffe |
-| `pg_local_cache.bind_address` | `127.0.0.1` | RESP-Bind-Adresse |
-| `pg_local_cache.workers` | `4` | RESP-Worker |
-| `pg_local_cache.role` | `local_cache_worker` | PostgreSQL-Rolle für RESP |
-| `pg_local_cache.max_clients` | `256` | Globales RESP-Client-Limit |
-| `pg_local_cache.max_clients_per_worker` | `64` | Slots pro Worker |
-| `pg_local_cache.idle_timeout_ms` | `300000` | Frist für Inaktivität und langsame Clients |
-| `pg_local_cache.statement_timeout_ms` | `2000` | Statement-Frist des Workers |
-| `pg_local_cache.lock_timeout_ms` | `250` | Sperrfrist des Workers |
-| `pg_local_cache.singleflight_wait_ms` | `25` | Wartezeit eines Followers auf denselben Schlüssel |
-| `pg_local_cache.max_pipeline_commands` | `256` | Befehle pro Event-Loop-Durchlauf |
-| `pg_local_cache.max_dirty_keys` | `4096` | Begrenzung der Schlüssel-Sperren pro Transaktion |
-| `pg_local_cache.auth_token_file` | leer | Bevorzugtes RESP-Zugangsdokument |
-| `pg_local_cache.auth_token` | leer | Token inline, nur für Entwicklung |
-| `pg_local_cache.enabled` | `on` | SIGHUP-Notausschalter für den Cache; bei `off` liest RESP direkt aus der Quelltabelle |
-| `pg_local_cache.tls` | `off` | TLS für den RESP-Listener aktivieren; PostgreSQL muss mit OpenSSL gebaut sein |
-| `pg_local_cache.tls_cert_file` | leer | PEM-Serverzertifikat/-kette; bei aktiviertem TLS erforderlich |
-| `pg_local_cache.tls_key_file` | leer | PEM-Server-Privatschlüssel; bei aktiviertem TLS erforderlich |
-| `pg_local_cache.tls_ca_file` | leer | Vertrauenswürdige Client-CA; aktiviert mTLS |
-| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | Minimale TLS-Version (`TLSv1.2` oder `TLSv1.3`) |
-| `pg_local_cache.allow_plaintext_network` | `off` | Postmaster-Opt-in für Klartext-Listener außerhalb von IPv4-Loopback |
-| `pg_local_cache.allow_superuser` | `off` | Rollenüberschreibung, nur für Entwicklung |
+Die Erweiterung allokiert beim PostgreSQL-Start begrenzten gemeinsamen Cache-, Zuordnungs- und Worker-/Client-Zustand vorab. `memory_budget_mb` begrenzt die deterministische Speicherallokation der Erweiterung. Fehlgeschlagene Aufnahmen und Verdrängungen überschreiten die konfigurierte Kapazität nicht; Lesevorgänge greifen auf PostgreSQL zurück.
 
-Dies sind Postmaster-Einstellungen. Dimensionieren Sie sie vor dem Neustart.
-Der [Installationsleitfaden](INSTALL_EXISTING.md) beschreibt Pakete und Neustarts.
+| Einstellung | Standard | Bereich | Neuladen |
+|---|---:|---|---|
+| `pg_local_cache.enabled` | `on` | `on` / `off` | SIGHUP |
+| `pg_local_cache.allow_plaintext_network` | `off` | `on` / `off` | Neustart |
+| `pg_local_cache.tls` | `off` | `on` / `off` | Neustart |
+| `pg_local_cache.tls_cert_file` | leer | PEM-Dateipfad | Neustart |
+| `pg_local_cache.tls_key_file` | leer | PEM-Dateipfad | Neustart |
+| `pg_local_cache.tls_ca_file` | leer | CA-PEM-Dateipfad | Neustart |
+| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | `TLSv1.2` / `TLSv1.3` | Neustart |
+| `pg_local_cache.port` | `6380` | `0`–`65535`; `0` deaktiviert RESP | Neustart |
+| `pg_local_cache.workers` | `4` | `1`–`32` | Neustart |
+| `pg_local_cache.cache_entries` | `16384` | `128`–`65536` | Neustart |
+| `pg_local_cache.relation_states` | `1024` | `128`–`8192` | Neustart |
+| `pg_local_cache.max_clients` | `256` | `1`–`4096`; höchstens so viele wie Worker-Slots | Neustart |
+| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`128` | Neustart |
+| `pg_local_cache.memory_budget_mb` | `384` | `64`–`8192` MB | Neustart |
+| `pg_local_cache.idle_timeout_ms` | `300000` | `1000`–`86400000` | Neustart |
+| `pg_local_cache.statement_timeout_ms` | `2000` | `100`–`60000` | Neustart |
+| `pg_local_cache.lock_timeout_ms` | `250` | `10`–`60000` | Neustart |
+| `pg_local_cache.singleflight_wait_ms` | `25` | `0`–`1000` | Neustart |
+| `pg_local_cache.max_pipeline_commands` | `256` | `1`–`4096` | Neustart |
+| `pg_local_cache.max_dirty_keys` | `4096` | `128`–`16384` | Neustart |
+| `pg_local_cache.bind_address` | `127.0.0.1` | IPv4-Adresse | Neustart |
+| `pg_local_cache.database` | `postgres` | Datenbankname | Neustart |
+| `pg_local_cache.role` | `local_cache_worker` | PostgreSQL-LOGIN-Rolle | Neustart |
+| `pg_local_cache.auth_token_file` | leer | Datei im Besitz des PostgreSQL-Betriebssystembenutzers, Modus `0400` oder `0600` | Neustart |
+| `pg_local_cache.auth_token` | leer | Inline-Token; nur für Entwicklung | Neustart |
+| `pg_local_cache.allow_superuser` | `off` | `on` / `off`; nur für Entwicklung | Neustart |
+
+Alle Einstellungen außer `enabled` sind Postmaster-Einstellungen und erfordern einen Neustart. Für Client-Slots muss `max_clients <= workers × max_clients_per_worker` gelten.
 
 ## RESP2-Endpunkt {#optional-resp2-endpoint}
 
-RESP2 verwendet dieselben Zuordnungen und denselben Shared Cache. Wire-Schlüssel
-verwenden diese Form:
+Der Endpunkt akzeptiert RESP2. Schlüssel verwenden das Format `CRUD:<db>.<schema>.<table>:<json pk>`. `MGET` erhält Reihenfolge und Duplikate der Anfrage; eine fehlende Zeile wird als `nil`-Element zurückgegeben. Pro Anfrage sind höchstens 1.024 Schlüssel zulässig, jede JSON-Zeile darf höchstens 65.536 Byte groß sein und die codierte Antwort höchstens 66.560 Byte.
 
-```text
-CRUD:database.schema.table:{"pk_column":<json-scalar>,...}
-```
+Unterstützte Datenbefehle sind `MGET`, `SET` und `DEL`; `AUTH` ist erforderlich. Außerdem unterstützt der Endpunkt `PING`, `ECHO`, `INFO`, `STAT`/`STATS`, bereichsbezogenes `INVALIDATE`, `HELLO 2`, `QUIT`, `CLIENT SETINFO`/`SETNAME`/`GETNAME`/`ID`, `COMMAND` und `SELECT 0`. Nicht unterstützte Befehle liefern einen Fehler. RESP-Clients verwenden Datenbank 0; Datenbank- und Tabellenbereich stammen aus jedem Cache-Schlüssel.
 
-Unterstützte Befehle sind authentifiziertes und begrenztes `MGET`, `SET`, `DEL`
-und bereichsbezogene Invalidation. RESP-Worker verwenden eine konfigurierte
-PostgreSQL-Rolle; sie übernehmen nicht die Datenbank-ACLs der einzelnen
-Netzwerkclients.
+## TLS- und Sicherheitsmodell {#security-model}
 
-TLS für RESP nutzt eigene `pg_local_cache.tls_*`-Einstellungen und ist
-unabhängig von PostgreSQL-`ssl_*`-Einstellungen. PostgreSQL-TLS auf dem SQL-Port
-schützt RESP nicht; RESP-TLS ändert den SQL-Listener nicht. Aktivieren Sie
-`pg_local_cache.tls` und konfigurieren Sie Serverzertifikat und Schlüssel.
-`pg_local_cache.tls_ca_file` prüft Clientzertifikate und aktiviert mTLS. Die
-minimale Protokollversion ist standardmäßig `TLSv1.2` und kann auf `TLSv1.3`
-erhöht werden. Es gelten die OpenSSL-Systemvorgaben für Cipher. Für den privaten
-Schlüssel gilt [PostgreSQLs Regel für
-Server-Schlüsseldateien](https://www.postgresql.org/docs/current/ssl-tcp.html).
-Außerhalb von Loopback wird TLS empfohlen. Ist TLS ausgeschaltet, erfordert
-Klartext auf einem Nicht-Loopback-Listener das explizite Opt-in
-`pg_local_cache.allow_plaintext_network = on`, beschränkt auf vertrauenswürdige
-Netzwerke. Ein Nicht-Loopback-Listener benötigt weiterhin ein Token mit
-mindestens 32 Byte; bevorzugen Sie eine Token-Datei mit eingeschränkten Rechten
-statt eines Inline-Tokens.
+Der Listener bindet standardmäßig an IPv4-Loopback. Für RESP-TLS gelten erweiterungsspezifische Einstellungen, nicht PostgreSQL-`ssl_*`. Erforderlich sind ein PostgreSQL-Build mit OpenSSL, ein PEM-Serverzertifikat samt Schlüssel und ein Neustart. Wenn `tls_ca_file` gesetzt ist, werden Clientzertifikate zwingend geprüft (mTLS); die minimale TLS-Version ist standardmäßig 1.2.
 
-Der Betriebsparameter `pg_local_cache.enabled` ist ein SIGHUP-Parameter und dient als operativer Notausschalter für den Cache-Dienst. Zum Deaktivieren:
+Ist TLS ausgeschaltet, erfordert ein Klartext-Listener außerhalb von Loopback `allow_plaintext_network=on` und ein vertrauenswürdiges Netzwerk. Listener außerhalb von Loopback benötigen ein Token mit mindestens 32 Byte. Bevorzugen Sie eine Token-Datei mit eingeschränkten Rechten. Alle RESP-Clients teilen sich eine konfigurierte PostgreSQL-LOGIN-Rolle; PostgreSQL-Berechtigungen werden nicht für jeden Netzwerk-Client separat ausgewertet. Superuser-Worker sind standardmäßig deaktiviert und nur für Entwicklung vorgesehen.
 
-```sql
-ALTER SYSTEM SET pg_local_cache.enabled = off;
-SELECT pg_reload_conf();
-```
+## Cache-Notausschalter {#cache-kill-switch}
 
-Jeder RESP-Worker übernimmt den Reload asynchron an seiner nächsten Befehlsgrenze, nachdem der gerade ausgeführte Befehl beendet ist. Das Feld `cache_enabled` in `local_cache.health()` zeigt die Einstellung der aufrufenden SQL-Sitzung; es bestätigt nicht, dass alle Worker sie übernommen haben. Zum erneuten Aktivieren:
+`pg_local_cache.enabled` ist ein SIGHUP-Notausschalter für den Cache. Ist er ausgeschaltet, umgehen RESP-Lesevorgänge den gemeinsamen Cache und lesen die Quelltabelle; `SET` und `DEL` schreiben weiterhin über PostgreSQL. Worker übernehmen Reloads asynchron an Befehlsgrenzen. `local_cache.health()` meldet die Einstellung der aufrufenden SQL-Sitzung, nicht die Bestätigung jedes Workers. Beim erneuten Aktivieren wird die Cache-Epoche erhöht, bevor Worker wieder Cache-Lesevorgänge ausführen.
 
-```sql
-ALTER SYSTEM SET pg_local_cache.enabled = on;
-SELECT pg_reload_conf();
-```
+## Metriken und Zustand {#health-and-monitoring}
 
-## Gesundheit und Monitoring {#health-and-monitoring}
+`local_cache.health()` meldet Bereitschaft, Cache-Zustand und Konvergenz der Zuordnungen. `local_cache.stats()` liefert JSON-Zähler; `local_cache.metrics()` liefert die typisierte Exporter-Zeile.
 
-`local_cache.health()` meldet Bereitschaft und Konvergenz der Zuordnungen.
-`local_cache.stats()` gibt JSON-Zähler zurück. `local_cache.metrics()` stellt die
-typisierte Metrikzeile für den Exporter bereit.
+Zu den Metriken gehören Cache-Treffer, Fehltreffer und negative Treffer; Lese- und Schreibvorgänge an der Quelle; Invalidierungen und Verdrängungen; Singleflight-Anführer, wartende Clients, Wiederverwendung und Timeouts; aktive und maximale Clientzahl; Ablehnungen wegen Verbindungslimits; Authentifizierungs- und Protokollfehler; Ausgabedrosselung und Abbrüche langsamer Clients; Worker-Starts; Fallbacks wegen geänderter Schlüssel; Fehler und Wiederholungen beim Neuladen von Zuordnungen; TLS-Handshakes und -Fehler. Gauges umfassen Eintrags- und Relationskapazitäten, Client- und Worker-Zahlen, Konvergenz der Zuordnungen, gemeinsamen/Worker-/geschätzten Speicher sowie das konfigurierte Budget.
 
-Die RESP-Zähler von `stats()` und `metrics()` umfassen:
-
-- `sql_gets`
-- `sql_meta`
-- `sql_sets`
-- `sql_dels`
-- `sql_result_reuses`
-- `tls_handshakes_total`
-- `tls_handshake_failures_total`
-
-Datenbanklesevorgänge, Invalidationen, abgelehnte Aufnahmen, Dirty-Key-Fallback,
-Singleflight-, Worker- und RESP-Zähler bleiben getrennt.
-
-Als Nächstes verwenden Sie den [Installationsleitfaden](INSTALL_EXISTING.md) für
-Debian- und RPM-Paketprüfung, PGXS-Quellcode-Builds, Konfiguration, Neustarts,
-Upgrades und Deinstallation.
+Weiter geht es mit [Schnellstart](QUICKSTART.md), [Installation](INSTALL_EXISTING.md) und [Upgrade](UPGRADING.md).

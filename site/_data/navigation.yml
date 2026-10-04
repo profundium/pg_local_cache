@@ -1,36 +1,33 @@
 - title: Try locally
   url: /docs/QUICKSTART.html
   description: Disposable PostgreSQL, sample rows, cache hits, and cleanup.
+- title: Installation
+  url: /docs/INSTALL_EXISTING.html
+  description: Install packages, configure the RESP listener, and attach tables.
+- title: RESP clients
+  url: /docs/resp.html
+  description: Connect Redis-compatible clients with RESP2 MGET, token authentication, and TLS.
 - title: Benchmarks
   url: /docs/BENCHMARKS.html
   description: Compare prepared SQL with RESP MGET, including misses and writes.
+- title: Technical reference
+  url: /docs/TECHNICAL.html
+  description: RESP contract, supported tables, consistency, memory, settings, and security.
+- title: Upgrading
+  url: /docs/UPGRADING.html
+  description: Migrate from 2.x SQL reads to RESP MGET and upgrade safely to 3.0.0.
 - title: PostgreSQL caching guide
   url: /docs/postgresql-caching.html
   description: Choose between page caching, prepared SQL, rows, views, and Redis.
-- title: PostgreSQL and Redis
-  url: /docs/postgresql-redis-cache.html
-  description: Cache-aside, stale-read races, and transaction-aware row caching.
 - title: Batch primary-key lookups
   url: /docs/batch-primary-key-lookups.html
-  description: Avoid N+1 reads and preserve input order, duplicates, and nulls.
+  description: Batch RESP MGET requests while preserving key order and missing-row responses.
+- title: PostgreSQL and Redis
+  url: /docs/postgresql-redis-cache.html
+  description: Compare Redis cache-aside with PostgreSQL-backed RESP reads and invalidation.
 - title: Row cache vs shared_buffers
   url: /docs/row-cache-vs-shared-buffers.html
-  description: What another cache can avoid and what it still costs.
+  description: Compare page caching with whole-row reads through RESP MGET.
 - title: Cache invalidation
   url: /docs/cache-invalidation.html
-  description: Commit, rollback, snapshots, and concurrent readers.
-- title: Node.js example
-  url: /docs/node-postgres.html
-  description: Read ordered rows with your existing node-postgres connection.
-- title: Go example
-  url: /docs/go.html
-  description: Connect with pgx and read a batch of rows.
-- title: RESP example
-  url: /docs/resp.html
-  description: Authenticate and read rows with redis-cli or Node.js.
-- title: Installation
-  url: /docs/INSTALL_EXISTING.html
-  description: Package verification, source builds, configuration, upgrades, and restarts.
-- title: Technical reference
-  url: /docs/TECHNICAL.html
-  description: RESP API, table restrictions, memory, monitoring, and security.
+  description: How commits and rollbacks fence RESP reads and cache fills.
