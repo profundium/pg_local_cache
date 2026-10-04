@@ -8,19 +8,25 @@ CREATE EXTENSION pg_local_cache;
 SELECT 'create-extension=', EXISTS (
     SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_local_cache'
 );
+SELECT 'enabled-guc-context=', (
+    SELECT context = 'sighup' AND setting = 'on'
+      FROM pg_catalog.pg_settings
+     WHERE name = 'pg_local_cache.enabled'
+);
 
 WITH old_versions(version) AS (
     VALUES ('1.0.0'), ('1.1.0'), ('1.2.0'), ('1.2.1'), ('1.3.0'),
-           ('2.0.0'), ('2.0.1'), ('2.0.2'), ('2.0.3')
+           ('2.0.0'), ('2.0.1'), ('2.0.2'), ('2.0.3'),
+           ('2.0.4')
 ), paths AS (
     SELECT * FROM pg_catalog.pg_extension_update_paths('pg_local_cache')
 )
 SELECT 'update-paths=', (
-    SELECT count(paths.source) = 9
-       AND bool_and(paths.target = '2.0.4' AND paths.path IS NOT NULL)
+    SELECT count(paths.source) = 10
+       AND bool_and(paths.target = '3.0.0' AND paths.path IS NOT NULL)
       FROM old_versions
       LEFT JOIN paths ON paths.source = old_versions.version
-                     AND paths.target = '2.0.4'
+                     AND paths.target = '3.0.0'
 );
 
 SET client_min_messages = warning;
@@ -126,14 +132,19 @@ SELECT 'reconcile-table=', (
 SELECT 'reconcile-all=', (local_cache.reconcile_all() >= 1);
 SELECT 'health-shape=', (
     jsonb_typeof(local_cache.health()) = 'object'
-    AND local_cache.health() ?& ARRAY['ready', 'resp_enabled', 'workers_configured',
-                                      'workers_running', 'active_clients', 'max_clients']
+    AND local_cache.health() ?& ARRAY['ready', 'resp_enabled', 'cache_enabled',
+                                      'workers_configured', 'workers_running',
+                                      'active_clients', 'max_clients']
     AND jsonb_typeof(local_cache.health() -> 'ready') = 'boolean'
+    AND jsonb_typeof(local_cache.health() -> 'cache_enabled') = 'boolean'
 );
 SELECT 'stats-shape=', (
     jsonb_typeof(local_cache.stats()) = 'object'
     AND local_cache.stats() ?& ARRAY['cache_hits', 'cache_misses', 'database_reads',
                                      'invalidations']
+    AND NOT (local_cache.stats() ?| ARRAY[
+        'sql_cache_hits', 'sql_cache_misses', 'sql_cache_fills', 'sql_cache_bypasses'
+    ])
 );
 SELECT 'metrics-shape=', (
     (SELECT count(*) = 1 AND bool_and(up = 1 AND cache_capacity > 0
@@ -141,6 +152,10 @@ SELECT 'metrics-shape=', (
        FROM local_cache.metrics())
     AND (SELECT pg_catalog.jsonb_typeof(pg_catalog.to_jsonb(m)) = 'object'
                 AND pg_catalog.to_jsonb(m) ?& ARRAY['up', 'cache_capacity', 'workers_running']
+                AND NOT (pg_catalog.to_jsonb(m) ?| ARRAY[
+                    'sql_cache_hits_total', 'sql_cache_misses_total',
+                    'sql_cache_fills_total', 'sql_cache_bypasses_total'
+                ])
            FROM local_cache.metrics() AS m)
 );
 SELECT 'invalidate-namespace=', (local_cache.invalidate('admin_attached') >= 0);

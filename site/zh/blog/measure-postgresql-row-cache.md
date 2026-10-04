@@ -6,9 +6,11 @@ title: PostgreSQL 行缓存何时有效：测量完整读取路径
 description: 使用预备 SQL、SQL mget 与 RESP MGET 设计公平的 PostgreSQL 行缓存比较，分别考察热读取、未命中、批次大小、写入和客户端成本。
 permalink: /zh/blog/measure-postgresql-row-cache/
 date: '2026-09-22'
-last_modified_at: '2026-09-22'
+last_modified_at: "2026-10-04"
 topic: performance
 ---
+
+> **2026-10-04 版本说明：** SQL `mget` 已在 3.0.0 中移除；现在由 RESP `MGET` 提供替代功能。
 
 # PostgreSQL 行缓存何时有效 {#when-a-postgresql-row-cache-helps}
 

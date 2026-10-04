@@ -2,9 +2,9 @@
 layout: doc
 lang: de
 translation_key: node-postgres
-title: Batch-Zeilenabfragen mit node-postgres
+title: "Batch-Abfragen von Zeilen mit node-postgres"
 seo_title: "Batch-Abfragen von PostgreSQL-Zeilen mit node-postgres"
-description: Verwenden Sie pg_local_cache 2.0 aus Node.js mit einem parametrisierten bigint-Array und JSON-Transport. Erhalten Sie Reihenfolge und NULL-Werte und vergleichen Sie mit einer vorbereiteten ANY-Abfrage.
+description: "Verwenden Sie authentifiziertes RESP MGET in Node.js für gecachte Zeilen-Lesevorgänge und node-postgres für SQL-Schreibvorgänge sowie gewöhnliche Abfragen."
 section: Node.js
 permalink: /de/docs/node-postgres.html
 last_modified_at: "2026-09-16"
@@ -21,37 +21,29 @@ npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
 
-## Eine parametrisierte Abfrage senden {#send-one-parameterized-query}
+## Über RESP lesen {#send-one-parameterized-query}
 
-Mit einem verbundenen node-postgres-Client oder Pool:
+Mit einem verbundenen RESP-Client aus `@redis/client`:
 
 ```js
-const result = await client.query({
-  name: 'items-mget',
-  text: "SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows",
-  values: [[42, 7, 42, null, 999999]],
-});
-const rows = result.rows[0].rows.map(row =>
-  row === null ? null : JSON.parse(row)
+const ids = [42, 7, 42, null, 999999];
+const wireKeys = ids.filter(id => id !== null).map(id =>
+  `CRUD:app.public.items:${JSON.stringify({ id })}`
 );
+const values = await client.mGet(wireKeys);
+let position = 0;
+const rows = ids.map(id => {
+  if (id === null) return null;
+  const value = values[position++];
+  return value === null ? null : JSON.parse(value);
+});
 ```
 
-`mget` gibt `text[]` zurück. `array_to_json` sendet das äußere Array als JSON,
-damit node-postgres seinen JSON-Decoder anwendet. Jedes Element ungleich null
-ist eine serialisierte Zeile und benötigt `JSON.parse`; die Positionen stimmen
-mit den Eingabepositionen überein, fehlende Schlüssel oder Null-Eingaben ergeben
-`null`.
+RESP `MGET` liefert JSON-kodierte Zeilen in Schlüsselreihenfolge. Der Helfer lässt NULL-Eingabeschlüssel aus und stellt ihre Positionen wieder her; fehlende Schlüssel liefern null.
 
-Halten Sie den Tabellennamen im Anwendungscode fest. Übergeben Sie IDs als
-Query-Parameter, nicht als aus Strings zusammengesetztes SQL. Siehe die
-node-postgres-Dokumentation zu
-[Parametern und benannten vorbereiteten Statements](https://node-postgres.com/features/queries).
+Halten Sie den Tabellennamen im Anwendungscode fest. Übergeben Sie IDs als Abfrageparameter und setzen Sie kein SQL aus Zeichenfolgen zusammen. Siehe die node-postgres-Dokumentation zu [Parametern und benannten vorbereiteten Statements](https://node-postgres.com/features/queries).
 
-Der ausführbare Helfer weist Batches mit mehr als 1.024 Schlüsseln zurück und
-gibt für einen leeren Batch ohne Abfrage `[]` zurück. Er verwendet sichere
-Demo-IDs. PostgreSQL-`bigint`- und numerische Felder in JSON können den exakten
-Zahlenbereich von JavaScript überschreiten; verwenden Sie für solche Werte einen
-verlustfreien JSON-Parser oder einen expliziten Serialisierungsvertrag.
+Der RESP-Befehl akzeptiert höchstens 1.024 Schlüssel. Der ausführbare Helfer gibt `[]` ohne Anfrage zurück, wenn alle Eingaben null sind. PostgreSQL-`bigint`- und numerische JSON-Felder können den exakten Zahlenbereich von JavaScript überschreiten; verwenden Sie einen verlustfreien JSON-Parser oder einen expliziten Serialisierungsvertrag.
 
 ## Mit der bestehenden Batch-Abfrage vergleichen {#compare-with-the-existing-batch-query}
 
@@ -80,15 +72,6 @@ und Schreibverbindungen; siehe [Cache-Invalidation](cache-invalidation.md).
 
 ## Vorbereitete Statements und Ergebnis-Caching {#prepared-statements-and-result-caching}
 
-Eine benannte node-postgres-Abfrage verwendet auf jeder Verbindung ein
-wiederverwendetes vorbereitetes Statement. Sie cached keine zurückgegebenen
-Zeilen. `local_cache.mget` fügt einen separaten gemeinsamen Cache vollständiger
-Zeilen in PostgreSQL hinzu; der Client sendet weiterhin eine Abfrage und dekodiert
-deren Ergebnis. Siehe den [Leitfaden zur Caching-Entscheidung](postgresql-caching.md)
-für den Vergleich der Ebenen und den [Leitfaden zu Batch-Abfragen](batch-primary-key-lookups.md)
-für eine reine SQL-Alternative, die angeforderte Positionen erhält.
+Ein benannter node-postgres-Aufruf verwendet pro Verbindung ein vorbereitetes Statement erneut. Er cached keine zurückgegebenen Zeilen. RESP `MGET` nutzt den gemeinsamen Ganzzeilen-Cache der Erweiterung, aber Worker-Rolle und Sitzungszustand sind von der SQL-Verbindung der Anwendung getrennt. Siehe den [Caching-Entscheidungsleitfaden](postgresql-caching.md) und den [Batch-Leitfaden](batch-primary-key-lookups.md).
 
-Für RESP2 verwenden Sie das [Node.js-RESP-Beispiel](resp.md#nodejs).
-[Aufgezeichnete Node.js-Ergebnisse](benchmarks-node.md) enthalten Batch-Lesevorgänge
-und gleichzeitige Updates. Der [gemeinsame Benchmark](BENCHMARKS.md#run-the-same-comparison-on-every-client)
-führt Node.js und Go durch dieselben SQL- und RESP-Szenarien.
+Für RESP2 siehe das [Node.js-RESP-Beispiel](resp.md#nodejs). Die [aufgezeichneten Node.js-Ergebnisse](benchmarks-node.md) umfassen Batch-Lesevorgänge und gleichzeitige Updates. Der [gemeinsame Benchmark](BENCHMARKS.md#run-the-same-comparison-on-every-client) führt Node.js und Go durch dieselben vorbereiteten SQL- und RESP-Szenarien.

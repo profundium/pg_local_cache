@@ -13,14 +13,17 @@ last_modified_at: "2026-09-16"
 
 Recorded on an Apple M3 Max with PostgreSQL 16. Each comparison uses the same
 client, dataset and decoded row results for cached and ordinary SQL reads.
+The published SQL `mget` benchmark lane is from 2.x and was removed in 3.0.0;
+RESP `MGET` is the supported cached-read interface.
 
 ## Where the cache helped—and where it did not {#where-the-cache-helpedand-where-it-did-not}
 
-- **Single-key SQL:** prepared SQL beat SQL `mget` in both published client
-  setups. At 256 Go connections it returned 253,790 requests/s versus 186,296
-  for `mget`. Adding a row cache did not improve this SQL workload.
-- **64-key SQL batches:** Go at 256 connections returned 43,647 requests/s
-  through `mget` versus 27,615 for prepared SQL, about 1.58× throughput.
+- **Single-key SQL:** the prepared SQL baseline returned 253,790 requests/s in
+  the published Go setup. The historical 2.x SQL `mget` result was 186,296
+  requests/s; that lane was removed in 3.0.0.
+- **64-key SQL batches:** the historical 2.x Go SQL `mget` run at 256
+  connections returned 43,647 requests/s versus 27,615 for prepared SQL.
+  RESP `MGET` returned 52,774 requests/s in the same recorded setup.
   Node.js at 64 connections showed a smaller gain: 16,616 versus 15,577.
   Batch size and client overhead matter; check CPU and latency as well.
 - **Single-key RESP:** Go at 256 connections reached 839,678 requests/s versus
@@ -47,7 +50,7 @@ The runner builds a disposable PostgreSQL server and runs this common matrix:
 | Setting | Every client and read path |
 |---|---|
 | Clients | Node.js with node-postgres / node-redis; Go with pgx / standard-library RESP2 |
-| Read paths | Prepared SQL `ANY`, SQL `mget`, RESP `MGET` |
+| Read paths | Prepared SQL `ANY`, RESP `MGET` |
 | Keys per request | 1, 16, 64; the same fixed keys starting at 1 |
 | Connections | 4, 64, 256; persistent, one outstanding request per connection |
 | Samples | Three five-second repetitions per case; order rotates |
@@ -56,7 +59,7 @@ The runner builds a disposable PostgreSQL server and runs this common matrix:
 | Result contract | Full JSON rows, input order, duplicates, nulls, missing keys, empty and all-null input |
 | Measurements | Requests/s, latency percentiles, client CPU, server CPU/memory, cache counters |
 
-There are 162 samples by default, about 14 minutes of timed work plus setup.
+There are 108 samples by default, about 9 minutes of timed work plus setup.
 The script removes its containers after success or failure. For a short
 correctness run:
 
@@ -68,8 +71,8 @@ CONNECTIONS=4 BATCHES=1,16,64 REPEATS=1 DURATION_SECONDS=1 \
 Use `node` or `go` instead of `all` to select one client with the same defaults.
 `CONNECTIONS`, `BATCHES`, `REPEATS`, `DURATION_SECONDS` and Go's `GOMAXPROCS`
 can be overridden. Node.js uses one event-loop thread; Go defaults to eight
-threads. Node's SQL mget wraps the returned array in JSON, while pgx decodes
-the PostgreSQL text array. Those client costs stay inside timing.
+threads. Node.js and Go decode RESP JSON rows; those client costs stay inside
+timing. The historical SQL `mget` comparisons below remain labeled as 2.x data.
 
 Identical workloads do not make the protocols interchangeable: RESP workers
 use their configured database role and do not join a caller's SQL transaction

@@ -3,8 +3,8 @@ layout: doc
 lang: es
 translation_key: batch-primary-key-lookups
 title: Consultas por lotes de claves primarias de PostgreSQL
-seo_title: "Consultas por lotes de claves primarias de PostgreSQL con ANY y mget"
-description: Sustituye lecturas de claves primarias N+1 por una consulta parametrizada de PostgreSQL, conserva las posiciones de entrada cuando sea necesario y compara el recorrido explícito pg_local_cache mget.
+seo_title: "Consultas por lotes de claves primarias de PostgreSQL con ANY y RESP MGET"
+description: "Sustituye lecturas N+1 por clave primaria con una consulta PostgreSQL parametrizada, conserva posiciones de entrada cuando haga falta y compara con RESP MGET autenticado."
 section: Guías
 permalink: /es/docs/batch-primary-key-lookups.html
 last_modified_at: "2026-09-16"
@@ -44,18 +44,15 @@ ORDER BY requested.position;
 
 `WITH ORDINALITY` conserva los duplicados y las posiciones `NULL`; la unión izquierda devuelve un `row` nulo para una clave ausente. Es una base útil para un cliente que necesita una alineación explícita. Consulta el [ejemplo de node-postgres](node-postgres.md) para restaurar el mismo contrato en el cliente.
 
-## Cuándo `mget` es la alternativa adecuada {#when-mget-is-the-right-alternative}
+## Cuándo encaja RESP `MGET` {#when-mget-is-the-right-alternative}
 
-Para filas completas por clave primaria, `pg_local_cache` ofrece una API de lotes explícita y acotada:
+Para leer filas completas por clave primaria, `pg_local_cache` ofrece el comando RESP2 autenticado `MGET`. Las claves usan la base de datos, el esquema, la tabla y los valores de clave primaria de la tabla asociada:
 
-```sql
-SELECT local_cache.mget(
-  'public.items'::regclass,
-  $1::bigint[]
-) AS rows;
+```text
+MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
 ```
 
-El `text[]` devuelto conserva el orden de entrada y los duplicados. Las entradas `NULL` y las filas ausentes producen elementos `NULL` alineados. Las llamadas aceptan como máximo 1.024 claves, y la función puede omitir o no acertar la caché según las reglas de transacción, snapshot, mapeo y tamaño de fila; vuelve a PostgreSQL sin cambiar el contrato del resultado. Devuelve filas serializadas completas, así que usa `ANY` o la consulta con ordinality cuando necesites una proyección, uniones, filtros más allá de la clave o un lote sin límite.
+La respuesta conserva el orden de las claves y los duplicados; las filas ausentes devuelven null. Cada solicitud acepta como máximo 1.024 claves y devuelve filas JSON completas. Los workers RESP usan el rol de base de datos configurado y no comparten la transacción SQL ni la instantánea del llamador. Usa SQL `ANY` o la consulta con ordinality para proyecciones, joins, filtros adicionales o semántica de transacción SQL.
 
 ## GraphQL, DataLoader y lecturas N+1 {#graphql-dataloader-and-n1-reads}
 
@@ -63,4 +60,4 @@ El `text[]` devuelto conserva el orden de entrada y los duplicados. Las entradas
 
 La [memorización por solicitud de DataLoader](https://github.com/graphql/dataloader#caching-per-request) es independiente de la caché de filas compartida de PostgreSQL. Crea cargadores para cada solicitud y borra las entradas afectadas después de las mutaciones de esa solicitud. La invalidación de PostgreSQL no puede borrar valores ya almacenados en un cargador JavaScript. Conserva las comprobaciones de autorización de la aplicación; `pg_local_cache` no admite tablas con RLS.
 
-Ejecuta el [quickstart](QUICKSTART.md) y después compara ambos recorridos de lectura en los [benchmarks](BENCHMARKS.md). La [referencia técnica](TECHNICAL.md#sql-mget-api) define la API; la [guía de transacciones](cache-invalidation.md) cubre las escrituras.
+Ejecuta el [quickstart](QUICKSTART.md) y después compara ambos recorridos de lectura en los [benchmarks](BENCHMARKS.md). La [referencia técnica](TECHNICAL.md#optional-resp2-endpoint) define la API; la [guía de transacciones](cache-invalidation.md) cubre las escrituras.

@@ -3,8 +3,8 @@ layout: doc
 lang: en
 translation_key: TECHNICAL
 title: pg_local_cache technical reference
-seo_title: pg_local_cache SQL API, consistency, memory, and RESP2
-description: Technical reference for pg_local_cache SQL mget, transaction-aware invalidation, bounded PostgreSQL shared memory, monitoring, and optional RESP2.
+seo_title: pg_local_cache RESP API, consistency, memory, and configuration
+description: Technical reference for pg_local_cache RESP reads, transaction-aware invalidation, bounded PostgreSQL shared memory, monitoring, and configuration.
 section: Technical
 permalink: /docs/TECHNICAL.html
 ---
@@ -12,8 +12,7 @@ permalink: /docs/TECHNICAL.html
 # pg_local_cache technical reference {#pg_local_cache-technical-reference}
 
 `pg_local_cache` caches whole rows by complete primary key in bounded PostgreSQL
-shared memory. It exposes an explicit SQL `local_cache.mget` function and an
-optional RESP2 endpoint.
+shared memory. Applications read rows through the authenticated RESP2 endpoint.
 
 > **Ordinary SQL stays ordinary:** the extension installs no planner or executor
 > hooks. A normal `SELECT` always uses PostgreSQL and never reads this cache.
@@ -47,59 +46,25 @@ DDL event triggers invalidate cached mapping metadata. Run
 intentional schema changes. `local_cache.detach_table(...)` removes the mapping
 and its triggers.
 
-## SQL mget API {#sql-mget-api}
-
-Signature:
-
-```sql
-local_cache.mget(relation regclass, key_values anyarray) RETURNS text[]
-```
-
-Single-column keys use their native array type. Composite keys use rectangular
-`text[][]`, with one key per row and one component per primary-key column.
-
-Contract:
-
-- maximum 1,024 keys per call;
-- input order and duplicates are preserved;
-- input `NULL` and missing rows produce aligned `NULL` results;
-- composite key components cannot be `NULL`;
-- every component is parsed by its PostgreSQL type input function;
-- the complete composite batch is validated before the first lookup;
-- callers need `SELECT` on the source table;
-- the function is `SECURITY INVOKER`.
-
-A prepared source query is cached per function instance, user, relation, and
-mapping generation.
-
 ## Read path and safe fallback {#read-path-and-safe-fallback}
 
-Each requested key follows the same path:
-
-1. canonicalize the complete primary key;
-2. use shared cache only in a clean `READ COMMITTED` transaction on the writable
-   primary;
-3. validate payload checksum, row descriptor, source `xmin`, and snapshot
-   visibility;
-4. otherwise execute the indexed source-table query through SPI;
-5. publish a positive or negative entry only after a latest-snapshot proof.
-
-`REPEATABLE READ`, `SERIALIZABLE`, recovery, parallel execution, and a
-transaction that wrote mapped data bypass the cache. Rows larger than the cache
-payload limit still return from PostgreSQL but are not cached.
+Each RESP `MGET` key checks shared cache when caching is enabled. On each
+cache miss, the worker reads the source row in its own short transaction. Rows
+larger than the cache payload limit still return from PostgreSQL but are not
+cached.
 
 ## Transaction consistency {#transaction-consistency}
 
-Before a mapped write can commit, triggers fence the affected key or relation.
-A cache fill carries mapping, global, relation, key, and loader generations, so
-a stale loader cannot publish after invalidation or eviction.
+Mapped-write triggers in any PostgreSQL session publish per-key or
+per-relation dirty-writer fences and advance generations before the commit
+becomes visible. Fenced entries bypass the cache until the write finishes;
+generation checks prevent stale in-flight reads from publishing, so a committed
+write cannot be followed by a stale cache hit.
 
-Positive entries record the source tuple's `xmin` and a FullXID observation
-horizon. Snapshot-ineligible entries fall back to PostgreSQL. Negative entries
-are never authoritative for an older active snapshot.
-
-Rollback removes transaction-local dirty state without publishing new data.
-Read-your-writes therefore comes from PostgreSQL, not speculative cache content.
+RESP reads use `pg_local_cache.role`, not the client's PostgreSQL role, in
+independent short transactions. They do not see the client's uncommitted changes,
+share its snapshot, or participate in its transaction. Setting
+`pg_local_cache.enabled = off` bypasses the cache.
 
 ## Shared memory and configuration {#shared-memory-and-configuration}
 
@@ -114,7 +79,7 @@ the source table instead of allocating unbounded memory.
 | `pg_local_cache.cache_entries` | `16384` | shared row capacity |
 | `pg_local_cache.relation_states` | `1024` | shared mapping-state capacity |
 | `pg_local_cache.memory_budget_mb` | `384` | extension startup budget |
-| `pg_local_cache.port` | `6380` | RESP port; `0` disables RESP |
+| `pg_local_cache.port` | `6380` | RESP port; `0` is for regression tests and diagnostics only, and serves no reads |
 | `pg_local_cache.bind_address` | `127.0.0.1` | RESP bind address |
 | `pg_local_cache.workers` | `4` | RESP workers |
 | `pg_local_cache.role` | `local_cache_worker` | RESP PostgreSQL role |
@@ -128,13 +93,15 @@ the source table instead of allocating unbounded memory.
 | `pg_local_cache.max_dirty_keys` | `4096` | transaction key-fence bound |
 | `pg_local_cache.auth_token_file` | empty | preferred RESP credential |
 | `pg_local_cache.auth_token` | empty | development-only inline token |
+| `pg_local_cache.enabled` | `on` | SIGHUP cache kill switch; RESP reads go directly to source while off |
+| `pg_local_cache.allow_plaintext_network` | `off` | postmaster opt-in for plaintext listeners outside IPv4 loopback |
 | `pg_local_cache.allow_superuser` | `off` | development-only role override |
 
-These are postmaster settings. Size them before restart. See the
+Most settings are postmaster settings. See the
 [installation guide](INSTALL_EXISTING.md) for package installation and restart
 steps.
 
-## Optional RESP2 endpoint {#optional-resp2-endpoint}
+## RESP2 endpoint {#optional-resp2-endpoint}
 
 RESP2 uses the same mappings and shared cache. Wire keys use this shape:
 
@@ -146,25 +113,43 @@ Supported commands are authenticated, bounded `MGET`, `SET`, `DEL`, and scoped
 invalidation. RESP workers use one configured PostgreSQL role; they do not
 inherit each network client's database ACLs.
 
-The endpoint has no TLS. Bind it to loopback or place it behind an authenticated
-TLS proxy. Prefer a mode-restricted token file over an inline token.
+Native TLS is not included in 3.0.0. By default, workers accept only IPv4
+loopback listeners. Set `pg_local_cache.allow_plaintext_network = on` only when
+the listener is on a trusted network and protected by network controls. A
+non-loopback listener still requires a token of at least 32 bytes. Prefer a
+mode-restricted token file over an inline token.
+
+`pg_local_cache.enabled` is a SIGHUP setting. Each RESP worker applies a reload
+asynchronously at its next command boundary, after any command it is executing
+finishes. `local_cache.health()` reports `cache_enabled` as seen by the SQL
+session that calls it; it does not acknowledge that every worker has applied
+the setting. Turning it on advances the global cache epoch before workers resume
+cached reads. To disable cache lookups without restarting PostgreSQL:
+
+```sql
+ALTER SYSTEM SET pg_local_cache.enabled = off;
+SELECT pg_reload_conf();
+```
+
+`SET` and `DEL` continue writing the mapped table while caching is disabled;
+table-trigger invalidation also remains active. To re-enable cached reads:
+
+```sql
+ALTER SYSTEM SET pg_local_cache.enabled = on;
+SELECT pg_reload_conf();
+```
 
 ## Health and monitoring {#health-and-monitoring}
 
-`local_cache.health()` reports readiness and mapping convergence.
+`local_cache.health()` reports readiness, `cache_enabled`, and mapping convergence.
 `local_cache.stats()` returns JSON counters. `local_cache.metrics()` exposes the
 typed metrics row used by the exporter.
 
-SQL cache counters describe explicit `mget` calls only:
-
-- `sql_cache_hits`
-- `sql_cache_misses`
-- `sql_cache_fills`
-- `sql_cache_bypasses`
-
 Database reads, invalidations, admission rejection, dirty-key fallback,
-singleflight, worker, and RESP counters remain separate.
+singleflight, worker, and RESP counters remain available. The four counters for
+the removed SQL read API were removed in 3.0.0.
 
 Next: use the [installation guide](INSTALL_EXISTING.md) for Debian and RPM
 package verification, PGXS source builds, configuration, restarts, upgrades,
-and uninstall.
+and uninstall. For breaking changes and rollback steps, see the
+[2.x to 3.0 upgrade guide](UPGRADING.md).

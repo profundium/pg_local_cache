@@ -22,8 +22,8 @@ export function latency(values) {
   return { samples: sorted.length, p50_ms: percentile(0.50), p95_ms: percentile(0.95), p99_ms: percentile(0.99) };
 }
 
-export function keysFor(request, batch, cold = false) {
-  return Array.from({ length: batch }, (_, i) => cold ? request * batch + i + 1 : (request * batch + i) % 128 + 1);
+export function keysFor(request, batch) {
+  return Array.from({ length: batch }, (_, i) => (request * batch + i) % 128 + 1);
 }
 
 function gitRevision() {
@@ -31,15 +31,9 @@ function gitRevision() {
   catch { return null; }
 }
 
-async function counters(admin) {
-  return (await admin.query('SELECT local_cache.stats() AS stats')).rows[0].stats;
-}
-
-async function run(clients, admin, mode, workload, batch, requests) {
-  const cached = mode === 'mget';
-  const cold = workload === 'cold-fill';
+async function run(clients, admin, workload, batch, requests) {
   const writeOnly = workload.startsWith('writes-');
-  const count = cold ? 4096 / batch : requests;
+  const count = requests;
   const table = workload === 'writes-unattached' ? 'public.direct_items' : 'public.items';
   const update = {
     name: `update-${table}`,
@@ -56,18 +50,12 @@ async function run(clients, admin, mode, workload, batch, requests) {
 
   // Warm the source pages and each connection's prepared statements outside timing.
   for (const client of clients) {
-    await getRows(client, Array.from({ length: 128 }, (_, i) => i + 1), false);
-    await getRows(client, [1], cached);
+    await getRows(client, Array.from({ length: 128 }, (_, i) => i + 1));
+    await getRows(client, [1]);
     if (writeOnly || workload === 'mixed-5pct') {
       await client.query({ ...update, values: [0] });
     }
   }
-  if (cold) {
-    await admin.query("SELECT local_cache.invalidate('public.items')");
-  } else if (cached) {
-    await getRows(clients[0], Array.from({ length: 128 }, (_, i) => i + 1));
-  }
-  const before = await counters(admin);
   const finishResources = process.env.SERVER_RESOURCES === '1' ? await startResources(admin) : null;
   const reads = [], writes = [];
   let next = 0, readKeys = 0, failure;
@@ -85,7 +73,7 @@ async function run(clients, admin, mode, workload, batch, requests) {
           await client.query({ ...update, values: [(request * 17) % 128 + 1] });
           writes.push(performance.now() - start);
         } else {
-          await getRows(client, keysFor(request, batch, cold), cached);
+          await getRows(client, keysFor(request, batch));
           reads.push(performance.now() - start);
           readKeys += batch;
         }
@@ -97,19 +85,13 @@ async function run(clients, admin, mode, workload, batch, requests) {
   const eventLoopUtilization = performance.eventLoopUtilization(loopStart).utilization;
   const server = finishResources ? await finishResources(reads.length + writes.length) : null;
   if (failure) throw failure;
-  const after = await counters(admin);
-  const stats = Object.fromEntries(['sql_cache_hits', 'sql_cache_misses', 'sql_cache_bypasses', 'sql_cache_fills']
-    .map(key => [key, Number(after[key]) - Number(before[key])]));
-  assert.ok(Object.values(stats).every(Number.isFinite), 'missing SQL cache counters');
   assert.equal(reads.length + writes.length, count);
-  if (cached && workload === 'warm') assert.ok(stats.sql_cache_hits > 0, 'warm run did not hit the cache');
-  if (cached && cold) assert.ok(stats.sql_cache_misses > 0, 'cold run did not miss the cache');
   return {
-    mode: writeOnly ? 'UPDATE' : mode, workload, batch, seconds,
+    mode: writeOnly ? 'UPDATE' : 'postgres-any', workload, batch, seconds,
     requests: count, requests_s: count / seconds,
     read_requests: reads.length, write_requests: writes.length,
     requested_read_keys: readKeys, requested_read_keys_s: readKeys / seconds,
-    read_latency: latency(reads), write_latency: latency(writes), counters: stats,
+    read_latency: latency(reads), write_latency: latency(writes),
     client_cpu_cores: (cpu.user + cpu.system) / 1e6 / seconds,
     event_loop_utilization: eventLoopUtilization,
     ...(server ? { server } : {}),
@@ -145,21 +127,18 @@ async function main() {
     const rowCount = (await admin.query('SELECT count(*)::int AS n FROM public.items')).rows[0].n;
     assert.equal(rowCount, 4096, 'run against the unmodified demo dataset');
     const edgeKeys = [42, 7, 42, null, 999999];
-    assert.deepEqual(await getRows(clients[0], edgeKeys), await getRows(clients[0], edgeKeys, false));
-    // Scan all rows once: cold-fill means a cold row cache, not cold PostgreSQL pages.
+    assert.deepEqual((await getRows(clients[0], edgeKeys)).map(row => row?.id), [42, 7, 42, null, null]);
+    // Warm PostgreSQL pages outside benchmark timing.
     await admin.query('SELECT sum(octet_length(value)) FROM public.items');
     const health = (await admin.query('SELECT local_cache.health() AS health')).rows[0].health;
     const results = [];
     let failure;
     try {
       for (let repeat = 1; repeat <= repeats; repeat++) {
-        const modes = repeat % 2 ? ['postgres-any', 'mget'] : ['mget', 'postgres-any'];
         for (const batch of batches) {
-          for (const workload of ['warm', 'cold-fill', 'mixed-5pct']) {
-            for (const mode of modes) {
-              console.error(`repeat ${repeat}: ${workload}, batch ${batch}, ${mode}`);
-              results.push({ repeat, ...await run(clients, admin, mode, workload, batch, requests) });
-            }
+          for (const workload of ['warm', 'mixed-5pct']) {
+            console.error(`repeat ${repeat}: ${workload}, batch ${batch}, postgres-any`);
+            results.push({ repeat, ...await run(clients, admin, workload, batch, requests) });
           }
         }
         const writeCases = repeat % 2 ? ['writes-unattached', 'writes-attached'] : ['writes-attached', 'writes-unattached'];

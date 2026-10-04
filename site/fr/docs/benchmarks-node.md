@@ -23,7 +23,9 @@ de cache de 384 Mio et des clients macOS via le port SQL publié par Docker.
 À **64 clés par requête**, médiane de requêtes/s sur trois échantillons de
 10 secondes :
 
-| Connexions | SQL préparé | SQL mget |
+La voie SQL `mget` et tous les résultats ci-dessous sont des mesures historiques de la version 2.x. SQL `mget` a été supprimé en 3.0.0 ; l’interface prise en charge pour les lectures en cache est RESP `MGET`.
+
+| Connexions | SQL préparé | SQL mget (2.x ; supprimé en 3.0.0)|
 |---:|---:|---:|
 | 4 | 7,023 | 7,528 |
 | 64 | 15,577 | 16,616 |
@@ -49,7 +51,7 @@ Le runner applicatif Node.js utilise **64 connexions**, **50 000 requêtes par
 lignes chaudes ; 5 % des opérations de la charge mixte mettent à jour des
 lignes.
 
-| Charge | Clés/requête | Requêtes/s SQL préparé | Requêtes/s mget JSON |
+| Charge | Clés/requête | Requêtes/s SQL préparé | Requêtes/s mget JSON (2.x ; supprimé en 3.0.0)|
 |---|---:|---:|---:|
 | Lectures chaudes | 1 | 56,104 (52,246–56,364) | 52,842 (52,494–53,399) |
 | Lectures chaudes | 16 | 37,391 (36,996–37,938) | 38,425 (38,340–38,617) |
@@ -64,15 +66,9 @@ Le `application_run` du JSON inclut les cas de remplissage à froid et de coût
 des écritures. Le remplissage à froid au lot 64 ne compte que 64 observations
 de latence, trop peu pour une estimation p99 utile.
 
-## Configuration de requête {#query-setup}
+## Requête de benchmark SQL historique {#query-setup}
 
-```sql
-SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows;
-```
-
-Les connexions et les instructions préparées nommées sont réutilisées. Le
-décodage JSON et la restauration des positions d'entrée sont inclus dans le
-temps de requête. Consultez [l'exemple Node.js](node-postgres.md).
+La requête SQL `mget` historique est conservée dans les données brutes liées pour la reproductibilité. Elle n’est pas disponible en 3.0.0. Le benchmark actuel compare SQL préparé et RESP `MGET` ; voir [l’exemple Node.js](node-postgres.md).
 
 ## Reproduire {#reproduce}
 
@@ -85,15 +81,7 @@ Depuis la racine du dépôt, avec Docker et Node.js 20+ :
 ./examples/benchmark.sh node > node.json
 ```
 
-Valeurs par défaut actuelles : 4/64/256 connexions, 1/16/64 clés, trois
-échantillons de cinq secondes par cas. Node.js exécute désormais les trois
-chemins : SQL préparé, SQL `mget` et `MGET` RESP, dans la VM Docker. Le script
-crée un serveur éphémère et un conteneur client séparé, enregistre les
-ressources puis supprime les deux.
-Surcharges optionnelles : `CONNECTIONS`, `BATCHES`, `REPEATS`,
-`DURATION_SECONDS`. Utilisez `all` pour inclure Go dans la [même matrice](BENCHMARKS.md#run-the-same-comparison-on-every-client).
-Pour la configuration enregistrée sur l'hôte, utilisez les révisions dans le
-JSON des mesures.
+Valeurs par défaut actuelles : 4/64/256 connexions, 1/16/64 clés et trois échantillons de cinq secondes par cas. Node.js exécute SQL préparé et RESP `MGET` dans la VM Docker. Le script crée un serveur et un conteneur client temporaires, enregistre les ressources, puis supprime les deux.
 
 Pour les lectures mélangées aux écritures :
 

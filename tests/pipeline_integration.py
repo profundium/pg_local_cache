@@ -810,6 +810,101 @@ def test_uncommitted_write_is_not_served_before_commit(table: str) -> None:
         client.close()
 
 
+def wait_for_cache_enabled(expected: bool) -> None:
+    deadline = time.monotonic() + 10
+    expected_text = "true" if expected else "false"
+    while True:
+        if sql("SELECT local_cache.health() ->> 'cache_enabled'") == expected_text:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"cache_enabled did not become {expected_text}")
+        time.sleep(0.05)
+
+
+def test_enabled_kill_switch(table: str) -> None:
+    client = RespConnection()
+    key = crud_key(table, 1)
+    surviving_key = crud_key(table, 2)
+    inserted_key = crud_key(table, 6)
+    cache_off = False
+    try:
+        assert sql("SELECT local_cache.health() ->> 'cache_enabled'") == "true"
+        ready_before = sql("SELECT local_cache.health() ->> 'ready'")
+        current_value = sql(f"SELECT value FROM public.{table} WHERE id = 1")
+        expected = row_bytes(1, current_value)
+        assert mget_one(client, key) == expected
+        surviving_expected = row_bytes(2, "x" * BACKPRESSURE_VALUE_BYTES)
+        assert mget_one(client, surviving_key) == surviving_expected
+
+        sql_commands(
+            "ALTER SYSTEM SET pg_local_cache.enabled = off",
+            "SELECT pg_reload_conf()",
+        )
+        cache_off = True
+        wait_for_cache_enabled(False)
+        assert sql("SELECT local_cache.health() ->> 'ready'") == ready_before
+
+        before_disabled_reads = json.loads(client.command("STAT"))
+        for _ in range(8):
+            assert mget_one(client, key) == expected
+        missing_key = crud_key(table, 99999999)
+        for _ in range(3):
+            assert mget_one(client, missing_key) is None
+        after_disabled_reads = json.loads(client.command("STAT"))
+        assert after_disabled_reads["cache_hits"] == before_disabled_reads["cache_hits"]
+        assert after_disabled_reads["cache_misses"] == before_disabled_reads["cache_misses"]
+        assert after_disabled_reads["negative_hits"] == before_disabled_reads["negative_hits"]
+        assert (
+            after_disabled_reads["singleflight_leaders"]
+            == before_disabled_reads["singleflight_leaders"]
+        )
+        assert (
+            after_disabled_reads["singleflight_waiters"]
+            == before_disabled_reads["singleflight_waiters"]
+        )
+        assert (
+            after_disabled_reads["database_reads"]
+            - before_disabled_reads["database_reads"]
+            == 11
+        )
+
+        rewritten_value = row_bytes(1, "updated-while-cache-disabled")
+        assert client.command("SET", key, rewritten_value) == "OK"
+        assert mget_one(client, key) == rewritten_value
+        inserted_value = row_bytes(6, "written-while-cache-disabled").decode()
+        assert client.command("SET", inserted_key, inserted_value) == "OK"
+        expected_inserted = row_bytes(6, "written-while-cache-disabled")
+        assert mget_one(client, inserted_key) == expected_inserted
+        before_enable = json.loads(client.command("STAT"))
+
+        sql_commands(
+            "ALTER SYSTEM SET pg_local_cache.enabled = on",
+            "SELECT pg_reload_conf()",
+        )
+        wait_for_cache_enabled(True)
+        after_enable = json.loads(client.command("STAT"))
+        assert after_enable["invalidations"] > before_enable["invalidations"]
+        assert after_enable["cache_hits"] == before_enable["cache_hits"]
+        assert mget_one(client, key) == rewritten_value
+        assert mget_one(client, inserted_key) == expected_inserted
+        assert mget_one(client, surviving_key) == surviving_expected
+        after_reenabled_reads = json.loads(client.command("STAT"))
+        assert after_reenabled_reads["cache_hits"] == after_enable["cache_hits"]
+        assert mget_one(client, surviving_key) == surviving_expected
+        assert (
+            json.loads(client.command("STAT"))["cache_hits"]
+            == after_reenabled_reads["cache_hits"] + 1
+        )
+    finally:
+        if cache_off:
+            sql_commands(
+                "ALTER SYSTEM RESET pg_local_cache.enabled",
+                "SELECT pg_reload_conf()",
+            )
+            wait_for_cache_enabled(True)
+        client.close()
+
+
 def main() -> None:
     suffix = str(os.getpid())
     table = f"p{suffix}"
@@ -873,11 +968,13 @@ def main() -> None:
         test_close_after_flush(table)
         test_transactional_commit_and_rollback(table)
         test_uncommitted_write_is_not_served_before_commit(table)
+        test_enabled_kill_switch(table)
         print(
             "pipeline integration passed: fragmentation/order, warm-hit stats, "
             "error recovery, fairness resume, half-close drain, backpressure, "
             "bounded MGET, close-after-flush, commit/rollback fence, "
-            "database/table key scope and uncommitted-write visibility, "
+            "database/table key scope, uncommitted-write visibility, "
+            "SIGHUP cache kill switch, "
             "non-superuser writer"
         )
     finally:

@@ -31,8 +31,8 @@ topics:
   correctness: 正确性
   application: 应用设计
 read_diagram:
-  title: SQL mget 读取路径
-  description: 应用在 PostgreSQL 内调用 local_cache.mget。经过适用性与快照检查后，缓存命中返回已存整行载荷。未命中或绕过缓存时读取源表。两条路径均通过同一 PostgreSQL 连接返回行。
+  title: RESP MGET 读取路径
+  description: 应用发送经过身份验证的 RESP MGET。符合条件的缓存命中会返回已存的整行载荷。未命中或绕过时，使用已配置的 worker 角色读取源表，并通过 RESP 返回该行。
   application: 应用
   checks: 适用性与快照
   hit: 命中
@@ -41,7 +41,7 @@ read_diagram:
   row: 行
   source: 源
   table: 表
-  caption: 两条路径均通过同一 PostgreSQL 连接返回序列化整行。符合条件的源表读取可以填充缓存。
+  caption: 两条路径都会通过 RESP 返回整行。读取源表时可以填充缓存。
 transaction_diagram:
   title: 更新过程中读者看到什么
   description: 在 READ COMMITTED 下，从 revision 0 开始。一个事务将其更新为 1。写者通过源表读取看到 1，另一个会话仍看到 0。COMMIT 后，另一个会话的新语句看到 1；ROLLBACK 后，它仍看到 0。

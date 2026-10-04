@@ -7,30 +7,16 @@ const a = '{"id":1,"value":"one"}';
 const b = '{"id":2,"value":"two"}';
 const expected = [JSON.parse(b), JSON.parse(a), JSON.parse(b), null, null];
 
-test('mget preserves positions and decodes each row', async () => {
-  const seen = [];
-  const client = { query: async query => {
-    assert.match(query.text, /\$1::bigint\[\]/);
-    const keys = query.values[0];
-    seen.push(keys);
-    return { rows: [{ rows: keys.map(key => key === 1 ? a : key === 2 ? b : null) }] };
-  } };
-  assert.deepEqual(await getRows(client, []), []);
-  assert.deepEqual(await getRows(client, [null, null]), [null, null]);
-  assert.deepEqual(await getRows(client, [2, 1, 2, null, 9]), expected);
-  assert.deepEqual(seen, [[null, null], [2, 1, 2, null, 9]]);
-});
-
-test('ANY baseline restores order, duplicates and nulls', async () => {
+test('prepared ANY query restores order, duplicates and nulls', async () => {
   const seen = [];
   const client = { query: async query => {
     assert.match(query.text, /id = ANY/);
     seen.push(query.values[0]);
     return { rows: [{ key: '1', row: a }, { key: '2', row: b }] };
   } };
-  assert.deepEqual(await getRows(client, [], false), []);
-  assert.deepEqual(await getRows(client, [null, null], false), [null, null]);
-  assert.deepEqual(await getRows(client, [2, 1, 2, null, 9], false), expected);
+  assert.deepEqual(await getRows(client, []), []);
+  assert.deepEqual(await getRows(client, [null, null]), [null, null]);
+  assert.deepEqual(await getRows(client, [2, 1, 2, null, 9]), expected);
   assert.deepEqual(seen, [[null, null], [2, 1, 2, null, 9]]);
 });
 
@@ -57,12 +43,10 @@ test('invalid keys do not reach any database path', async () => {
   const resp = { mGet: () => { throw new Error('unexpected MGET'); } };
   for (const keys of [[1.5], ['1'], [undefined], Array(1), [Number.MAX_SAFE_INTEGER + 1]]) {
     await assert.rejects(getRows(sql, keys), TypeError);
-    await assert.rejects(getRows(sql, keys, false), TypeError);
     await assert.rejects(getRespRows(resp, keys), TypeError);
   }
   const tooMany = Array(1025).fill(1);
   await assert.rejects(getRows(sql, tooMany), RangeError);
-  await assert.rejects(getRows(sql, tooMany, false), RangeError);
   await assert.rejects(getRespRows(resp, tooMany), RangeError);
 });
 
@@ -73,12 +57,8 @@ test('percentiles use nearest rank without mutating input', () => {
   assert.deepEqual(values, [4, 1, 2, 3]);
   assert.equal(latency([]), null);
 });
-test('cold requests visit each row once; warm requests fit in 128 rows', () => {
+test('benchmark read requests stay within 128 hot rows', () => {
   for (const batch of [1, 16, 64]) {
-    const cold = Array.from({ length: 4096 / batch }, (_, i) => keysFor(i, batch, true)).flat();
-    assert.equal(new Set(cold).size, 4096);
-    assert.equal(Math.min(...cold), 1);
-    assert.equal(Math.max(...cold), 4096);
     assert.ok(keysFor(1000, batch).every(key => key >= 1 && key <= 128));
   }
 });

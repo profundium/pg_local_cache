@@ -24,7 +24,7 @@ le [guide des benchmarks](BENCHMARKS.md).
 |---|---|---|
 | Garder les pages de table et d'index en mémoire | `shared_buffers` de PostgreSQL et le cache du système | Moins de lectures du stockage ; le SQL s'exécute toujours |
 | Envoyer plusieurs fois la même instruction | Une instruction préparée | Moins de parsing et de planification répétés ; l'exécution a toujours lieu |
-| Renvoyer des lignes complètes par clé primaire | `pg_local_cache` SQL `mget` | Réutilise des charges utiles de lignes complètes éligibles via une API explicite |
+| Renvoyer des lignes complètes par clé primaire | RESP MGET de pg_local_cache | Réutilise des lignes complètes éligibles via un endpoint authentifié |
 | Pré-calculer une jointure ou un agrégat | Une vue matérialisée | Lit des résultats persistés ; le rafraîchissement définit la fraîcheur |
 | Partager des objets applicatifs entre services | Un cache externe comme Redis | Clés, TTL et invalidation gérés par l'application |
 
@@ -44,17 +44,7 @@ travail qui reste sur chaque chemin.
 
 ### Lignes complètes par clé primaire {#whole-rows-by-primary-key}
 
-`pg_local_cache` stocke des lignes complètes sérialisées sous des clés
-primaires complètes dans la mémoire partagée bornée de PostgreSQL. On y accède
-via `local_cache.mget('public.items'::regclass, $1::bigint[])` ; un `SELECT`
-ordinaire ne le consulte jamais. Les lectures propres et éligibles en
-`READ COMMITTED` peuvent être des hits, tandis que les niveaux d'isolation plus
-stricts, les écritures de la transaction, la récupération, l'exécution
-parallèle ou les lignes trop volumineuses utilisent PostgreSQL. Les mappings de
-tables non pris en charge sont rejetés lors de l'attachement. Il s'agit d'un
-chemin de lecture précis, pas d'un cache arbitraire de résultats de requêtes.
-Voir le [guide des recherches par lots](batch-primary-key-lookups.md), le
-[contrat technique](TECHNICAL.md) et les [vérifications transactionnelles](cache-invalidation.md).
+pg_local_cache stocke des lignes complètes sérialisées sous leurs clés primaires complètes dans la mémoire partagée bornée de PostgreSQL. L’accès se fait par RESP MGET authentifié ; un SELECT ordinaire ne consulte jamais ce cache. Les lectures propres et éligibles en READ COMMITTED peuvent obtenir un hit ; les niveaux d’isolation plus stricts, les écritures dans la transaction, la récupération, l’exécution parallèle ou les lignes trop volumineuses utilisent PostgreSQL. Les workers RESP utilisent le rôle de base configuré et ne partagent ni la transaction SQL ni le snapshot de l’appelant. Les associations de tables non prises en charge sont refusées lors de leur ajout. C’est un parcours de lecture précis, pas un cache de résultats de requêtes arbitraires. Consultez le [guide des lectures par lot](batch-primary-key-lookups.md), le [contrat technique](TECHNICAL.md) et les [vérifications des transactions](cache-invalidation.md).
 
 ### Vues et caches externes {#views-and-external-caches}
 

@@ -27,6 +27,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
+#include "postmaster/interrupt.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -84,6 +85,7 @@ static uint64 worker_retry_generation = 0;
 static bool worker_mappings_incomplete = false;
 static int	worker_slot = -1;
 static char *worker_auth_token = NULL;
+static bool bind_address_is_loopback(const char *address);
 static uint64 worker_client_reservations = 0;
 static bool worker_counted_active = false;
 
@@ -106,6 +108,7 @@ static char *execute_command_inner(PgLocalCacheClient *client,
 								   PgLocalCacheRespArg *args, int argc,
 								   Size *response_length, bool *close_after);
 static void maybe_reload_mappings(void);
+static void worker_process_config_reload(void);
 static bool reload_mappings(uint64 target_generation);
 static void set_worker_mappings_incomplete(bool incomplete);
 static void set_worker_mapping_generation(uint64 generation);
@@ -144,6 +147,7 @@ pg_local_cache_worker_main(Datum main_arg)
 				(errmsg("invalid pg_local_cache worker slot %d", requested_slot)));
 	worker_slot = requested_slot;
 
+	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
 	BackgroundWorkerUnblockSignals();
 
@@ -182,6 +186,17 @@ pg_local_cache_worker_main(Datum main_arg)
 	run_server(listener);
 	close(listener);
 	proc_exit(0);
+}
+
+static void
+worker_process_config_reload(void)
+{
+	if (ConfigReloadPending)
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+	}
+	pglc_sync_cache_enabled();
 }
 
 Size
@@ -257,6 +272,15 @@ validate_file_descriptor_limit(void)
 						   (unsigned long long) required,
 						   (unsigned long long) descriptor_limit.rlim_cur),
 				 errhint("Raise the container/process nofile limit or lower pg_local_cache.max_clients_per_worker.")));
+}
+
+static bool
+bind_address_is_loopback(const char *address)
+{
+	struct in_addr ipv4_address;
+
+	return address != NULL && inet_pton(AF_INET, address, &ipv4_address) == 1 &&
+		(ntohl(ipv4_address.s_addr) & 0xff000000U) == 0x7f000000U;
 }
 
 static void
@@ -370,10 +394,6 @@ load_auth_token(void)
 					 errhint("Use pg_local_cache.auth_token_file in production.")));
 	}
 
-	if (strcmp(pglc_bind_address, "0.0.0.0") == 0 &&
-		strlen(worker_auth_token) < 32)
-		ereport(FATAL,
-				(errmsg("a non-loopback pg_local_cache listener requires an auth token of at least 32 bytes")));
 }
 
 static int
@@ -383,18 +403,27 @@ create_listener(void)
 	int			enabled = 1;
 	int			flags;
 	struct sockaddr_in address;
+	struct in_addr bind_address;
+	bool		loopback;
 
 	if (pglc_bind_address == NULL ||
-		(strcmp(pglc_bind_address, "127.0.0.1") != 0 &&
-		 strcmp(pglc_bind_address, "0.0.0.0") != 0))
+		inet_pton(AF_INET, pglc_bind_address, &bind_address) != 1)
 		ereport(FATAL,
-					(errmsg("pg_local_cache.bind_address must be an IPv4 literal"),
-					 errhint("Supported values are 127.0.0.1 and 0.0.0.0.")));
+				(errmsg("pg_local_cache.bind_address must be an IPv4 literal")));
+	loopback = bind_address_is_loopback(pglc_bind_address);
+	if (!loopback && !pglc_allow_plaintext_network)
+		ereport(FATAL,
+				(errmsg("pg_local_cache refuses plaintext RESP on non-loopback address %s",
+						pglc_bind_address),
+				 errhint("Set pg_local_cache.allow_plaintext_network = on only on a trusted network.")));
 
-	if (strcmp(pglc_bind_address, "0.0.0.0") == 0 &&
+	if (!loopback &&
 		(worker_auth_token == NULL || worker_auth_token[0] == '\0'))
 		ereport(FATAL,
 				(errmsg("pg_local_cache refuses a non-loopback listener without authentication")));
+	if (!loopback && strlen(worker_auth_token) < 32)
+		ereport(FATAL,
+				(errmsg("a non-loopback pg_local_cache listener requires an auth token of at least 32 bytes")));
 
 	fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0)
@@ -424,10 +453,7 @@ create_listener(void)
 	memset(&address, 0, sizeof(address));
 	address.sin_family = AF_INET;
 	address.sin_port = htons((uint16) pglc_port);
-	if (inet_pton(AF_INET, pglc_bind_address, &address.sin_addr) != 1)
-		ereport(FATAL,
-				(errmsg("invalid pg_local_cache.bind_address \"%s\"",
-						pglc_bind_address)));
+	address.sin_addr = bind_address;
 
 	if (bind(fd, (struct sockaddr *) &address, sizeof(address)) < 0)
 		ereport(FATAL,
@@ -482,6 +508,7 @@ run_server(int listener)
 		int			step;
 		TimestampTz now = GetCurrentTimestamp();
 
+		worker_process_config_reload();
 		maybe_reload_mappings();
 
 		/*
@@ -862,6 +889,7 @@ process_client(PgLocalCacheClient *client)
 				}
 			}
 
+			worker_process_config_reload();
 			CHECK_FOR_INTERRUPTS();
 			parse_result = pglc_resp_parse(
 				client->input + client->input_start,
@@ -1657,6 +1685,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 	bool		negative;
 	TransactionId source_xmin;
 	PgLocalCacheReadToken token;
+	bool		cache_enabled;
 	bool		hit;
 	bool		owns_load = false;
 	bool		waiter_counted = false;
@@ -1673,60 +1702,9 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 	if (deadline != 0 && GetCurrentTimestamp() >= deadline)
 		return pglc_resp_error("ERR MGET deadline exceeded", response_length);
 
-	hit = pglc_cache_lookup_quiet(mapping, canonical,
-								 cached_value, sizeof(cached_value),
-								 &cached_length, &negative, &source_xmin,
-								 &token);
-	if (hit)
+	cache_enabled = pglc_cache_is_enabled();
+	if (cache_enabled)
 	{
-		if (negative)
-		{
-			note_resp_cache_lookup(true, true);
-			return pglc_resp_null(response_length);
-		}
-		{
-			char	   *json;
-			Size		json_length;
-
-			if (cached_row_json(mapping, cached_value, cached_length,
-								result_context, &json, &json_length))
-			{
-				note_resp_cache_lookup(true, false);
-				return pglc_resp_bulk(json, json_length, response_length);
-			}
-
-			/* Corrupt or descriptor-stale payloads are never exposed. */
-			(void) pglc_cache_invalidate_key(mapping, canonical);
-			(void) pglc_cache_lookup_quiet(mapping, canonical,
-									  cached_value, sizeof(cached_value),
-									  &cached_length, &negative, &source_xmin,
-									  &token);
-		}
-	}
-	note_resp_cache_lookup(false, false);
-
-	wait_started = GetCurrentTimestamp();
-	for (;;)
-	{
-		PgLocalCacheLoadClaim claim;
-
-		if (deadline != 0 && GetCurrentTimestamp() >= deadline)
-			return pglc_resp_error("ERR MGET deadline exceeded", response_length);
-		claim = pglc_cache_claim_load(mapping, canonical, &token, &load_id);
-
-		if (claim == PGLC_LOAD_OWNER)
-		{
-			owns_load = true;
-			break;
-		}
-		if (claim == PGLC_LOAD_BYPASS)
-			break;
-		if (claim == PGLC_LOAD_WAIT && !waiter_counted)
-		{
-			pglc_note_singleflight_waiter();
-			waiter_counted = true;
-		}
-
 		hit = pglc_cache_lookup_quiet(mapping, canonical,
 									 cached_value, sizeof(cached_value),
 									 &cached_length, &negative, &source_xmin,
@@ -1735,7 +1713,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 		{
 			if (negative)
 			{
-				pglc_note_singleflight_reuse();
+				note_resp_cache_lookup(true, true);
 				return pglc_resp_null(response_length);
 			}
 			{
@@ -1745,31 +1723,86 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 				if (cached_row_json(mapping, cached_value, cached_length,
 									result_context, &json, &json_length))
 				{
-					pglc_note_singleflight_reuse();
-					return pglc_resp_bulk(json, json_length,
-									  response_length);
+					note_resp_cache_lookup(true, false);
+					return pglc_resp_bulk(json, json_length, response_length);
 				}
+
+				/* Corrupt or descriptor-stale payloads are never exposed. */
 				(void) pglc_cache_invalidate_key(mapping, canonical);
 				(void) pglc_cache_lookup_quiet(mapping, canonical,
 										  cached_value, sizeof(cached_value),
-										  &cached_length, &negative,
-										  &source_xmin, &token);
-				continue;
+										  &cached_length, &negative, &source_xmin,
+										  &token);
 			}
 		}
-		if (claim == PGLC_LOAD_RETRY)
-			continue;
-		if (TimestampDifferenceExceeds(wait_started, GetCurrentTimestamp(),
-								   pglc_singleflight_wait_ms))
+		note_resp_cache_lookup(false, false);
+
+		wait_started = GetCurrentTimestamp();
+		for (;;)
 		{
-			pglc_note_singleflight_timeout();
-			break;
+			PgLocalCacheLoadClaim claim;
+
+			if (deadline != 0 && GetCurrentTimestamp() >= deadline)
+				return pglc_resp_error("ERR MGET deadline exceeded", response_length);
+			claim = pglc_cache_claim_load(mapping, canonical, &token, &load_id);
+
+			if (claim == PGLC_LOAD_OWNER)
+			{
+				owns_load = true;
+				break;
+			}
+			if (claim == PGLC_LOAD_BYPASS)
+				break;
+			if (claim == PGLC_LOAD_WAIT && !waiter_counted)
+			{
+				pglc_note_singleflight_waiter();
+				waiter_counted = true;
+			}
+
+			hit = pglc_cache_lookup_quiet(mapping, canonical,
+										 cached_value, sizeof(cached_value),
+										 &cached_length, &negative, &source_xmin,
+										 &token);
+			if (hit)
+			{
+				if (negative)
+				{
+					pglc_note_singleflight_reuse();
+					return pglc_resp_null(response_length);
+				}
+				{
+					char	   *json;
+					Size		json_length;
+
+					if (cached_row_json(mapping, cached_value, cached_length,
+										result_context, &json, &json_length))
+					{
+						pglc_note_singleflight_reuse();
+						return pglc_resp_bulk(json, json_length,
+										  response_length);
+					}
+					(void) pglc_cache_invalidate_key(mapping, canonical);
+					(void) pglc_cache_lookup_quiet(mapping, canonical,
+											  cached_value, sizeof(cached_value),
+											  &cached_length, &negative,
+											  &source_xmin, &token);
+					continue;
+				}
+			}
+			if (claim == PGLC_LOAD_RETRY)
+				continue;
+			if (TimestampDifferenceExceeds(wait_started, GetCurrentTimestamp(),
+									   pglc_singleflight_wait_ms))
+			{
+				pglc_note_singleflight_timeout();
+				break;
+			}
+			(void) WaitLatch(MyLatch,
+							 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+							 1L, PG_WAIT_EXTENSION);
+			ResetLatch(MyLatch);
+			CHECK_FOR_INTERRUPTS();
 		}
-		(void) WaitLatch(MyLatch,
-						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-						 1L, PG_WAIT_EXTENSION);
-		ResetLatch(MyLatch);
-		CHECK_FOR_INTERRUPTS();
 	}
 	if (deadline != 0)
 	{
@@ -1858,15 +1891,18 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 		commit_spi_transaction();
 		pglc_note_database_read();
 
-		if (database_value == NULL)
-			pglc_cache_store(mapping, canonical, &token, NULL, 0, true,
-							 owns_load ? load_id : 0,
-							 InvalidTransactionId);
-		else if (database_payload_cacheable)
-			pglc_cache_store(mapping, canonical, &token,
-							 cached_value, database_payload_length, false,
-							 owns_load ? load_id : 0,
-							 database_xmin);
+		if (cache_enabled)
+		{
+			if (database_value == NULL)
+				pglc_cache_store(mapping, canonical, &token, NULL, 0, true,
+								 owns_load ? load_id : 0,
+								 InvalidTransactionId);
+			else if (database_payload_cacheable)
+				pglc_cache_store(mapping, canonical, &token,
+								 cached_value, database_payload_length, false,
+								 owns_load ? load_id : 0,
+								 database_xmin);
+		}
 		if (owns_load)
 		{
 			pglc_cache_release_load(mapping, canonical, &token, load_id);

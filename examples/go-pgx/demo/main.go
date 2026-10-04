@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const mgetSQL = `SELECT local_cache.mget('public.items'::regclass, $1::bigint[])`
+const anySQL = `SELECT id::text AS key, row_to_json(i)::text AS row FROM public.items AS i WHERE id = ANY($1::bigint[])`
 
 func main() {
 	if err := run(); err != nil {
@@ -46,24 +46,32 @@ func run() (err error) {
 
 	k42, k7, missing := int64(42), int64(7), int64(999999)
 	keys := []*int64{&k42, &k7, &k42, nil, &missing}
-	var raw []*string
-	if err := conn.QueryRow(ctx, mgetSQL, keys).Scan(&raw); err != nil {
-		return fmt.Errorf("query mget: %w", err)
+	rows, err := conn.Query(ctx, anySQL, keys)
+	if err != nil {
+		return fmt.Errorf("query postgres-any: %w", err)
 	}
-	if len(raw) != len(keys) {
-		return fmt.Errorf("mget returned %d rows, want %d", len(raw), len(keys))
-	}
-	rows := make([]json.RawMessage, len(raw))
-	for i, value := range raw {
-		if value == nil {
-			continue
+	defer rows.Close()
+	byKey := make(map[string]json.RawMessage)
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return fmt.Errorf("scan postgres-any row: %w", err)
 		}
-		rows[i] = json.RawMessage(*value)
-		if !json.Valid(rows[i]) {
-			return fmt.Errorf("decode row %d: invalid JSON", i)
+		if !json.Valid([]byte(value)) {
+			return fmt.Errorf("decode row %s: invalid JSON", key)
+		}
+		byKey[key] = json.RawMessage(value)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read postgres-any rows: %w", err)
+	}
+	ordered := make([]json.RawMessage, len(keys))
+	for i, key := range keys {
+		if key != nil {
+			ordered[i] = byKey[strconv.FormatInt(*key, 10)]
 		}
 	}
-	encoded, err := json.MarshalIndent(rows, "", "  ")
+	encoded, err := json.MarshalIndent(ordered, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode result: %w", err)
 	}

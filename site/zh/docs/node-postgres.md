@@ -2,9 +2,9 @@
 layout: doc
 lang: zh
 translation_key: node-postgres
-title: 使用 node-postgres 批量查找行
+title: "使用 node-postgres 批量查找行"
 seo_title: 使用 node-postgres 批量查找行 | pg_local_cache
-description: 通过参数化 bigint 数组和 JSON 传输在 Node.js 中使用 pg_local_cache 2.0，保留顺序与空值，并与预备 ANY 查询比较。
+description: "在 Node.js 中使用经过身份验证的 RESP MGET 读取缓存行，使用 node-postgres 执行 SQL 写入和普通查询。"
 section: Node.js
 permalink: /zh/docs/node-postgres.html
 last_modified_at: '2026-09-16'
@@ -21,26 +21,29 @@ npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
 
-## 发送一个参数化查询 {#send-one-parameterized-query}
+## 通过 RESP 读取 {#send-one-parameterized-query}
 
-对于已经连接的 node-postgres 客户端或连接池：
+使用已连接的 `@redis/client` RESP 客户端：
 
 ```js
-const result = await client.query({
-  name: 'items-mget',
-  text: "SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows",
-  values: [[42, 7, 42, null, 999999]],
-});
-const rows = result.rows[0].rows.map(row =>
-  row === null ? null : JSON.parse(row)
+const ids = [42, 7, 42, null, 999999];
+const wireKeys = ids.filter(id => id !== null).map(id =>
+  `CRUD:app.public.items:${JSON.stringify({ id })}`
 );
+const values = await client.mGet(wireKeys);
+let position = 0;
+const rows = ids.map(id => {
+  if (id === null) return null;
+  const value = values[position++];
+  return value === null ? null : JSON.parse(value);
+});
 ```
 
-`mget` 返回 `text[]`。`array_to_json` 将外层数组作为 JSON 发送，node-postgres 会调用其 JSON 解码器。每个非空元素都是序列化的行，需要 `JSON.parse`；位置与输入一一对应，缺失键或空输入产生 `null`。
+RESP `MGET` 按键顺序返回 JSON 编码的行。辅助函数省略 null 输入键并恢复其位置；缺失键返回 null。
 
-在应用代码中固定表名。将 ID 作为查询参数传入，不要拼接 SQL 字符串。参阅 node-postgres 的[参数与具名预备语句](https://node-postgres.com/features/queries)文档。
+在应用代码中固定表名。将 ID 作为查询参数传递，不要拼接 SQL 字符串。参阅 node-postgres 关于[参数和具名预备语句](https://node-postgres.com/features/queries)的文档。
 
-可运行的辅助函数拒绝超过 1,024 个键的批次；空批次直接返回 `[]`，不发起查询。演示 ID 都是安全整数。PostgreSQL `bigint` 以及 JSON 中的数值字段可能超出 JavaScript 的精确数值范围；对于这类值，请使用无损 JSON 解析器或明确的序列化约定。
+RESP 命令最多接受 1,024 个键。若所有输入均为 null，可运行的辅助函数会直接返回 `[]` 而不发送请求。PostgreSQL `bigint` 和 JSON 数值可能超出 JavaScript 的精确数字范围；请使用无损 JSON 解析器或明确的序列化契约。
 
 ## 与现有批量查询比较 {#compare-with-the-existing-batch-query}
 
@@ -62,6 +65,6 @@ WHERE id = ANY($1::bigint[]);
 
 ## 预备语句与结果缓存 {#prepared-statements-and-result-caching}
 
-具名 node-postgres 查询会在每个连接上复用预备语句，但不会缓存返回行。`local_cache.mget` 在 PostgreSQL 内添加独立的共享整行缓存；客户端仍然发送查询并解码结果。参阅[缓存选择指南](postgresql-caching.md)比较这些层次；[批量查找指南](batch-primary-key-lookups.md)提供保留请求位置的纯 SQL 替代方案。
+具名 node-postgres 查询会在每个连接上复用预备语句，但不会缓存返回行。RESP `MGET` 使用扩展的共享整行缓存，但其 worker 角色和会话状态独立于应用的 SQL 连接。参阅[缓存决策指南](postgresql-caching.md)和[批量查找指南](batch-primary-key-lookups.md)。
 
-RESP2 可使用 [Node.js RESP 示例](resp.md#nodejs)。[已记录的 Node.js 结果](benchmarks-node.md)包括批量读取与并发更新。[统一基准测试](BENCHMARKS.md#run-the-same-comparison-on-every-client)让 Node.js 和 Go 执行相同的 SQL 与 RESP 场景。
+RESP2 请使用 [Node.js RESP 示例](resp.md#nodejs)。[已记录的 Node.js 结果](benchmarks-node.md)包括批量读取和并发更新。[统一基准测试](BENCHMARKS.md#run-the-same-comparison-on-every-client)使用相同的预备 SQL 和 RESP 场景运行 Node.js 与 Go。

@@ -11,6 +11,9 @@ last_modified_at: '2026-09-16'
 
 # Go 基准测试：SQL 与 RESP {#go-benchmarks-sql-and-resp}
 
+下表中的 SQL mget 数值是 2.x 历史结果。该 SQL 接口已在 3.0.0 中移除；当前支持的缓存读取使用 RESP MGET。
+
+
 [概览](BENCHMARKS.md) · [Node.js](benchmarks-node.md) · [Go 与 RESP](benchmarks-go.md)
 
 Go 1.27.1、pgx 5.11.0 和标准库 RESP2 客户端；`GOMAXPROCS=8`。[机器配置与测量方法](BENCHMARKS.md#test-environment)。
@@ -19,7 +22,7 @@ Go 1.27.1、pgx 5.11.0 和标准库 RESP2 客户端；`GOMAXPROCS=8`。[机器�
 
 每种情况三个五秒样本，**requests/s** 中位数：
 
-| 键/请求 | 连接数 | 预备 SQL | SQL mget | RESP MGET |
+| 键/请求 | 连接数 | 预备 SQL | 2.x SQL mget（已在 3.0.0 移除） | RESP MGET |
 |---:|---:|---:|---:|---:|
 | 1 | 64 | 277,088 | 211,251 | 722,133 |
 | 1 | 256 | 253,790 | 186,296 | 839,678 |
@@ -34,7 +37,7 @@ Go 1.27.1、pgx 5.11.0 和标准库 RESP2 客户端；`GOMAXPROCS=8`。[机器�
 
 **256 个连接**时，相同样本的中位数：
 
-| 键/请求 | 路径 | 客户端 CPU 核数 | 服务器 CPU 核数（VM 占比） | 服务器 µs/请求 | 采样峰值 MiB |
+| 键/请求 | 路径（2.x SQL mget；已在 3.0.0 移除） | 客户端 CPU 核数 | 服务器 CPU 核数（VM 占比） | 服务器 µs/请求 | 采样峰值 MiB |
 |---:|---|---:|---:|---:|---:|
 | 1 | SQL | 3.97 | 8.94 (63.9%) | 36.3 | 679.8 |
 | 1 | SQL mget | 3.36 | 9.93 (70.9%) | 54.4 | 684.2 |
@@ -47,7 +50,7 @@ Go 1.27.1、pgx 5.11.0 和标准库 RESP2 客户端；`GOMAXPROCS=8`。[机器�
 
 通过 Docker 发布的端口、使用 **64 个连接**；三个五秒样本的 requests/s 中位数：
 
-| 键/请求，64 个连接 | 预备 SQL | SQL mget | RESP MGET |
+| 键/请求，64 个连接 | 预备 SQL | 2.x SQL mget（已在 3.0.0 移除） | RESP MGET |
 |---:|---:|---:|---:|
 | 1 | 49,194 | 48,010 | 52,426 |
 | 64 | 14,324 | 15,751 | 16,240 |

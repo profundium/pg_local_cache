@@ -3,7 +3,7 @@
   description: Disposable PostgreSQL, sample rows, cache hits, and cleanup.
 - title: Benchmarks
   url: /docs/BENCHMARKS.html
-  description: Compare mget with batched SQL, including misses and writes.
+  description: Compare prepared SQL with RESP MGET, including misses and writes.
 - title: PostgreSQL caching guide
   url: /docs/postgresql-caching.html
   description: Choose between page caching, prepared SQL, rows, views, and Redis.
@@ -33,4 +33,4 @@
   description: Package verification, source builds, configuration, upgrades, and restarts.
 - title: Technical reference
   url: /docs/TECHNICAL.html
-  description: SQL API, table restrictions, memory, monitoring, and RESP2.
+  description: RESP API, table restrictions, memory, monitoring, and security.

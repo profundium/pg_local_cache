@@ -31,8 +31,8 @@ topics:
   correctness: Cohérence
   application: Conception d'application
 read_diagram:
-  title: Chemin de lecture SQL mget
-  description: L'application appelle local_cache.mget dans PostgreSQL. Après les vérifications d'éligibilité et de snapshot, un hit du cache renvoie la charge utile stockée de la ligne complète. Un miss ou un contournement lit la table source. Les deux chemins renvoient les lignes via la même connexion PostgreSQL.
+  title: Le parcours de lecture RESP MGET
+  description: L’application envoie RESP MGET authentifié. Un hit éligible renvoie la ligne complète stockée. Un miss ou un contournement lit la table source avec le rôle de worker configuré et renvoie la ligne via RESP.
   application: Application
   checks: Éligibilité + snapshot
   hit: Trouvé
@@ -41,7 +41,7 @@ read_diagram:
   row: ligne
   source: Source
   table: table
-  caption: Les deux chemins renvoient des lignes complètes sérialisées via la même connexion PostgreSQL. Une lecture éligible de la table source peut remplir le cache.
+  caption: Les deux parcours renvoient des lignes complètes via RESP. Une lecture de la table source peut remplir le cache.
 transaction_diagram:
   title: Ce que voient les lecteurs pendant une mise à jour
   description: Sous READ COMMITTED, commencez avec la révision zéro. Une transaction la met à jour à un. L'écrivain voit un par une lecture de la table source, tandis qu'une autre session voit encore zéro. Après COMMIT, une nouvelle instruction de l'autre session voit un. Après ROLLBACK, elle voit toujours zéro.

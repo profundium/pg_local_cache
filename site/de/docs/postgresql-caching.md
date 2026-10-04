@@ -24,7 +24,7 @@ messen Sie dann den vollständigen Pfad mit dem [Benchmark-Leitfaden](BENCHMARKS
 |---|---|---|
 | Tabellen- und Indexseiten im Speicher halten | PostgreSQL `shared_buffers` und der OS-Cache | Weniger Speicherzugriffe; SQL läuft weiterhin |
 | Dieselbe Anweisung oft senden | Ein vorbereitetes Statement | Weniger wiederholte Parse- und Planarbeit; Ausführung läuft weiterhin |
-| Vollständige Zeilen per Primärschlüssel zurückgeben | PostgreSQL-`mget` von `pg_local_cache` | Wiederverwendung geeigneter Zeilen-Payloads über eine explizite API |
+| Vollständige Zeilen per Primärschlüssel zurückgeben | pg_local_cache RESP MGET | Geeignete vollständige Zeilen über einen authentifizierten Endpunkt wiederverwenden |
 | Einen Join oder ein Aggregat vorab berechnen | Eine materialisierte Sicht | Gespeicherte Ergebnisse lesen; Aktualisierung legt die Frische fest |
 | Anwendungsobjekte über Services hinweg teilen | Ein externer Cache wie Redis | Von der Anwendung verwaltete Schlüssel, TTLs und Invalidation |
 
@@ -43,16 +43,7 @@ Arbeit auf jedem Pfad verbleibt.
 
 ### Vollständige Zeilen per Primärschlüssel {#whole-rows-by-primary-key}
 
-`pg_local_cache` speichert serialisierte vollständige Zeilen unter vollständigen
-Primärschlüsseln im begrenzten Shared Memory von PostgreSQL. Der Zugriff erfolgt
-über `local_cache.mget('public.items'::regclass, $1::bigint[])`; eine gewöhnliche
-`SELECT`-Abfrage verwendet den Cache nie. Geeignete saubere `READ COMMITTED`-
-Lesevorgänge können Treffer liefern, während strengere Isolationsstufen,
-Schreibvorgänge in der Transaktion, Recovery, parallele Ausführung oder zu große
-Zeilen PostgreSQL verwenden. Nicht unterstützte Tabellenzuordnungen werden beim
-Anhängen abgelehnt. Dies ist ein bestimmter Lesepfad, kein Cache für beliebige
-Abfrageergebnisse. Siehe den [Leitfaden zu Batch-Abfragen](batch-primary-key-lookups.md),
-den [technischen Vertrag](TECHNICAL.md) und die [Transaktionsprüfungen](cache-invalidation.md).
+pg_local_cache speichert serialisierte vollständige Zeilen unter vollständigen Primärschlüsseln im begrenzten Shared Memory von PostgreSQL. Der Zugriff erfolgt über authentifiziertes RESP MGET; ein gewöhnliches SELECT liest diesen Cache nie. Geeignete, unveränderte READ-COMMITTED-Lesevorgänge können Treffer erzielen, während strengere Isolationsstufen, Schreibvorgänge in der Transaktion, Recovery, parallele Ausführung oder übergroße Zeilen PostgreSQL verwenden. RESP-Worker verwenden die konfigurierte Datenbankrolle und teilen weder SQL-Transaktion noch Snapshot des Aufrufers. Nicht unterstützte Tabellenzuordnungen werden beim Anhängen abgelehnt. Dies ist ein bestimmter Leseweg, kein Cache für beliebige Abfrageergebnisse. Siehe den [Leitfaden für Batch-Lookups](batch-primary-key-lookups.md), den [technischen Vertrag](TECHNICAL.md) und die [Transaktionsprüfungen](cache-invalidation.md).
 
 ### Sichten und externe Caches {#views-and-external-caches}
 

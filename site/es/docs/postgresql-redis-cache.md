@@ -7,7 +7,7 @@ seo_title: "Caché aparte de PostgreSQL y Redis: invalidación y condiciones de 
 description: Usa PostgreSQL como fuente de verdad con un recorrido de caché aparte de Redis, entiende las carreras de lecturas obsoletas y descubre dónde encaja pg_local_cache.
 section: Guías
 permalink: /es/docs/postgresql-redis-cache.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
 # Caché aparte de PostgreSQL y Redis {#postgresql-and-redis-cache-aside}
@@ -35,8 +35,8 @@ Entre las posibles mitigaciones están volver a eliminar después de que termine
 
 ## Dónde encaja pg_local_cache {#where-pg_local_cache-fits}
 
-`pg_local_cache` es una opción más acotada y local a PostgreSQL para filas completas identificadas por clave primaria. `local_cache.mget` es explícito; un `SELECT` normal y una forma de consulta arbitraria nunca leen la caché. Los triggers de tablas asociadas ponen vallas a las claves o relaciones afectadas en el recorrido de escritura de la base de datos, y las lecturas elegibles pueden volver a PostgreSQL cuando las reglas de transacción o snapshot impiden un acierto. Empieza por la [guía de consultas por lotes](batch-primary-key-lookups.md) y el [contrato técnico](TECHNICAL.md).
+`pg_local_cache` es una opción más acotada y local a PostgreSQL para filas completas identificadas por clave primaria. `RESP `MGET`` es explícito; un `SELECT` normal y una forma de consulta arbitraria nunca leen la caché. Los triggers de tablas asociadas ponen vallas a las claves o relaciones afectadas en el recorrido de escritura de la base de datos, y las lecturas elegibles pueden volver a PostgreSQL cuando las reglas de transacción o snapshot impiden un acierto. Empieza por la [guía de consultas por lotes](batch-primary-key-lookups.md) y el [contrato técnico](TECHNICAL.md).
 
-Esta extensión no ofrece compatibilidad general con Redis, TTL de Redis ni un protocolo distribuido de caché de aplicaciones. Su endpoint RESP2 opcional expone un conjunto limitado de comandos autenticados sobre los mismos mapeos y tiene su propio modelo de seguridad; no tiene TLS. Úsala cuando el problema sean las lecturas de filas completas locales a PostgreSQL y conscientes de las transacciones. Usa Redis cuando varias instancias de la aplicación necesiten objetos compartidos, frescura basada en TTL o estructuras de datos de Redis. Combinar ambos requiere claves, invalidación y métricas separadas para cada capa.
+Esta extensión no ofrece compatibilidad general con Redis, TTL de Redis ni un protocolo distribuido de caché de aplicaciones. Su endpoint RESP2 expone un conjunto limitado de comandos autenticados sobre los mismos mapeos y tiene su propio modelo de seguridad; el soporte TLS nativo se planifica por separado. Úsala cuando el problema sean las lecturas de filas completas locales a PostgreSQL y conscientes de las transacciones. Usa Redis cuando varias instancias de la aplicación necesiten objetos compartidos, frescura basada en TTL o estructuras de datos de Redis. Combinar ambos requiere claves, invalidación y métricas separadas para cada capa.
 
-Ejecuta el [quickstart](QUICKSTART.md), compara con la consulta normal del cliente en el [ejemplo de node-postgres](node-postgres.md) e inspecciona los contadores separados de SQL y RESP. La [guía de decisión sobre caché](postgresql-caching.md) enumera las demás opciones de PostgreSQL.
+Ejecuta el [quickstart](QUICKSTART.md), compara con la consulta normal del cliente en el [ejemplo de node-postgres](node-postgres.md) e inspecciona los contadores de caché y RESP. La [guía de decisión sobre caché](postgresql-caching.md) enumera las demás opciones de PostgreSQL.

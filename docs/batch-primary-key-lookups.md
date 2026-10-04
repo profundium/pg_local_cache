@@ -3,8 +3,8 @@ layout: doc
 lang: en
 translation_key: batch-primary-key-lookups
 title: Batch PostgreSQL primary-key lookups
-seo_title: "Batch PostgreSQL Primary-Key Lookups with ANY and mget"
-description: Replace N+1 primary-key reads with one parameterized PostgreSQL query, preserve input positions when needed, and compare the explicit pg_local_cache mget path.
+seo_title: "Batch PostgreSQL Primary-Key Lookups with ANY and RESP MGET"
+description: Replace N+1 primary-key reads with one parameterized PostgreSQL query, preserve input positions when needed, and compare authenticated RESP MGET.
 section: Guides
 permalink: /docs/batch-primary-key-lookups.html
 last_modified_at: "2026-09-16"
@@ -56,25 +56,21 @@ returns a null `row` for a missing key. This is a useful baseline for a client
 that needs explicit alignment. See the [node-postgres example](node-postgres.md)
 for client-side restoration of the same contract.
 
-## When `mget` is the right alternative {#when-mget-is-the-right-alternative}
+## When RESP `MGET` fits {#when-mget-is-the-right-alternative}
 
-For complete rows by primary key, `pg_local_cache` offers an explicit bounded
-batch API:
+For complete rows by primary key, `pg_local_cache` offers an authenticated
+RESP2 `MGET` command. Keys use the attached table's database, schema, table,
+and primary-key values:
 
-```sql
-SELECT local_cache.mget(
-  'public.items'::regclass,
-  $1::bigint[]
-) AS rows;
+```text
+MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
 ```
 
-The returned `text[]` keeps input order and duplicates. Input `NULL` and missing
-rows produce aligned `NULL` elements. Calls accept at most 1,024 keys, and the
-function may bypass or miss the cache according to transaction, snapshot,
-mapping, and row-size rules; it falls back to PostgreSQL rather than changing
-the result contract. It returns whole serialized rows, so use `ANY` or the
-ordinality query when you need a projection, joins, filters beyond the key, or
-an unbounded batch.
+The response keeps key order and duplicates; missing rows return null. Each
+request accepts at most 1,024 keys and returns complete JSON rows. RESP workers
+use the configured database role and do not share the caller's SQL transaction
+or snapshot. Use SQL `ANY` or the ordinality query when you need a projection,
+joins, filters beyond the key, or SQL transaction semantics.
 
 ## GraphQL, DataLoader, and N+1 reads {#graphql-dataloader-and-n1-reads}
 
@@ -91,5 +87,5 @@ loader. Keep application authorization checks; `pg_local_cache` does not
 support RLS tables.
 
 Run the [quickstart](QUICKSTART.md), then compare both read paths in the
-[benchmarks](BENCHMARKS.md). The [technical reference](TECHNICAL.md#sql-mget-api)
-defines the API; the [transaction guide](cache-invalidation.md) covers writes.
+[benchmarks](BENCHMARKS.md). The [technical reference](TECHNICAL.md#optional-resp2-endpoint)
+defines the RESP API; the [transaction guide](cache-invalidation.md) covers writes.

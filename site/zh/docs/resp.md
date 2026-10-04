@@ -62,9 +62,11 @@ try {
 
 RESP 工作进程为所有客户端使用一个配置的 PostgreSQL 角色。如果需要在 SQL 事务内读取，请使用 [Node.js SQL](node-postgres.md) 或 [Go SQL](go.md)。支持的命令与限制见 [RESP 参考](TECHNICAL.md#optional-resp2-endpoint)。
 
+监听器默认绑定到 loopback。绑定到非本地 IPv4 地址需要设置 `pg_local_cache.allow_plaintext_network=on`；演示仅在其容器网络中启用该项。监听器不提供 TLS：请使用 loopback 或受信任的网络。`pg_local_cache.enabled` 是 SIGHUP 紧急开关。每个 RESP worker 都会在下一个命令边界异步应用重载，且会等当前执行的命令结束。`local_cache.health()` 中的 `cache_enabled` 字段报告调用它的 SQL 会话所见设置；它不表示所有 worker 都已应用该设置。若要在不重启的情况下关闭缓存读取，请执行 `ALTER SYSTEM SET pg_local_cache.enabled = off;` 和 `SELECT pg_reload_conf();`。关闭期间，RESP 会为每次读取直接查询源表。
+
 ## 与 SQL 比较 {#compare-with-sql}
 
-[统一基准测试](BENCHMARKS.md#run-the-same-comparison-on-every-client)在 Node.js 和 Go 中使用相同的键与解码结果，运行 RESP `MGET`、SQL `mget` 与预备 SQL。更广泛的应用缓存场景，请阅读 [PostgreSQL 与 Redis cache-aside 指南](postgresql-redis-cache.md)。
+[统一基准测试](BENCHMARKS.md#run-the-same-comparison-on-every-client)在 Node.js 和 Go 中使用相同的键与解码结果，运行 RESP `MGET` 与预备 SQL。已发布的 2.x SQL `mget` 测量属于历史数据；该测试路径已在 3.0.0 中移除。更广泛的应用缓存场景，请阅读 [PostgreSQL 与 Redis cache-aside 指南](postgresql-redis-cache.md)。
 
 ## 停止演示 {#stop-the-demo}
 

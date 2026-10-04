@@ -6,9 +6,11 @@ title: "PostgreSQL-Cache-Invalidation: die Race Condition beim späten Fill"
 description: Ein Cache-aside-Rennen nachvollziehen, bei dem ein alter Lesevorgang nach dem Commit einen gelöschten Schlüssel erneut füllt. Veröffentlichungs-Sperren, Snapshots, Rollback und anfragebezogene Caches verstehen.
 permalink: /de/blog/cache-aside-late-fill/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: correctness
 ---
+
+> **Hinweis vom 04.10.2026:** SQL-`mget` wurde in 3.0.0 entfernt; RESP-`MGET` ersetzt es.
 
 # Cache-Invalidation und die Race Condition beim späten Fill {#cache-invalidation-and-the-late-fill-race}
 
@@ -48,7 +50,7 @@ geänderte Generation kann einen alten Fill ablehnen. Ein Lesevorgang, der einen
 Eintrag nicht sicher verwenden kann, fällt auf PostgreSQL zurück.
 
 Diese Prüfungen gehören zu einem bestimmten PostgreSQL-Lesepfad. Sie machen den
-optionalen RESP-Endpunkt weder zu einem allgemeinen Redis-Server, noch
+RESP-Endpunkt weder zu einem allgemeinen Redis-Server, noch
 invalidieren sie Werte, die eine Anwendung bereits an anderer Stelle kopiert hat.
 
 ## Rollback und Commit testen {#test-transactions}

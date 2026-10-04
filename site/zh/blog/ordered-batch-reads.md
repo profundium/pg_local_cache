@@ -10,6 +10,8 @@ last_modified_at: '2026-09-22'
 topic: application
 ---
 
+> **2026-10-04 更新：** SQL `mget` 已在 3.0.0 中移除；现在由 RESP `MGET` 提供替代功能。
+
 # 批量读取需要结果约定 {#batch-reads-need-a-result-contract}
 
 用一次 `ANY` 查询替代逐个主键查询，可以减少往返，但也可能改变响应形状。调用者可能请求 `[42, 7, 42, NULL, -1]`，并期待五个结果位置。SQL 集合语义并不保证这种对齐。

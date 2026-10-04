@@ -6,9 +6,11 @@ title: "PostgreSQL cache invalidation: the late-fill race"
 description: Walk through a cache-aside race where an old read refills a deleted key after commit. Understand publication fencing, snapshots, rollback and request-local caches.
 permalink: /blog/cache-aside-late-fill/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: correctness
 ---
+
+> **2026-10-04 release note:** SQL `mget` was removed in 3.0.0; RESP `MGET` replaces it.
 
 # Cache invalidation and the late-fill race {#cache-invalidation-and-the-late-fill-race}
 
@@ -44,7 +46,7 @@ visibility information. A changed generation can reject an old fill. A read
 that cannot safely use an entry falls back to PostgreSQL.
 
 These checks are part of a specific PostgreSQL read path. They do not turn the
-optional RESP endpoint into a general-purpose Redis server, and they do not
+RESP endpoint into a general-purpose Redis server, and they do not
 invalidate values that an application has already copied elsewhere.
 
 ## Test both rollback and commit {#test-transactions}

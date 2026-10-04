@@ -22,30 +22,21 @@ Elle utilise `127.0.0.1:55432`, la base `pglc_demo` et les identifiants
 `demo` / `demo-only`. Définissez `PGLC_DEMO_PORT` si le démarrage rapide
 utilise un autre port.
 
-La démo envoie les clés comme paramètre de requête :
+La démo présente une requête SQL préparée ordinaire comme solution de repli :
 
 ```sql
-SELECT local_cache.mget('public.items'::regclass, $1::bigint[]);
+SELECT id::text AS key, row_to_json(items)::text AS row
+FROM public.items
+WHERE id = ANY($1::bigint[]);
 ```
 
-`mget` renvoie `text[]` ; chaque élément non nul est une ligne JSON. L'exemple
-demande `42, 7, 42, NULL, 999999` et affiche les lignes dans l'ordre d'entrée.
-Le doublon `42` reste aux deux positions ; l'entrée nulle et `999999` absent
-produisent des éléments nuls.
+L’exemple demande `42, 7, 42, NULL, 999999`, rétablit l’ordre d’entrée en Go et affiche null pour l’entrée nulle et la clé absente. Pour les lectures en cache, utilisez RESP `MGET` ; le point de terminaison utilise le rôle configuré pour les workers et ne fait pas partie de la transaction SQL de l’application.
 
 ## Comparer les lignes, pas seulement les allers-retours {#compare-rows-not-just-round-trips}
 
-Une requête ordinaire `WHERE id = ANY($1::bigint[])` ne conserve pas les
-positions demandées. Restaurez l'ordre d'entrée, les doublons et les lignes
-absentes avant de la comparer à `mget` ; le [guide des recherches par lots](batch-primary-key-lookups.md)
-montre les approches côté client et SQL.
+Une requête ordinaire `WHERE id = ANY($1::bigint[])` ne préserve pas les positions demandées. Rétablissez l’ordre, les doublons et les lignes absentes pour les résultats SQL classiques. Pour les lectures de lignes complètes en cache, utilisez RESP `MGET` ; le [guide des recherches par lots](batch-primary-key-lookups.md) compare les contrats.
 
-Le benchmark utilise des connexions persistantes et des instructions
-préparées. Préparer le SQL ne met pas ses lignes de résultat en cache :
-consultez le [guide de mise en cache PostgreSQL](postgresql-caching.md). Le
-[benchmark commun](BENCHMARKS.md#run-the-same-comparison-on-every-client) teste
-Go et Node.js avec les mêmes clés, tailles de lots, nombres de connexions et
-durée via SQL et RESP. RESP ne partage pas la transaction SQL de l'appelant.
+Le benchmark utilise des connexions persistantes et des instructions préparées. Préparer le SQL ne met pas en cache ses lignes de résultat : voir le [guide de cache PostgreSQL](postgresql-caching.md). Le [benchmark commun](BENCHMARKS.md#run-the-same-comparison-on-every-client) teste Go et Node.js avec les mêmes clés, tailles de lots, connexions et durées via SQL préparé et RESP `MGET`. RESP ne partage pas la transaction SQL de l’appelant.
 
 Consultez le [démarrage rapide](QUICKSTART.md) pour la configuration et les
 [vérifications transactionnelles](cache-invalidation.md) avant d'adapter le

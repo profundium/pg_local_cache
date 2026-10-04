@@ -2,9 +2,9 @@
 layout: doc
 lang: ru
 translation_key: node-postgres
-title: Пакетное чтение строк с node-postgres
+title: "Пакетное чтение строк с node-postgres"
 seo_title: "Пакетное чтение строк PostgreSQL с node-postgres"
-description: Используйте pg_local_cache 2.0 из Node.js с параметризованным массивом bigint и передачей JSON. Сохраняйте порядок и null, затем сравните результат с подготовленным запросом ANY.
+description: "Используйте аутентифицированный RESP MGET в Node.js для чтения строк из кэша, а node-postgres — для SQL-записи и обычных запросов."
 section: Node.js
 permalink: /ru/docs/node-postgres.html
 last_modified_at: "2026-09-16"
@@ -23,35 +23,29 @@ npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
 
-## Отправьте один параметризованный запрос {#send-one-parameterized-query}
+## Чтение через RESP {#send-one-parameterized-query}
 
-Для подключённого клиента или пула node-postgres:
+С подключённым RESP-клиентом из `@redis/client`:
 
 ```js
-const result = await client.query({
-  name: 'items-mget',
-  text: "SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows",
-  values: [[42, 7, 42, null, 999999]],
-});
-const rows = result.rows[0].rows.map(row =>
-  row === null ? null : JSON.parse(row)
+const ids = [42, 7, 42, null, 999999];
+const wireKeys = ids.filter(id => id !== null).map(id =>
+  `CRUD:app.public.items:${JSON.stringify({ id })}`
 );
+const values = await client.mGet(wireKeys);
+let position = 0;
+const rows = ids.map(id => {
+  if (id === null) return null;
+  const value = values[position++];
+  return value === null ? null : JSON.parse(value);
+});
 ```
 
-`mget` возвращает `text[]`. `array_to_json` отправляет внешний массив как JSON,
-поэтому node-postgres применяет декодер JSON. Каждый ненулевой элемент является
-сериализованной строкой и требует `JSON.parse`; позиции соответствуют входным,
-а отсутствующие ключи или null-вход дают `null`.
+RESP `MGET` возвращает строки в JSON-кодировке в порядке ключей. Помощник пропускает входные ключи null и восстанавливает их позиции; отсутствующие ключи возвращаются как null.
 
-Имя таблицы храните фиксированным в коде приложения. Передавайте ID как
-параметры запроса, а не собирайте SQL из строк. См. документацию node-postgres
-о [параметрах и именованных подготовленных операторах](https://node-postgres.com/features/queries).
+Имя таблицы должно быть фиксированным в коде приложения. Передавайте ID как параметры запроса и не собирайте SQL конкатенацией строк. См. документацию node-postgres о [параметрах и именованных подготовленных операторах](https://node-postgres.com/features/queries).
 
-Запускаемый помощник отклоняет пакеты более чем из 1 024 ключей и возвращает `[]`
-без запроса для пустого пакета. Он использует демонстрационные ID в безопасном
-целочисленном диапазоне. Поля PostgreSQL `bigint` и `numeric` в JSON могут выйти
-за пределы точного числового диапазона JavaScript; используйте JSON-парсер без
-потерь или явно определённый контракт сериализации таких значений.
+Команда RESP принимает не более 1 024 ключей. Исполняемый помощник возвращает `[]` без запроса, если все входные значения — null. Значения PostgreSQL `bigint` и числовые поля JSON могут превышать точный числовой диапазон JavaScript; используйте JSON-парсер без потерь или явный контракт сериализации.
 
 ## Сравните с существующим пакетным запросом {#compare-with-the-existing-batch-query}
 
@@ -80,13 +74,6 @@ WHERE id = ANY($1::bigint[]);
 
 ## Подготовленные операторы и кэширование результатов {#prepared-statements-and-result-caching}
 
-Именованный запрос node-postgres повторно использует подготовленный оператор на
-каждом соединении. Он не кэширует возвращённые строки. `local_cache.mget`
-добавляет отдельный общий кэш целых строк внутри PostgreSQL; клиент по-прежнему
-отправляет запрос и декодирует его результат. См. [руководство по выбору кэширования](postgresql-caching.md), где сравниваются эти уровни, и [руководство по пакетному чтению](batch-primary-key-lookups.md) с SQL-альтернативой, которая
-сохраняет запрошенные позиции.
+Именованный запрос node-postgres повторно использует подготовленный оператор в каждом соединении, но не кэширует возвращённые строки. RESP `MGET` использует общий кэш целых строк расширения, однако роль воркера и состояние сессии отделены от SQL-соединения приложения. См. [руководство по выбору кэша](postgresql-caching.md) и [руководство по пакетному чтению](batch-primary-key-lookups.md).
 
-Для RESP2 используйте [пример RESP для Node.js](resp.md#nodejs).
-[Записанные результаты Node.js](benchmarks-node.md) включают пакетное чтение и
-конкурентные обновления. [Общий бенчмарк](BENCHMARKS.md#run-the-same-comparison-on-every-client)
-прогоняет Node.js и Go через одинаковые сценарии SQL и RESP.
+Для RESP2 см. [пример RESP для Node.js](resp.md#nodejs). [Результаты Node.js](benchmarks-node.md) включают пакетные чтения и конкурентные обновления. [Общий бенчмарк](BENCHMARKS.md#run-the-same-comparison-on-every-client) запускает Node.js и Go в одинаковых сценариях подготовленного SQL и RESP.

@@ -15,21 +15,11 @@ Auf einem Apple M3 Max mit PostgreSQL 16 aufgezeichnet. Jeder Vergleich verwende
 denselben Client, Datensatz und dekodierte Zeilenergebnisse für gecachte und
 gewöhnliche SQL-Lesevorgänge.
 
+Die veröffentlichten SQL-mget-Ergebnisse sind historische Daten aus 2.x; SQL mget wurde in 3.0.0 entfernt. RESP MGET ist die unterstützte Schnittstelle für gecachte Lesevorgänge.
+
 ## Wo der Cache half – und wo nicht {#where-the-cache-helpedand-where-it-did-not}
 
-- **SQL mit einem Schlüssel:** Vorbereitetes SQL war in beiden veröffentlichten
-  Client-Setups schneller als SQL `mget`. Bei 256 Go-Verbindungen lieferte es
-  253,790 Anfragen/s gegenüber 186,296 für `mget`. Ein Zeilen-Cache verbesserte
-  diese SQL-Arbeitslast nicht.
-- **SQL-Batches mit 64 Schlüsseln:** Go lieferte bei 256 Verbindungen über
-  `mget` 43,647 Anfragen/s gegenüber 27,615 für vorbereitetes SQL, also etwa
-  den 1,58-fachen Durchsatz. Node.js zeigte bei 64 Verbindungen einen kleineren
-  Gewinn: 16,616 gegenüber 15,577. Batch-Größe und Client-Overhead sind wichtig;
-  prüfen Sie ebenfalls CPU und Latenz.
-- **RESP mit einem Schlüssel:** Go erreichte bei 256 Verbindungen 839,678
-  Anfragen/s gegenüber der SQL-Baseline von 253,790. RESP-Worker verwenden eine
-  konfigurierte Datenbankrolle und teilen weder die SQL-Transaktion noch den
-  Snapshot des Aufrufers.
+Node.js und Go dekodieren RESP-JSON-Zeilen; diese Client-Kosten sind in der Messzeit enthalten. Die historischen SQL-mget-Vergleiche bleiben als 2.x-Daten gekennzeichnet.
 
 Die [Node.js-Messungen](benchmarks-node.md) verwenden einen macOS-Client und
 einen Docker-Server; die [Go- und RESP-Messungen](benchmarks-go.md) führen beide
@@ -50,17 +40,7 @@ python3 scripts/benchmark_report.py comparison.json
 Der Runner baut einen verworfenen PostgreSQL-Server und führt diese gemeinsame
 Matrix aus:
 
-| Einstellung | Jeder Client und Lesepfad |
-|---|---|
-| Clients | Node.js mit node-postgres / node-redis; Go mit pgx / RESP2 aus der Standardbibliothek |
-| Lesepfade | Vorbereitetes SQL `ANY`, SQL `mget`, RESP `MGET` |
-| Schlüssel pro Anfrage | 1, 16, 64; dieselben festen Schlüssel ab 1 |
-| Verbindungen | 4, 64, 256; dauerhaft, eine offene Anfrage pro Verbindung |
-| Stichproben | Drei Wiederholungen von fünf Sekunden pro Fall; Reihenfolge rotiert |
-| Platzierung | Derselbe separate Linux-Client-Container im Netzwerk-Namespace von PostgreSQL |
-| Vor der Zeitmessung | Verbinden, dekodierte Zeilen vergleichen, dann jede Verbindung aufwärmen |
-| Ergebnisvertrag | Vollständige JSON-Zeilen, Eingabereihenfolge, Duplikate, NULL-Werte, fehlende Schlüssel, leere und vollständig NULL-Eingabe |
-| Messungen | Anfragen/s, Latenz-Perzentile, Client-CPU, Server-CPU/Speicher, Cache-Zähler |
+Node.js und Go dekodieren RESP-JSON-Zeilen; diese Client-Kosten sind in der Messzeit enthalten. Die historischen SQL-mget-Vergleiche bleiben als 2.x-Daten gekennzeichnet.
 
 Standardmäßig gibt es 162 Stichproben, etwa 14 Minuten Zeitmessung plus Setup.
 Das Skript entfernt seine Container nach Erfolg oder Fehler. Für einen kurzen
@@ -71,12 +51,7 @@ CONNECTIONS=4 BATCHES=1,16,64 REPEATS=1 DURATION_SECONDS=1 \
   ./examples/benchmark.sh all > smoke.json
 ```
 
-Verwenden Sie statt `all` `node` oder `go`, um einen Client mit denselben
-Standardeinstellungen auszuwählen. `CONNECTIONS`, `BATCHES`, `REPEATS`,
-`DURATION_SECONDS` und Gos `GOMAXPROCS` können überschrieben werden. Node.js
-verwendet einen Event-Loop-Thread; Go verwendet standardmäßig acht Threads.
-Nodes SQL-mget umschließt das zurückgegebene Array in JSON, während pgx das
-PostgreSQL-Text-Array dekodiert. Diese Client-Kosten bleiben in der Zeitmessung.
+Node.js und Go dekodieren RESP-JSON-Zeilen; diese Client-Kosten sind in der Messzeit enthalten. Die historischen SQL-mget-Vergleiche bleiben als 2.x-Daten gekennzeichnet.
 
 Identische Arbeitslasten machen die Protokolle nicht austauschbar: RESP-Worker
 verwenden ihre konfigurierte Datenbankrolle und treten weder der SQL-Transaktion

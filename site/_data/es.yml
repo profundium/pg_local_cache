@@ -31,8 +31,8 @@ topics:
   correctness: Corrección
   application: Diseño de aplicaciones
 read_diagram:
-  title: Recorrido de lectura de SQL mget
-  description: La aplicación llama a local_cache.mget dentro de PostgreSQL. Tras las comprobaciones de elegibilidad y de snapshot, un acierto de caché devuelve la carga útil almacenada de la fila completa. Un fallo o una omisión lee la tabla de origen. Ambos recorridos devuelven filas mediante la misma conexión de PostgreSQL.
+  title: El recorrido de lectura RESP MGET
+  description: La aplicación envía RESP MGET autenticado. Un acierto de caché elegible devuelve la fila completa almacenada. Un fallo o una omisión lee la tabla de origen con el rol de trabajador configurado y devuelve la fila por RESP.
   application: Aplicación
   checks: Elegibilidad + snapshot
   hit: Acierto
@@ -41,7 +41,7 @@ read_diagram:
   row: fila
   source: Origen
   table: tabla
-  caption: Ambos recorridos devuelven filas completas serializadas por la misma conexión de PostgreSQL. Una lectura elegible de la tabla de origen puede llenar la caché.
+  caption: Ambos recorridos devuelven filas completas por RESP. Una lectura de la tabla de origen puede llenar la caché.
 transaction_diagram:
   title: Lo que ven los lectores durante una actualización
   description: Con READ COMMITTED, empieza con la revisión cero. Una transacción la actualiza a uno. El escritor ve uno mediante una lectura de la tabla de origen, mientras otra sesión sigue viendo cero. Tras COMMIT, una nueva sentencia de la otra sesión ve uno. Tras ROLLBACK, sigue viendo cero.

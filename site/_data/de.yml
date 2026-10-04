@@ -31,8 +31,8 @@ topics:
   correctness: Korrektheit
   application: Anwendungsdesign
 read_diagram:
-  title: Lesepfad von SQL mget
-  description: Die Anwendung ruft local_cache.mget in PostgreSQL auf. Nach Eignungs- und Snapshot-Prüfungen gibt ein Cache-Treffer die gespeicherte vollständige Zeile zurück. Ein Fehltreffer oder Bypass liest die Quelltabelle. Beide Pfade geben Zeilen über dieselbe PostgreSQL-Verbindung zurück.
+  title: Der RESP-MGET-Lesepfad
+  description: Die Anwendung sendet authentifiziertes RESP MGET. Ein geeigneter Cache-Treffer gibt die gespeicherte vollständige Zeile zurück. Bei einem Fehltreffer oder Bypass liest die Quelltabelle die konfigurierte Worker-Rolle; die Zeile wird über RESP zurückgegeben.
   application: Anwendung
   checks: Eignung + Snapshot
   hit: Treffer
@@ -41,7 +41,7 @@ read_diagram:
   row: Zeile
   source: Quelle
   table: Tabelle
-  caption: Beide Pfade geben serialisierte vollständige Zeilen über dieselbe PostgreSQL-Verbindung zurück. Ein geeigneter Lesevorgang aus der Quelltabelle kann den Cache füllen.
+  caption: Beide Pfade geben vollständige Zeilen über RESP zurück. Ein Lesen aus der Quelltabelle kann den Cache füllen.
 transaction_diagram:
   title: Was Leser während einer Änderung sehen
   description: Unter READ COMMITTED starten wir mit Revision null. Eine Transaktion ändert sie auf eins. Der Schreiber sieht eins über einen Lesevorgang aus der Quelltabelle, während eine andere Sitzung weiterhin null sieht. Nach COMMIT sieht eine neue Anweisung in der anderen Sitzung eins. Nach ROLLBACK sieht sie weiterhin null.

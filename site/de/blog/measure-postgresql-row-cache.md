@@ -6,9 +6,11 @@ title: "Wann ein PostgreSQL-Zeilen-Cache hilft: den gesamten Lesepfad messen"
 description: Einen fairen Vergleich für PostgreSQL-Zeilen-Caching mit vorbereitetem SQL, SQL mget und RESP MGET entwerfen. Warme Lesevorgänge, Fehltreffer, Batch-Größen, Schreibvorgänge und Client-Kosten trennen.
 permalink: /de/blog/measure-postgresql-row-cache/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: performance
 ---
+
+> **Hinweis vom 04.10.2026:** SQL-`mget` wurde in 3.0.0 entfernt; RESP-`MGET` ersetzt es.
 
 # Wann ein PostgreSQL-Zeilen-Cache hilft {#when-a-postgresql-row-cache-helps}
 

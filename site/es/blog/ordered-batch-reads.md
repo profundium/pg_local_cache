@@ -10,6 +10,8 @@ last_modified_at: "2026-09-22"
 topic: application
 ---
 
+> **Nota del 2026-10-04:** SQL `mget` se eliminó en 3.0.0; RESP `MGET` lo sustituye.
+
 # Las lecturas por lotes necesitan un contrato de resultados {#batch-reads-need-a-result-contract}
 
 Sustituir un bucle de consultas por clave primaria por una consulta `ANY` elimina viajes de ida y vuelta. También puede cambiar la forma de la respuesta. Quien llama podría solicitar `[42, 7, 42, NULL, -1]` y esperar cinco posiciones de resultado. La semántica de conjuntos SQL no promete esa alineación.

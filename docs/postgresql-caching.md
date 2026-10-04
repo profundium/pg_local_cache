@@ -23,7 +23,7 @@ the complete path with the [benchmark guide](BENCHMARKS.md).
 |---|---|---|
 | Keep table and index pages hot | PostgreSQL `shared_buffers` and the OS cache | Fewer storage reads; SQL still runs |
 | Send the same statement many times | A prepared statement | Less repeated parse and plan work; execution still runs |
-| Return complete rows by primary key | `pg_local_cache` SQL `mget` | Reuses eligible whole-row payloads through an explicit API |
+| Return complete rows by primary key | `pg_local_cache` RESP `MGET` | Reuses eligible whole-row payloads over an authenticated endpoint |
 | Precompute a join or aggregate | A materialized view | Reads persisted results; refresh defines freshness |
 | Share application objects across services | An external cache such as Redis | Application-managed keys, TTLs, and invalidation |
 
@@ -42,11 +42,13 @@ shows the work that remains on each path.
 ### Whole rows by primary key {#whole-rows-by-primary-key}
 
 `pg_local_cache` stores serialized complete rows under complete primary keys in
-bounded PostgreSQL shared memory. It is reached through
-`local_cache.mget('public.items'::regclass, $1::bigint[])`; an ordinary
-`SELECT` never consults it. Eligible clean `READ COMMITTED` reads may hit, while
+bounded PostgreSQL shared memory. It is reached through authenticated RESP
+`MGET`; an ordinary `SELECT` never consults it. Eligible clean `READ COMMITTED`
+worker reads may hit, while
 stricter isolation modes, writes in the transaction, recovery, parallel
-execution, or oversized rows use PostgreSQL. Unsupported table mappings are
+execution, or oversized rows use PostgreSQL. RESP workers use the configured
+database role and do not share the caller's SQL transaction or snapshot.
+Unsupported table mappings are
 rejected during attachment. This is a
 specific read path, not an arbitrary query-result cache. See the
 [batch lookup guide](batch-primary-key-lookups.md), [technical contract](TECHNICAL.md),

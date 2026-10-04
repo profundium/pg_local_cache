@@ -6,9 +6,11 @@ title: "Quand un cache de lignes PostgreSQL aide : mesurer toute la lecture"
 description: Concevez une comparaison équitable d'un cache de lignes PostgreSQL avec SQL préparé, SQL mget et RESP MGET. Séparez lectures chaudes, misses, tailles de lots, écritures et coûts clients.
 permalink: /fr/blog/measure-postgresql-row-cache/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: performance
 ---
+
+> **Note du 04/10/2026 :** SQL `mget` a été supprimé en 3.0.0 ; RESP `MGET` le remplace.
 
 # Quand un cache de lignes PostgreSQL aide {#when-a-postgresql-row-cache-helps}
 

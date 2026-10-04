@@ -6,9 +6,11 @@ title: "Когда кэш строк PostgreSQL помогает: измеряй
 description: Спроектируйте честное сравнение кэша строк PostgreSQL с подготовленным SQL, SQL mget и RESP MGET. Разделите прогретые чтения, промахи, размеры пакетов, записи и затраты клиента.
 permalink: /ru/blog/measure-postgresql-row-cache/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: performance
 ---
+
+> **Примечание от 04.10.2026:** SQL `mget` удалён в 3.0.0; его заменяет RESP `MGET`.
 
 # Когда кэш строк PostgreSQL помогает {#when-a-postgresql-row-cache-helps}
 

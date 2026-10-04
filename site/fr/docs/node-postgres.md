@@ -2,9 +2,9 @@
 layout: doc
 lang: fr
 translation_key: node-postgres
-title: Recherches de lignes par lots avec node-postgres
+title: "Recherches de lignes par lots avec node-postgres"
 seo_title: "Recherches de lignes PostgreSQL par lots avec node-postgres"
-description: Utilisez pg_local_cache 2.0 depuis Node.js avec un tableau bigint paramétré et un transport JSON. Conservez l'ordre et les valeurs nulles, puis comparez avec une requête ANY préparée.
+description: "Utilisez RESP MGET authentifié depuis Node.js pour les lectures de lignes en cache, et node-postgres pour les écritures SQL et les requêtes ordinaires."
 section: Node.js
 permalink: /fr/docs/node-postgres.html
 last_modified_at: "2026-09-16"
@@ -23,36 +23,29 @@ npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
 
-## Envoyer une requête paramétrée {#send-one-parameterized-query}
+## Lire via RESP {#send-one-parameterized-query}
 
-Avec un client ou un pool node-postgres connecté :
+Avec un client RESP connecté de `@redis/client` :
 
 ```js
-const result = await client.query({
-  name: 'items-mget',
-  text: "SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows",
-  values: [[42, 7, 42, null, 999999]],
-});
-const rows = result.rows[0].rows.map(row =>
-  row === null ? null : JSON.parse(row)
+const ids = [42, 7, 42, null, 999999];
+const wireKeys = ids.filter(id => id !== null).map(id =>
+  `CRUD:app.public.items:${JSON.stringify({ id })}`
 );
+const values = await client.mGet(wireKeys);
+let position = 0;
+const rows = ids.map(id => {
+  if (id === null) return null;
+  const value = values[position++];
+  return value === null ? null : JSON.parse(value);
+});
 ```
 
-`mget` renvoie `text[]`. `array_to_json` envoie le tableau externe en JSON,
-donc node-postgres applique son décodeur JSON. Chaque élément non nul est une
-ligne sérialisée qui nécessite `JSON.parse` ; les positions correspondent aux
-positions d'entrée, et les clés absentes ou les entrées nulles produisent
-`null`.
+RESP `MGET` renvoie des lignes JSON dans l’ordre des clés. Le helper omet les clés d’entrée nulles et rétablit leurs positions ; les clés absentes renvoient null.
 
-Gardez le nom de table fixe dans le code applicatif. Passez les ID comme
-paramètres de requête, et non dans du SQL assemblé à partir de chaînes.
-Consultez la documentation node-postgres sur [les paramètres et les instructions préparées nommées](https://node-postgres.com/features/queries).
+Gardez le nom de table fixe dans le code applicatif. Passez les identifiants comme paramètres de requête ; ne construisez pas le SQL par concaténation de chaînes. Voir la documentation node-postgres sur les [paramètres et instructions préparées nommées](https://node-postgres.com/features/queries).
 
-Le helper exécutable rejette les lots de plus de 1 024 clés et renvoie `[]`
-sans requête pour un lot vide. Il utilise des ID de démo entiers sûrs. Les
-champs PostgreSQL `bigint` et `numeric` dans le JSON peuvent dépasser la plage
-numérique exacte de JavaScript ; utilisez un parseur JSON sans perte ou un
-contrat de sérialisation explicite pour ces valeurs.
+La commande RESP accepte au plus 1 024 clés. Le helper exécutable renvoie `[]` sans requête si toutes les entrées sont nulles. Les champs PostgreSQL `bigint` et les nombres JSON peuvent dépasser la précision exacte de JavaScript ; utilisez un parseur JSON sans perte ou un contrat de sérialisation explicite.
 
 ## Comparer avec la requête par lots existante {#compare-with-the-existing-batch-query}
 
@@ -81,14 +74,6 @@ d'écriture séparées ; consultez [l'invalidation du cache](cache-invalidation.
 
 ## Instructions préparées et cache des résultats {#prepared-statements-and-result-caching}
 
-Une requête node-postgres nommée réutilise une instruction préparée sur chaque
-connexion. Elle ne met pas en cache les lignes renvoyées. `local_cache.mget`
-ajoute un cache partagé séparé de lignes complètes dans PostgreSQL ; le client
-envoie toujours une requête et décode son résultat. Consultez le [guide de décision sur la mise en cache](postgresql-caching.md) pour comparer les
-couches et le [guide des recherches par lots](batch-primary-key-lookups.md)
-pour une alternative SQL uniquement qui conserve les positions demandées.
+Une requête node-postgres nommée réutilise une instruction préparée sur chaque connexion. Elle ne met pas en cache les lignes renvoyées. RESP `MGET` utilise le cache partagé de lignes complètes de l’extension, mais son rôle worker et son état de session sont séparés de la connexion SQL de l’application. Voir le [guide de décision sur le cache](postgresql-caching.md) et le [guide de recherches par lots](batch-primary-key-lookups.md).
 
-Pour RESP2, utilisez [l'exemple RESP Node.js](resp.md#nodejs).
-[Les résultats Node.js enregistrés](benchmarks-node.md) incluent des lectures
-par lots et des mises à jour concurrentes. Le [benchmark commun](BENCHMARKS.md#run-the-same-comparison-on-every-client)
-exécute Node.js et Go dans les mêmes scénarios SQL et RESP.
+Pour RESP2, utilisez l’[exemple RESP Node.js](resp.md#nodejs). Les [résultats Node.js enregistrés](benchmarks-node.md) incluent des lectures par lots et des mises à jour concurrentes. Le [benchmark commun](BENCHMARKS.md#run-the-same-comparison-on-every-client) exécute Node.js et Go avec les mêmes scénarios SQL préparé et RESP.

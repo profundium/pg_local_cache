@@ -74,20 +74,12 @@ make PG_CONFIG=/path/to/pg_config && \
 
 ## 3. Настройка <code>postgresql.conf</code> {#configure-before-restart}
 
-Сохраните существующие значения <code>shared_preload_libraries</code> и добавьте в список <code>pg_local_cache</code>. Замените <code>app</code> на имя базы данных, обслуживаемой расширением. Минимальная конфигурация SQL-only:
+Сохраните существующие значения `shared_preload_libraries` и добавьте
+`pg_local_cache`. Замените `app` на имя базы данных, обслуживаемой расширением.
 
-```conf
-shared_preload_libraries = 'pg_local_cache'
-pg_local_cache.database = 'app'
-pg_local_cache.role = 'local_cache_worker'
-pg_local_cache.cache_entries = 16384
-pg_local_cache.memory_budget_mb = 384
-pg_local_cache.port = 0
-```
+### Настройте RESP listener {#enable-optional-resp2}
 
-Для RESP2 оставьте прослушивание на loopback или за аутентифицированным TLS-прокси и используйте защищённый файл токена:
-
-### Настройки RESP2 {#enable-optional-resp2}
+Настройте listener RESP с выделенной ролью worker и защищённым файлом токена:
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
@@ -96,9 +88,18 @@ pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
 pg_local_cache.bind_address = '127.0.0.1'
 pg_local_cache.auth_token_file = '/secure/path/token'
+pg_local_cache.cache_entries = 16384
+pg_local_cache.memory_budget_mb = 384
 ```
 
-Рассчитывайте размер кэша, состояния связей, число рабочих процессов и клиентов, а также <code>memory_budget_mb</code> совместно. См. рекомендации по ёмкости и памяти в [технической справке](TECHNICAL.md#shared-memory-and-configuration).
+По умолчанию listener доступен только через loopback. Для удалённых клиентов
+используйте локальный прокси или sidecar либо явно разрешите незашифрованное
+соединение в доверенной сети с `pg_local_cache.allow_plaintext_network = on`;
+в 3.0.0 встроенного TLS нет.
+
+Совместно рассчитывайте размер кэша, состояния отношений, число workers и
+клиентов, а также `memory_budget_mb`. Рекомендации по ёмкости и памяти см. в
+[технической справке](TECHNICAL.md#shared-memory-and-configuration).
 
 ## 4. Перезапуск PostgreSQL
 
@@ -133,7 +134,7 @@ GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
 GRANT SELECT ON TABLE local_cache.mapping TO local_cache_worker;
 ```
 
-Роль worker нужна даже при <code>pg_local_cache.port = 0</code>. Не используйте роль — владельца таблиц приложения. Подключите каждую постоянную таблицу с поддерживаемым первичным ключом:
+Не используйте роль worker для владельцев таблиц приложения. Подключите каждую постоянную таблицу с поддерживаемым первичным ключом:
 
 ### Подключение таблицы {#attach-a-table}
 
@@ -151,7 +152,10 @@ SELECT local_cache.health();
 
 ## 6. Обновление {#recover-a-failed-binary-install}
 
-Установите новый пакет и перезапустите PostgreSQL через соответствующую службу или оператор. Затем обновите расширение от имени суперпользователя БД:
+При переходе с 2.x на 3.0 сначала следуйте [руководству по обновлению](UPGRADING.md).
+Замените в приложениях SQL `mget` на RESP `MGET`, установите пакет
+3.0.0 для нужной версии PostgreSQL, перезапустите PostgreSQL и обновите
+расширение в каждой базе данных, где оно установлено:
 
 ```sql
 ALTER EXTENSION pg_local_cache UPDATE;

@@ -4,16 +4,14 @@ lang: fr
 translation_key: TECHNICAL
 title: Référence technique de pg_local_cache
 seo_title: API SQL, cohérence, mémoire et RESP2 de pg_local_cache
-description: "Référence technique de pg_local_cache : mget SQL, invalidation tenant compte des transactions, mémoire partagée PostgreSQL bornée, supervision et RESP2 optionnel."
+description: "Référence technique de pg_local_cache : MGET via RESP, invalidation tenant compte des transactions, mémoire partagée PostgreSQL bornée et supervision."
 section: Technique
 permalink: /fr/docs/TECHNICAL.html
 ---
 
 # Référence technique de pg_local_cache {#pg_local_cache-technical-reference}
 
-`pg_local_cache` met en cache les lignes complètes par clé primaire complète
-dans la mémoire partagée bornée de PostgreSQL. Il expose une fonction SQL
-explicite `local_cache.mget` et un point de terminaison RESP2 optionnel.
+`pg_local_cache` met en cache les lignes complètes par clé primaire complète dans la mémoire partagée bornée de PostgreSQL. Son point de terminaison RESP2 expose `MGET`, `SET` et `DEL`.
 
 > **Le SQL ordinaire reste ordinaire :** l'extension n'installe aucun hook du
 > planificateur ou de l'exécuteur. Un `SELECT` normal utilise toujours
@@ -49,62 +47,26 @@ Exécutez `local_cache.reconcile_table(...)` ou
 `local_cache.reconcile_all()` après des changements de schéma intentionnels.
 `local_cache.detach_table(...)` supprime le mapping et ses triggers.
 
-## API SQL mget {#sql-mget-api}
-
-Signature :
-
-```sql
-local_cache.mget(relation regclass, key_values anyarray) RETURNS text[]
-```
-
-Les clés à une colonne utilisent leur type de tableau natif. Les clés
-composites utilisent `text[][]` rectangulaire, avec une clé par ligne et un
-composant par colonne de clé primaire.
-
-Contrat :
-
-- au maximum 1 024 clés par appel ;
-- l'ordre d'entrée et les doublons sont conservés ;
-- l'entrée `NULL` et les lignes absentes produisent des résultats `NULL` alignés ;
-- les composants d'une clé composite ne peuvent pas être `NULL` ;
-- chaque composant est analysé par la fonction d'entrée de son type PostgreSQL ;
-- le lot composite complet est validé avant la première recherche ;
-- les appelants doivent avoir `SELECT` sur la table source ;
-- la fonction est `SECURITY INVOKER`.
-
-Une requête source préparée est mise en cache par instance de fonction,
-utilisateur, relation et génération du mapping.
-
 ## Chemin de lecture et repli sûr {#read-path-and-safe-fallback}
 
-Chaque clé demandée suit le même chemin :
-
-1. canoniser la clé primaire complète ;
-2. utiliser le cache partagé uniquement dans une transaction `READ COMMITTED` propre sur le primaire inscriptible ;
-3. valider la somme de contrôle de la charge utile, le descripteur de ligne, le `xmin` source et la visibilité du snapshot ;
-4. sinon exécuter la requête indexée de la table source via SPI ;
-5. publier une entrée positive ou négative uniquement après la preuve d'un snapshot récent.
-
-`REPEATABLE READ`, `SERIALIZABLE`, la récupération, l'exécution parallèle et une
-transaction ayant écrit des données mappées contournent le cache. Les lignes
-plus grandes que la limite de charge utile du cache sont tout de même renvoyées
-par PostgreSQL mais ne sont pas mises en cache.
+Lorsque le cache est activé, chaque clé RESP `MGET` consulte d'abord le cache
+partagé. Chaque échec entraîne la lecture de la ligne source dans sa propre
+transaction courte. PostgreSQL renvoie toujours les lignes qui dépassent la limite
+de charge utile du cache, mais elles ne sont pas mises en cache.
 
 ## Cohérence transactionnelle {#transaction-consistency}
 
-Avant qu'une écriture mappée puisse être validée, les triggers mettent en place une barrière pour la
-clé ou la relation concernée. Un remplissage porte les générations du mapping,
-globale, de la relation, de la clé et du loader ; un loader obsolète ne peut
-donc pas publier après une invalidation ou une éviction.
+Les triggers d'écriture sur les tables mappées publient, dans chaque session
+PostgreSQL avant la visibilité du commit, des barrières dirty-writer par clé ou
+relation et font avancer les générations. Les lectures contournent les entrées
+protégées jusqu'à la fin de l'écriture ; les contrôles de génération empêchent la
+publication de lectures en cours devenues obsolètes. Un hit périmé ne peut donc
+pas suivre une écriture validée.
 
-Les entrées positives enregistrent le `xmin` du tuple source et un horizon
-d'observation FullXID. Les entrées inéligibles pour le snapshot utilisent
-PostgreSQL. Les entrées négatives ne sont jamais une autorité pour un snapshot
-actif plus ancien.
-
-Le rollback supprime l'état transactionnel local sans publier de nouvelles
-données. La lecture de ses propres écritures vient donc de PostgreSQL, et non
-du contenu spéculatif du cache.
+Les lectures RESP utilisent `pg_local_cache.role`, et non le rôle PostgreSQL du
+client, dans des transactions courtes indépendantes. Elles ne voient pas les
+modifications non validées du client, ne partagent pas son snapshot et ne font
+pas partie de sa transaction. `pg_local_cache.enabled = off` contourne le cache.
 
 ## Mémoire partagée et configuration {#shared-memory-and-configuration}
 
@@ -120,7 +82,7 @@ source au lieu d'allouer une mémoire illimitée.
 | `pg_local_cache.cache_entries` | `16384` | capacité de lignes partagée |
 | `pg_local_cache.relation_states` | `1024` | capacité d'état de mapping partagé |
 | `pg_local_cache.memory_budget_mb` | `384` | budget de démarrage de l'extension |
-| `pg_local_cache.port` | `6380` | port RESP ; `0` désactive RESP |
+| `pg_local_cache.port` | `6380` | port RESP ; `0` réservé aux tests de régression et au diagnostic, aucune lecture servie |
 | `pg_local_cache.bind_address` | `127.0.0.1` | adresse d'écoute RESP |
 | `pg_local_cache.workers` | `4` | workers RESP |
 | `pg_local_cache.role` | `local_cache_worker` | rôle PostgreSQL RESP |
@@ -134,13 +96,15 @@ source au lieu d'allouer une mémoire illimitée.
 | `pg_local_cache.max_dirty_keys` | `4096` | nombre maximal de clés protégées par transaction |
 | `pg_local_cache.auth_token_file` | vide | identifiant RESP recommandé |
 | `pg_local_cache.auth_token` | vide | token inline réservé au développement |
+| `pg_local_cache.enabled` | `on` | interrupteur d’urgence SIGHUP du cache ; sur `off`, RESP lit directement dans la table source |
+| `pg_local_cache.allow_plaintext_network` | `off` | option postmaster pour les listeners en clair hors du loopback IPv4 |
 | `pg_local_cache.allow_superuser` | `off` | dérogation de rôle réservée au développement |
 
 Ce sont des paramètres du postmaster. Dimensionnez-les avant le redémarrage.
 Consultez le [guide d'installation](INSTALL_EXISTING.md) pour installer le paquet
 et suivre les étapes de redémarrage.
 
-## Point de terminaison RESP2 optionnel {#optional-resp2-endpoint}
+## Point de terminaison RESP2 {#optional-resp2-endpoint}
 
 RESP2 utilise les mêmes mappings et le même cache partagé. Les clés filaires
 ont cette forme :
@@ -154,9 +118,21 @@ ciblée, toutes authentifiées et bornées. Les workers RESP utilisent un rôle
 PostgreSQL configuré unique ; ils n'héritent pas des ACL de base de données de
 chaque client réseau.
 
-Le point de terminaison n'a pas de TLS. Liez-le à loopback ou placez-le
-derrière un proxy TLS authentifié. Préférez un fichier de token dont les droits
-sont restreints à un token inline.
+Le point de terminaison ne prend pas en charge TLS. `pg_local_cache.allow_plaintext_network` est désactivé par défaut. Pour une écoute en clair hors de loopback, activez-le explicitement ; le conteneur de démonstration doit aussi l’activer explicitement pour son écoute en clair. Liez le point de terminaison à loopback ou placez-le derrière un proxy TLS authentifié. Préférez un fichier de jeton aux droits restreints à un jeton intégré.
+
+Le paramètre opérationnel `pg_local_cache.enabled` est un paramètre SIGHUP qui sert d’interrupteur d’arrêt d’urgence. Pour désactiver le service de cache :
+
+```sql
+ALTER SYSTEM SET pg_local_cache.enabled = off;
+SELECT pg_reload_conf();
+```
+
+Chaque worker RESP applique le rechargement de manière asynchrone à sa prochaine limite entre commandes, une fois terminée toute commande en cours. Le champ `cache_enabled` de `local_cache.health()` indique la valeur vue par la session SQL qui appelle la fonction ; il ne confirme pas que tous les workers l'ont appliquée. Pour le réactiver, exécutez aussi :
+
+```sql
+ALTER SYSTEM SET pg_local_cache.enabled = on;
+SELECT pg_reload_conf();
+```
 
 ## Santé et supervision {#health-and-monitoring}
 
@@ -164,12 +140,13 @@ sont restreints à un token inline.
 `local_cache.stats()` renvoie des compteurs JSON. `local_cache.metrics()` expose
 la ligne de métriques typées utilisée par l'exporteur.
 
-Les compteurs du cache SQL décrivent uniquement les appels explicites à `mget` :
+Les compteurs RESP de `stats()` et `metrics()` comprennent :
 
-- `sql_cache_hits`
-- `sql_cache_misses`
-- `sql_cache_fills`
-- `sql_cache_bypasses`
+- `sql_gets`
+- `sql_meta`
+- `sql_sets`
+- `sql_dels`
+- `sql_result_reuses`
 
 Les lectures de base de données, invalidations, rejets d'admission, replis dus
 aux clés modifiées, singleflight, workers et compteurs RESP restent séparés.

@@ -16,6 +16,9 @@ services:
       - -c
       - pg_local_cache.bind_address=0.0.0.0
       - -c
+      # This demo binds only inside the container network; keep the host port loopback-only above.
+      - pg_local_cache.allow_plaintext_network=on
+      - -c
       - pg_local_cache.port=6380
       - -c
       - pg_local_cache.workers=${PGLC_DEMO_RESP_WORKERS:-8}
