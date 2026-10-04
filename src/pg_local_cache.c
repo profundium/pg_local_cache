@@ -1001,7 +1001,7 @@ evict_cache_entries(void)
 
 	entry = NULL;
 	for (i = 0; i < candidate_count &&
-		 i < PGLC_EVICTION_BATCH - victim_count; i++)
+		 victim_count < PGLC_EVICTION_BATCH; i++)
 		victims[victim_count++] = candidates[i];
 
 	for (i = 0; i < victim_count; i++)

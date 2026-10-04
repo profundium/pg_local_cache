@@ -106,7 +106,7 @@ def main() -> None:
     try:
         sql(
             f"CREATE TABLE public.{table} (id bigint PRIMARY KEY, value text NOT NULL);"
-            f"INSERT INTO public.{table} SELECT id, 'value-' || id::text "
+            f"INSERT INTO public.{table} SELECT id, repeat('x', 1024) "
             f"FROM generate_series(1, {row_count}) AS rows(id);"
             f"{role_grants}"
         )
@@ -184,10 +184,10 @@ def main() -> None:
                 for future in futures:
                     future.result(timeout=10)
                 after_misses = read_stats(monitor)["cache_misses"]
-                assert after_misses - before_misses > MIN_CACHE_MISSES
+                assert after_misses - before_misses >= MIN_CACHE_MISSES
 
-                # Observed leak is ~2 KiB/miss: 100k misses imply ~195 MiB total,
-                # or ~49 MiB/worker across four evenly loaded workers.
+                # Each miss copies a 1 KiB value; 100k misses provide enough
+                # allocation pressure to expose growth beyond the 32 MiB limit.
                 after_rss = {pid: rss_anon_bytes(pid) for pid in pids}
                 growth = {
                     pid: after_rss[pid] - before_rss[pid]
