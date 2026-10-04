@@ -17,6 +17,8 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ### Changed
 
+- RESP row-cache payloads now store validated JSON only, with descriptor identity
+  and CRC32C; rows above the payload limit are returned uncached.
 - RESP `MGET` deduplicates cache misses, reads them in one snapshot, and defers
   single-flight waits until it holds no load claims.
 - Evictions no longer rehash the relation key for every sampled candidate,

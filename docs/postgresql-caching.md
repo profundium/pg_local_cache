@@ -23,7 +23,7 @@ the complete path with the [benchmark guide](BENCHMARKS.md).
 |---|---|---|
 | Keep table and index pages hot | PostgreSQL `shared_buffers` and the OS cache | Fewer storage reads; SQL still runs |
 | Send the same statement many times | A prepared statement | Less repeated parse and plan work; execution still runs |
-| Return complete rows by primary key | `pg_local_cache` RESP `MGET` | Reuses eligible whole-row payloads over an authenticated endpoint |
+| Return complete rows by primary key | `pg_local_cache` RESP `MGET` | Reuses eligible whole-row JSON over an authenticated endpoint |
 | Precompute a join or aggregate | A materialized view | Reads persisted results; refresh defines freshness |
 | Share application objects across services | An external cache such as Redis | Application-managed keys, TTLs, and invalidation |
 

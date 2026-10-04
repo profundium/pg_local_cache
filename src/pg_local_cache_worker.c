@@ -156,7 +156,6 @@ static bool row_json_validate(PgLocalCacheMapping *mapping, Jsonb *row,
 							  Datum *key_values, char **error);
 static bool cached_row_json(PgLocalCacheMapping *mapping,
 							const char *payload, Size payload_length,
-							MemoryContext result_context,
 							char **json, Size *json_length);
 static void ensure_mapping_current(const PgLocalCacheMapping *mapping);
 static char *command_mget_one(PgLocalCacheMapping *mapping,
@@ -2234,16 +2233,16 @@ row_json_validate(PgLocalCacheMapping *mapping, Jsonb *row,
 static bool
 cached_row_json(PgLocalCacheMapping *mapping,
 				const char *payload, Size payload_length,
-				MemoryContext result_context, char **json, Size *json_length)
+				char **json, Size *json_length)
 {
-	PgLocalCacheRowPayloadView view;
 	const char *cached_json;
 
-	if (!pglc_row_payload_decode(payload, payload_length, mapping->row_desc,
-								 mapping->row_descriptor_fingerprint,
-								 result_context, &view))
-		return false;
-	if (!pglc_row_payload_get_json(&view, &cached_json, json_length))
+	if (!pglc_row_payload_get_json_checked(payload, payload_length,
+										mapping->row_desc->tdtypeid,
+										mapping->row_desc->tdtypmod,
+										mapping->row_desc->natts,
+										mapping->row_descriptor_fingerprint,
+										&cached_json, json_length))
 		return false;
 	*json = (char *) cached_json;
 	return true;
@@ -2448,7 +2447,7 @@ mget_quiet_lookup(PgLocalCacheMgetItem *item, bool count_lookup)
 			return true;
 		}
 		if (cached_row_json(item->mapping, cached_value, cached_length,
-							CurrentMemoryContext, &item->json,
+							&item->json,
 							&item->json_length))
 		{
 			if (count_lookup)
@@ -2559,30 +2558,20 @@ mget_read_one(PgLocalCacheMgetItem *item, MemoryContext result_context)
 		row_slot = MakeSingleTupleTableSlot(item->mapping->row_desc,
 											&TTSOpsVirtual);
 		ExecStoreHeapTupleDatum(row_value, row_slot);
-		database_payload_cacheable = pglc_row_payload_encode(
-			row_slot, item->mapping->row_desc, PGLC_ROW_PAYLOAD_FLAG_HAS_JSON,
-			cached_value, sizeof(cached_value), &database_payload_length);
-		if (!database_payload_cacheable)
-		{
-			/* Keep a SQL-usable tuple even when tuple+JSON cannot fit. */
-			database_payload_cacheable = pglc_row_payload_encode(
-				row_slot, item->mapping->row_desc, 0, cached_value,
-				sizeof(cached_value), &database_payload_length);
-		}
-		if (database_payload_cacheable &&
-			cached_row_json(item->mapping, cached_value,
-							database_payload_length, result_context,
-							&rendered_json, &rendered_json_length))
-		{
-			/* JSON and payload both outlive the SPI context. */
-		}
-		else if (!source_row_json(row_slot, item->mapping->row_desc,
-								 row_value, result_context,
-								 &rendered_json, &rendered_json_length))
+		if (!source_row_json(row_slot, item->mapping->row_desc,
+							 row_value, result_context,
+							 &rendered_json, &rendered_json_length))
 			ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 					 errmsg("row JSON exceeds the RESP limit of %d bytes",
 							PGLC_RESPONSE_VALUE_MAX)));
+		database_payload_cacheable = pglc_row_payload_encode(
+			item->mapping->row_desc->tdtypeid,
+			item->mapping->row_desc->tdtypmod,
+			(uint32) item->mapping->row_desc->natts,
+			item->mapping->row_descriptor_fingerprint,
+			rendered_json, rendered_json_length,
+			cached_value, sizeof(cached_value), &database_payload_length);
 		ExecDropSingleTupleTableSlot(row_slot);
 		if (database_payload_cacheable)
 		{
@@ -2654,7 +2643,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 				Size		json_length;
 
 				if (cached_row_json(mapping, cached_value, cached_length,
-									result_context, &json, &json_length))
+									&json, &json_length))
 				{
 					note_resp_cache_lookup(true, false);
 					return pglc_resp_bulk(json, json_length, response_length);
@@ -2708,7 +2697,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 					Size		json_length;
 
 					if (cached_row_json(mapping, cached_value, cached_length,
-										result_context, &json, &json_length))
+										&json, &json_length))
 					{
 						pglc_note_singleflight_reuse();
 						return pglc_resp_bulk(json, json_length,
@@ -2780,33 +2769,21 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 				row_slot = MakeSingleTupleTableSlot(mapping->row_desc,
 												&TTSOpsVirtual);
 				ExecStoreHeapTupleDatum(row_value, row_slot);
-				database_payload_cacheable = pglc_row_payload_encode(
-					row_slot, mapping->row_desc,
-					PGLC_ROW_PAYLOAD_FLAG_HAS_JSON,
-					cached_value, sizeof(cached_value),
-					&database_payload_length);
-				if (!database_payload_cacheable)
-				{
-					/* Keep a SQL-usable tuple even when tuple+JSON cannot fit. */
-					database_payload_cacheable = pglc_row_payload_encode(
-						row_slot, mapping->row_desc, 0,
-						cached_value, sizeof(cached_value),
-						&database_payload_length);
-				}
-				if (database_payload_cacheable &&
-					cached_row_json(mapping, cached_value,
-								database_payload_length, result_context,
-								&rendered_json, &rendered_json_length))
-				{
-					/* The encoded JSON is safe to copy out of the SPI context. */
-				}
-				else if (!source_row_json(row_slot, mapping->row_desc,
+				if (!source_row_json(row_slot, mapping->row_desc,
 								  row_value, result_context,
 								  &rendered_json, &rendered_json_length))
 					ereport(ERROR,
-								(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-								 errmsg("row JSON exceeds the RESP limit of %d bytes",
-										PGLC_RESPONSE_VALUE_MAX)));
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("row JSON exceeds the RESP limit of %d bytes",
+									PGLC_RESPONSE_VALUE_MAX)));
+				database_payload_cacheable = pglc_row_payload_encode(
+					mapping->row_desc->tdtypeid,
+					mapping->row_desc->tdtypmod,
+					(uint32) mapping->row_desc->natts,
+					mapping->row_descriptor_fingerprint,
+					rendered_json, rendered_json_length,
+					cached_value, sizeof(cached_value),
+					&database_payload_length);
 				ExecDropSingleTupleTableSlot(row_slot);
 				database_value_length = rendered_json_length;
 				database_value = MemoryContextAlloc(
