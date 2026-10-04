@@ -14,7 +14,7 @@
 
 #include "resp_limits.h"
 
-#define PGLC_VERSION "3.0.1"
+#define PGLC_VERSION "3.1.0"
 #define PGLC_VERSION_LENGTH "5"
 #ifndef PGLC_BUILD_ID
 #error "PGLC_BUILD_ID must be supplied by the build"
@@ -47,10 +47,12 @@ typedef struct PgLocalCacheCacheEntry
 	Oid			relation_oid;
 	uint64		global_epoch;
 	uint64		relation_version;
+	uint64		relation_incarnation;
 	uint64		version;
 	uint64		load_id;
 	uint64		load_global_version;
 	uint64		load_relation_version;
+	uint64		load_relation_incarnation;
 	uint64		load_key_version;
 	TimestampTz load_started;
 	pg_atomic_uint64 last_access;
@@ -75,8 +77,10 @@ typedef struct PgLocalCacheRelationState
 {
 	PgLocalCacheRelationKey key;
 	Oid			relation_oid;
+	uint64		relation_incarnation;
 	uint64		version;
 	uint32		dirty_writers;
+	uint64		identity_pins;
 	bool		pending_forget;
 } PgLocalCacheRelationState;
 
@@ -85,6 +89,8 @@ typedef struct PgLocalCacheSharedState
 	LWLock	   *lock;
 	pg_atomic_uint64 clock;
 	pg_atomic_uint64 entry_generation;
+	/* Last relation incarnation issued; mutated only under lock. */
+	uint64		relation_incarnation_counter;
 	uint64		global_version;
 	uint64		global_epoch;
 	uint32		global_dirty_writers;
@@ -142,6 +148,7 @@ typedef struct PgLocalCacheReadToken
 	uint64		config_generation;
 	uint64		global_version;
 	uint64		relation_version;
+	uint64		relation_incarnation;
 	uint64		key_version;
 	uint64		source_observed_full_xid;
 	bool		cacheable;

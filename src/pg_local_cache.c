@@ -67,6 +67,11 @@ HTAB	   *pglc_relation_hash = NULL;
 
 static char *pglc_binary_version = NULL;
 static char *pglc_binary_build_id = NULL;
+#ifdef PGLC_TEST_HOOKS
+static char *pglc_test_pause_point = NULL;
+static int pglc_test_barrier_relation_oid = 0;
+static bool pglc_test_abort_after_reservation = false;
+#endif
 
 static const struct config_enum_entry pglc_tls_protocol_options[] =
 {
@@ -102,6 +107,9 @@ typedef struct PgLocalCacheLocalDirtyEntry
 	PgLocalCacheLocalDirtyKey key;
 	Oid			relation_oid;
 	bool		shared_marker_reserved;
+	bool		shared_relation_fallback;
+	uint64		shared_relation_incarnation;
+	uint64		target_relation_incarnation;
 } PgLocalCacheLocalDirtyEntry;
 
 static HTAB *local_dirty_hash = NULL;
@@ -120,6 +128,14 @@ PG_FUNCTION_INFO_V1(pg_local_cache_invalidate);
 PG_FUNCTION_INFO_V1(pg_local_cache_stats);
 PG_FUNCTION_INFO_V1(pg_local_cache_metrics_json);
 PG_FUNCTION_INFO_V1(pg_local_cache_forget);
+#ifdef PGLC_TEST_HOOKS
+PG_FUNCTION_INFO_V1(pg_local_cache_test_collect_key);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_relation_incarnation);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_relation_identity_pins);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_recreate_relation_state);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_collect_global);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_abort_after_reservation);
+#endif
 
 static void pglc_shmem_request(void);
 static void pglc_shmem_startup(void);
@@ -478,12 +494,56 @@ pglc_define_gucs(void)
 							 NULL,
 							 NULL);
 
+#ifdef PGLC_TEST_HOOKS
+	DefineCustomStringVariable("pg_local_cache.test_pause_point",
+							   "Test-only RESP worker relation-lock barrier point.",
+							   NULL,
+							   &pglc_test_pause_point,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_SUPERUSER_ONLY,
+							   NULL,
+							   NULL,
+							   NULL);
+
+	DefineCustomIntVariable("pg_local_cache.test_barrier_relation",
+							"Test-only relation OID used by RESP worker barriers.",
+							NULL,
+							&pglc_test_barrier_relation_oid,
+							0,
+							0,
+							INT_MAX,
+							PGC_SIGHUP,
+							GUC_SUPERUSER_ONLY,
+							NULL,
+							NULL,
+							NULL);
+#endif
+
 #if PG_VERSION_NUM >= 150000
 	MarkGUCPrefixReserved("pg_local_cache");
 #else
 	EmitWarningsOnPlaceholders("pg_local_cache");
 #endif
 }
+
+#ifdef PGLC_TEST_HOOKS
+static void
+pglc_test_pause_at(const char *point)
+{
+	LOCKTAG		tag;
+
+	if (pglc_test_pause_point == NULL ||
+		strcmp(pglc_test_pause_point, point) != 0 ||
+		pglc_test_barrier_relation_oid <= 0)
+		return;
+
+	SET_LOCKTAG_RELATION(tag, MyDatabaseId,
+						 (Oid) pglc_test_barrier_relation_oid);
+	(void) LockAcquire(&tag, AccessShareLock, true, false);
+	LockRelease(&tag, AccessShareLock, true);
+}
+#endif
 
 void
 _PG_init(void)
@@ -770,6 +830,18 @@ make_relation_key(PgLocalCacheRelationKey *result, Oid database_oid,
 	strlcpy(result->nspace, nspace, sizeof(result->nspace));
 }
 
+/* Called under the cache LWLock.  Zero is reserved for missing identity. */
+static bool
+next_relation_incarnation_locked(uint64 *incarnation)
+{
+	if (pglc_shared->relation_incarnation_counter == (uint64) -1)
+		return false;
+
+	pglc_shared->relation_incarnation_counter++;
+	*incarnation = pglc_shared->relation_incarnation_counter;
+	return *incarnation != 0;
+}
+
 static PgLocalCacheRelationState *
 get_relation_state(Oid database_oid, Oid relation_oid,
 				   const char *nspace, bool create)
@@ -781,6 +853,15 @@ get_relation_state(Oid database_oid, Oid relation_oid,
 	make_relation_key(&key, database_oid, nspace);
 	state = hash_search(pglc_relation_hash, &key, HASH_FIND, NULL);
 	found = state != NULL;
+	if (state != NULL && create && state->pending_forget)
+	{
+		/* A forgotten identity stays reserved until every publisher releases it. */
+		if (state->identity_pins != 0 || state->dirty_writers != 0)
+			return NULL;
+		(void) hash_search(pglc_relation_hash, &key, HASH_REMOVE, NULL);
+		state = NULL;
+		found = false;
+	}
 	if (state == NULL && create)
 	{
 		/*
@@ -804,28 +885,33 @@ get_relation_state(Oid database_oid, Oid relation_oid,
 	if (state != NULL && !found)
 	{
 		PgLocalCacheRelationKey saved_key = state->key;
+		uint64		incarnation;
+
+		if (!next_relation_incarnation_locked(&incarnation))
+		{
+			(void) hash_search(pglc_relation_hash, &key, HASH_REMOVE, NULL);
+			return NULL;
+		}
 
 		memset(state, 0, sizeof(*state));
 		state->key = saved_key;
 		state->relation_oid = relation_oid;
-		/*
-		 * Seed recycled namespace state from the monotonically increasing
-		 * transaction generation.  Otherwise removing and later recreating a
-		 * namespace could make an old cache entry with relation_version == 0
-		 * current again.
-		 */
-		state->version = pglc_shared->global_version;
+		state->relation_incarnation = incarnation;
 	}
 	else if (state != NULL && create && OidIsValid(relation_oid) &&
 			 state->relation_oid != relation_oid)
 	{
-		/*
-		 * A namespace can be remapped while an older worker still holds its
-		 * previous mapping.  Never silently retag version state: force every
-		 * entry for either relation to miss.
-		 */
-		state->version++;
+		uint64		incarnation;
+
+		/* Published handles own this identity until their finish callback. */
+		if (state->identity_pins != 0 || state->dirty_writers != 0 ||
+			!next_relation_incarnation_locked(&incarnation))
+			return NULL;
+
 		state->relation_oid = relation_oid;
+		state->relation_incarnation = incarnation;
+		state->version = 0;
+		state->pending_forget = false;
 	}
 	return state;
 }
@@ -838,6 +924,8 @@ cache_entry_is_current_locked(PgLocalCacheCacheEntry *entry,
 			relation_state != NULL &&
 			entry->relation_oid == relation_state->relation_oid &&
 			entry->global_epoch == pglc_shared->global_epoch &&
+			entry->relation_incarnation ==
+			relation_state->relation_incarnation &&
 			entry->relation_version == relation_state->version;
 }
 
@@ -1056,6 +1144,10 @@ get_cache_entry(Oid database_oid, Oid relation_oid,
 	else if (entry != NULL && create && OidIsValid(relation_oid) &&
 			 entry->relation_oid != relation_oid)
 	{
+		/* A published keyed handle keeps its placeholder identity pinned. */
+		if (entry->dirty_writers != 0)
+			return NULL;
+
 		/*
 		 * Retagging a valid entry would let a value read from the old
 		 * relation become a hit for the new relation.
@@ -1064,6 +1156,8 @@ get_cache_entry(Oid database_oid, Oid relation_oid,
 		entry->version = next_entry_generation();
 		entry->loading = false;
 		entry->load_id++;
+		entry->relation_incarnation = 0;
+		entry->load_relation_incarnation = 0;
 		entry->relation_oid = relation_oid;
 	}
 	return entry;
@@ -1118,7 +1212,8 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
 										mapping->nspace, create);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
-							mapping->nspace, canonical_key, create);
+							mapping->nspace, canonical_key,
+							create && relation_state != NULL);
 	mapping_matches = relation_state != NULL && entry != NULL &&
 		relation_state->relation_oid == mapping->relation_oid &&
 		entry->relation_oid == mapping->relation_oid;
@@ -1130,6 +1225,8 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 	token->config_generation = mapping->config_generation;
 	token->global_version = pglc_shared->global_version;
 	token->relation_version = relation_state ? relation_state->version : 0;
+	token->relation_incarnation = relation_state ?
+		relation_state->relation_incarnation : 0;
 	token->key_version = entry ? entry->version : 0;
 	token->source_observed_full_xid =
 		entry ? entry->source_observed_full_xid : 0;
@@ -1137,6 +1234,7 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 	token->cacheable = mapping_matches && mapping_current &&
 		pglc_shared->global_dirty_writers == 0 &&
 		relation_state->dirty_writers == 0 &&
+		!relation_state->pending_forget &&
 		entry->dirty_writers == 0;
 
 	if (token->cacheable &&
@@ -1206,6 +1304,11 @@ pglc_cache_lookup_internal(const PgLocalCacheMapping *mapping,
 		LWLockRelease(pglc_shared->lock);
 	}
 
+#ifdef PGLC_TEST_HOOKS
+	if (token->cacheable)
+		pglc_test_pause_at("after_token");
+#endif
+
 	if (count_stats && hit)
 	{
 		pg_atomic_fetch_add_u64(&pglc_shared->cache_hits, 1);
@@ -1269,6 +1372,8 @@ pglc_cache_retire_positive(const PgLocalCacheMapping *mapping,
 		relation_state->dirty_writers == 0 && entry->dirty_writers == 0 &&
 		pglc_shared->global_version == token->global_version &&
 		relation_state->version == token->relation_version &&
+		relation_state->relation_incarnation ==
+		token->relation_incarnation &&
 		entry->version == token->key_version &&
 		cache_entry_is_current_locked(entry, relation_state) &&
 		!entry->negative &&
@@ -1314,6 +1419,10 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 	observed_full_xid =
 		U64FromFullTransactionId(ReadNextFullTransactionId());
 
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("before_store");
+#endif
+
 	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
 	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
 										mapping->nspace, false);
@@ -1331,6 +1440,9 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 		load_id != 0 && entry->loading && entry->load_id == load_id &&
 		pglc_shared->global_version == token->global_version &&
 		relation_state->version == token->relation_version &&
+		relation_state->relation_incarnation ==
+		token->relation_incarnation &&
+		entry->load_relation_incarnation == token->relation_incarnation &&
 		entry->version == token->key_version)
 	{
 		entry->negative = negative;
@@ -1340,7 +1452,8 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 		if (!negative && value_len > 0)
 			memcpy(entry->value, value, value_len);
 		entry->global_epoch = pglc_shared->global_epoch;
-		entry->relation_version = relation_state->version;
+		entry->relation_version = token->relation_version;
+		entry->relation_incarnation = token->relation_incarnation;
 		/*
 		 * The first successful fill wins.  Moving to a fresh generation
 		 * prevents a timed-out or orphaned former loader from overwriting it.
@@ -1376,6 +1489,10 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 	if (!token->cacheable || !token->has_entry)
 		return result;
 
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("before_claim");
+#endif
+
 	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
 	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
 									   mapping->nspace, false);
@@ -1390,7 +1507,9 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 		pglc_shared->global_dirty_writers != 0 ||
 		relation_state->dirty_writers != 0 || entry->dirty_writers != 0 ||
 		pglc_shared->global_version != token->global_version ||
-		relation_state->version != token->relation_version)
+		relation_state->version != token->relation_version ||
+		relation_state->relation_incarnation !=
+		token->relation_incarnation)
 		goto done;
 
 	/*
@@ -1418,6 +1537,8 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 	if (entry->loading &&
 		(entry->load_global_version != token->global_version ||
 		 entry->load_relation_version != token->relation_version ||
+		 entry->load_relation_incarnation !=
+		 token->relation_incarnation ||
 		 entry->load_key_version != token->key_version))
 	{
 		entry->loading = false;
@@ -1440,6 +1561,7 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 	entry->load_started = now;
 	entry->load_global_version = token->global_version;
 	entry->load_relation_version = token->relation_version;
+	entry->load_relation_incarnation = token->relation_incarnation;
 	entry->load_key_version = token->key_version;
 	entry->load_id++;
 	if (entry->load_id == 0)
@@ -1477,6 +1599,8 @@ pglc_cache_release_load(const PgLocalCacheMapping *mapping,
 		entry->loading && entry->load_id == load_id &&
 		entry->load_global_version == claim_token->global_version &&
 		entry->load_relation_version == claim_token->relation_version &&
+		entry->load_relation_incarnation ==
+		claim_token->relation_incarnation &&
 		entry->load_key_version == claim_token->key_version)
 		entry->loading = false;
 	LWLockRelease(pglc_shared->lock);
@@ -1513,7 +1637,6 @@ pglc_cache_invalidate_namespace(Oid database_oid, const char *nspace)
 
 	pglc_require_preload();
 	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	advance_global_version_locked();
 	count = invalidate_namespace_locked(database_oid, nspace);
 	LWLockRelease(pglc_shared->lock);
 	pg_atomic_fetch_add_u64(&pglc_shared->invalidations, 1);
@@ -1531,7 +1654,6 @@ pglc_cache_invalidate_key(const PgLocalCacheMapping *mapping,
 
 	pglc_require_preload();
 	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	advance_global_version_locked();
 	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
 									   mapping->nspace, false);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
@@ -1569,7 +1691,6 @@ pglc_cache_invalidate_database(Oid database_oid)
 
 	pglc_require_preload();
 	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	advance_global_version_locked();
 	hash_seq_init(&cache_sequence, pglc_cache_hash);
 	while ((entry = hash_seq_search(&cache_sequence)) != NULL)
 	{
@@ -1820,6 +1941,9 @@ collect_dirty(PgLocalCacheDirtyKind kind, Oid database_oid, Oid relation_oid,
 	{
 		entry->relation_oid = relation_oid;
 		entry->shared_marker_reserved = false;
+		entry->shared_relation_fallback = false;
+		entry->shared_relation_incarnation = 0;
+		entry->target_relation_incarnation = 0;
 	}
 	return entry;
 }
@@ -1851,6 +1975,106 @@ pglc_collect_key(Oid database_oid, Oid relation_oid,
 	(void) collect_dirty(PGLC_DIRTY_KEY, database_oid, relation_oid,
 						 nspace, key);
 }
+
+#ifdef PGLC_TEST_HOOKS
+Datum
+pg_local_cache_test_collect_key(PG_FUNCTION_ARGS)
+{
+	Oid			relation_oid = PG_GETARG_OID(0);
+	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(2));
+
+	pglc_collect_key(MyDatabaseId, relation_oid, nspace, key);
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_local_cache_test_relation_incarnation(PG_FUNCTION_ARGS)
+{
+	Oid			relation_oid = PG_GETARG_OID(0);
+	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	PgLocalCacheRelationState *state;
+	uint64		incarnation;
+
+	pglc_require_preload();
+	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
+	state = get_relation_state(MyDatabaseId, relation_oid, nspace, true);
+	incarnation = state != NULL ? state->relation_incarnation : 0;
+	LWLockRelease(pglc_shared->lock);
+	PG_RETURN_INT64((int64) incarnation);
+}
+
+Datum
+pg_local_cache_test_relation_identity_pins(PG_FUNCTION_ARGS)
+{
+	Oid			relation_oid = PG_GETARG_OID(0);
+	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	PgLocalCacheRelationState *state;
+	int64		pins;
+
+	pglc_require_preload();
+	LWLockAcquire(pglc_shared->lock, LW_SHARED);
+	state = get_relation_state(MyDatabaseId, relation_oid, nspace, false);
+	pins = state != NULL && state->relation_oid == relation_oid ?
+		(int64) state->identity_pins : -1;
+	LWLockRelease(pglc_shared->lock);
+	PG_RETURN_INT64(pins);
+}
+
+Datum
+pg_local_cache_test_recreate_relation_state(PG_FUNCTION_ARGS)
+{
+	Oid			relation_oid = PG_GETARG_OID(0);
+	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	PgLocalCacheRelationKey key;
+	PgLocalCacheRelationState *state;
+	uint64		version;
+	uint64		incarnation;
+
+	pglc_require_preload();
+	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
+	state = get_relation_state(MyDatabaseId, relation_oid, nspace, false);
+	if (state == NULL || state->relation_oid != relation_oid ||
+		state->pending_forget || state->identity_pins != 0 ||
+		state->dirty_writers != 0)
+	{
+		LWLockRelease(pglc_shared->lock);
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("test relation state cannot be recreated while pinned")));
+	}
+	version = state->version;
+	make_relation_key(&key, MyDatabaseId, nspace);
+	(void) hash_search(pglc_relation_hash, &key, HASH_REMOVE, NULL);
+	state = get_relation_state(MyDatabaseId, relation_oid, nspace, true);
+	if (state == NULL)
+	{
+		LWLockRelease(pglc_shared->lock);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("test relation state could not be recreated")));
+	}
+	/* Keep every read-token tag except the incarnation unchanged. */
+	state->version = version;
+	incarnation = state->relation_incarnation;
+	LWLockRelease(pglc_shared->lock);
+	PG_RETURN_INT64((int64) incarnation);
+}
+
+Datum
+pg_local_cache_test_collect_global(PG_FUNCTION_ARGS)
+{
+	pglc_collect_global(false);
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_local_cache_test_abort_after_reservation(PG_FUNCTION_ARGS)
+{
+	pglc_test_abort_after_reservation = true;
+	PG_RETURN_VOID();
+}
+#endif
 
 static void
 pglc_collect_relation(Oid database_oid, Oid relation_oid,
@@ -1896,90 +2120,211 @@ local_has_global_dirty(void)
 }
 
 static bool
-precreate_shared_entries_locked(void)
+reserve_relation_handle_locked(PgLocalCacheLocalDirtyEntry *local,
+							   bool keyed_fallback)
+{
+	PgLocalCacheRelationState *state;
+
+	state = get_relation_state(local->key.database_oid,
+								local->relation_oid,
+								local->key.nspace, true);
+	if (state != NULL &&
+		(!OidIsValid(local->relation_oid) ||
+		 state->relation_oid == local->relation_oid))
+		local->target_relation_incarnation = state->relation_incarnation;
+	if (state == NULL ||
+		(OidIsValid(local->relation_oid) &&
+		 state->relation_oid != local->relation_oid) ||
+		state->pending_forget || state->identity_pins == (uint64) -1 ||
+		state->dirty_writers == (uint32) -1)
+		return false;
+
+	state->identity_pins++;
+	state->dirty_writers++;
+	local->shared_marker_reserved = true;
+	local->shared_relation_fallback = keyed_fallback;
+	local->shared_relation_incarnation = state->relation_incarnation;
+	return true;
+}
+
+/* Release only handles recorded as reserved; never infer ownership by key. */
+static void
+release_shared_reservations_locked(void)
 {
 	HASH_SEQ_STATUS sequence;
 	PgLocalCacheLocalDirtyEntry *local;
-	bool		success = true;
 
 	hash_seq_init(&sequence, local_dirty_hash);
 	while ((local = hash_seq_search(&sequence)) != NULL)
 	{
-		if (local->key.kind == PGLC_DIRTY_KEY)
+		PgLocalCacheRelationKey relation_key;
+		PgLocalCacheRelationState *state;
+		bool		relation_handle;
+
+		if (!local->shared_marker_reserved)
+			continue;
+
+		relation_handle = local->key.kind != PGLC_DIRTY_KEY ||
+			local->shared_relation_fallback;
+		if (!relation_handle)
 		{
 			PgLocalCacheCacheEntry *entry;
 
 			entry = get_cache_entry(local->key.database_oid,
 									local->relation_oid,
 									local->key.nspace,
-									local->key.key,
-									true);
-			if (entry == NULL)
+									local->key.key, false);
+			Assert(entry != NULL && entry->dirty_writers > 0);
+			if (entry != NULL && entry->dirty_writers > 0)
+				entry->dirty_writers--;
+		}
+
+		make_relation_key(&relation_key, local->key.database_oid,
+						  local->key.nspace);
+		state = hash_search(pglc_relation_hash, &relation_key, HASH_FIND, NULL);
+		Assert(state != NULL && state->identity_pins > 0 &&
+			   state->relation_incarnation ==
+			   local->shared_relation_incarnation);
+		if (state != NULL && state->relation_incarnation ==
+			local->shared_relation_incarnation)
+		{
+			if (relation_handle)
+			{
+				Assert(state->dirty_writers > 0);
+				if (state->dirty_writers > 0)
+					state->dirty_writers--;
+			}
+			Assert(state->identity_pins > 0);
+			if (state->identity_pins > 0)
+				state->identity_pins--;
+			if (state->identity_pins == 0 && state->dirty_writers == 0 &&
+				state->pending_forget)
+				(void) hash_search(pglc_relation_hash, &relation_key,
+								   HASH_REMOVE, NULL);
+		}
+		local->shared_marker_reserved = false;
+		local->shared_relation_fallback = false;
+		local->shared_relation_incarnation = 0;
+	}
+}
+
+static bool
+precreate_shared_entries_locked(void)
+{
+	HASH_SEQ_STATUS sequence;
+	PgLocalCacheLocalDirtyEntry *local;
+
+	hash_seq_init(&sequence, local_dirty_hash);
+	while ((local = hash_seq_search(&sequence)) != NULL)
+	{
+		PgLocalCacheRelationState *state;
+
+		if (local->key.kind == PGLC_DIRTY_KEY)
+		{
+			PgLocalCacheCacheEntry *entry;
+
+			state = get_relation_state(local->key.database_oid,
+									   local->relation_oid,
+									   local->key.nspace, true);
+			if (state == NULL || state->relation_oid != local->relation_oid ||
+				state->pending_forget ||
+				state->identity_pins == (uint64) -1)
 			{
 				hash_seq_term(&sequence);
-				success = false;
-				break;
+				return false;
 			}
+			entry = get_cache_entry(local->key.database_oid,
+									local->relation_oid,
+									local->key.nspace,
+									local->key.key, true);
+			if (entry == NULL || entry->relation_oid != local->relation_oid ||
+				entry->dirty_writers == (uint32) -1)
+			{
+				hash_seq_term(&sequence);
+				return false;
+			}
+			state->identity_pins++;
 			entry->dirty_writers++;
 			local->shared_marker_reserved = true;
+			local->shared_relation_fallback = false;
+			local->shared_relation_incarnation =
+				state->relation_incarnation;
+#ifdef PGLC_TEST_HOOKS
+			if (pglc_test_abort_after_reservation)
+			{
+				pglc_test_abort_after_reservation = false;
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("test abort after dirty reservation")));
+			}
+#endif
 		}
 		else if (local->key.kind == PGLC_DIRTY_RELATION ||
 				 local->key.kind == PGLC_DIRTY_FORGET_RELATION)
 		{
-			PgLocalCacheRelationState *state;
-
-			state = get_relation_state(local->key.database_oid,
-									   local->relation_oid,
-									   local->key.nspace,
-									   true);
-			if (state == NULL)
+			if (!reserve_relation_handle_locked(local, false))
 			{
 				hash_seq_term(&sequence);
-				success = false;
-				break;
+				return false;
 			}
-			state->dirty_writers++;
-			local->shared_marker_reserved = true;
 		}
 	}
+	return true;
+}
 
-	if (!success)
+static bool
+reserve_relation_fallbacks_locked(void)
+{
+	HASH_SEQ_STATUS sequence;
+	PgLocalCacheLocalDirtyEntry *local;
+
+	/* Reserve broad fences first; keyed handles then widen to those fences. */
+	hash_seq_init(&sequence, local_dirty_hash);
+	while ((local = hash_seq_search(&sequence)) != NULL)
 	{
-		hash_seq_init(&sequence, local_dirty_hash);
-		while ((local = hash_seq_search(&sequence)) != NULL)
+		if (local->key.kind == PGLC_DIRTY_RELATION ||
+			local->key.kind == PGLC_DIRTY_FORGET_RELATION)
 		{
-			if (!local->shared_marker_reserved)
-				continue;
-			if (local->key.kind == PGLC_DIRTY_KEY)
+			if (!reserve_relation_handle_locked(local, false))
 			{
-				PgLocalCacheCacheEntry *entry;
-
-				entry = get_cache_entry(local->key.database_oid,
-										local->relation_oid,
-										local->key.nspace,
-										local->key.key,
-										false);
-				Assert(entry != NULL && entry->dirty_writers > 0);
-				if (entry != NULL && entry->dirty_writers > 0)
-					entry->dirty_writers--;
+				hash_seq_term(&sequence);
+				return false;
 			}
-			else if (local->key.kind == PGLC_DIRTY_RELATION ||
-					 local->key.kind == PGLC_DIRTY_FORGET_RELATION)
-			{
-				PgLocalCacheRelationState *state;
-
-				state = get_relation_state(local->key.database_oid,
-										   local->relation_oid,
-										   local->key.nspace,
-										   false);
-				Assert(state != NULL && state->dirty_writers > 0);
-				if (state != NULL && state->dirty_writers > 0)
-					state->dirty_writers--;
-			}
-			local->shared_marker_reserved = false;
 		}
 	}
-	return success;
+
+	hash_seq_init(&sequence, local_dirty_hash);
+	while ((local = hash_seq_search(&sequence)) != NULL)
+	{
+		if (local->key.kind == PGLC_DIRTY_KEY &&
+			!reserve_relation_handle_locked(local, true))
+		{
+			hash_seq_term(&sequence);
+			return false;
+		}
+	}
+	return true;
+}
+
+static void
+capture_forget_targets_locked(void)
+{
+	HASH_SEQ_STATUS sequence;
+	PgLocalCacheLocalDirtyEntry *local;
+
+	hash_seq_init(&sequence, local_dirty_hash);
+	while ((local = hash_seq_search(&sequence)) != NULL)
+	{
+		PgLocalCacheRelationState *state;
+
+		if (local->key.kind != PGLC_DIRTY_FORGET_RELATION)
+			continue;
+		state = get_relation_state(local->key.database_oid,
+								   local->relation_oid,
+								   local->key.nspace, true);
+		if (state != NULL && state->relation_oid == local->relation_oid)
+			local->target_relation_incarnation = state->relation_incarnation;
+	}
 }
 
 static void
@@ -1990,6 +2335,7 @@ pglc_publish_dirty(void)
 	uint64		invalidated = 0;
 	uint64		key_invalidated = 0;
 	uint64		table_invalidated = 0;
+	bool		global_fallback;
 
 	if (local_dirty_hash == NULL || local_dirty_published)
 		return;
@@ -1998,10 +2344,22 @@ pglc_publish_dirty(void)
 		return;
 
 	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	advance_global_version_locked();
-
-	if (local_has_global_dirty() || !precreate_shared_entries_locked())
+	capture_forget_targets_locked();
+	global_fallback = local_has_global_dirty();
+	if (!global_fallback && !precreate_shared_entries_locked())
 	{
+		/* Undo every exact reservation before attempting a broader fence. */
+		release_shared_reservations_locked();
+		if (!reserve_relation_fallbacks_locked())
+		{
+			release_shared_reservations_locked();
+			global_fallback = true;
+		}
+	}
+
+	if (global_fallback)
+	{
+		advance_global_version_locked();
 		pglc_shared->global_dirty_writers++;
 		invalidated += invalidate_all_locked();
 		local_global_fallback = true;
@@ -2013,23 +2371,48 @@ pglc_publish_dirty(void)
 		{
 			if (local->key.kind == PGLC_DIRTY_KEY)
 			{
-				PgLocalCacheCacheEntry *entry;
+				if (local->shared_relation_fallback)
+				{
+					PgLocalCacheRelationState *state;
+					PgLocalCacheRelationKey relation_key;
 
-				entry = get_cache_entry(local->key.database_oid,
+					make_relation_key(&relation_key, local->key.database_oid,
+									  local->key.nspace);
+					state = hash_search(pglc_relation_hash, &relation_key,
+										HASH_FIND, NULL);
+					Assert(local->shared_marker_reserved && state != NULL &&
+						   state->relation_incarnation ==
+						   local->shared_relation_incarnation);
+					if (state != NULL && state->relation_incarnation ==
+						local->shared_relation_incarnation)
+					{
+						state->version++;
+						invalidated++;
+						table_invalidated++;
+					}
+				}
+				else
+				{
+					PgLocalCacheCacheEntry *entry;
+
+					entry = get_cache_entry(local->key.database_oid,
 										local->relation_oid,
 										local->key.nspace,
-										local->key.key,
-										false);
-				Assert(entry != NULL);
-				if (entry->valid)
-				{
-					invalidated++;
-					key_invalidated++;
+										local->key.key, false);
+					Assert(local->shared_marker_reserved && entry != NULL);
+					if (entry != NULL)
+					{
+						if (entry->valid)
+						{
+							invalidated++;
+							key_invalidated++;
+						}
+						entry->valid = false;
+						entry->loading = false;
+						entry->load_id++;
+						entry->version = next_entry_generation();
+					}
 				}
-				entry->valid = false;
-				entry->loading = false;
-				entry->load_id++;
-				entry->version = next_entry_generation();
 			}
 			else if (local->key.kind == PGLC_DIRTY_RELATION ||
 					 local->key.kind == PGLC_DIRTY_FORGET_RELATION)
@@ -2040,10 +2423,16 @@ pglc_publish_dirty(void)
 										   local->relation_oid,
 										   local->key.nspace,
 										   false);
-				Assert(state != NULL);
-				state->version++;
-				invalidated++;
-				table_invalidated++;
+				Assert(local->shared_marker_reserved && state != NULL &&
+					   state->relation_incarnation ==
+					   local->shared_relation_incarnation);
+				if (state != NULL && state->relation_incarnation ==
+					local->shared_relation_incarnation)
+				{
+					state->version++;
+					invalidated++;
+					table_invalidated++;
+				}
 			}
 		}
 	}
@@ -2055,6 +2444,14 @@ pglc_publish_dirty(void)
 						key_invalidated);
 	pg_atomic_fetch_add_u64(&pglc_shared->table_invalidations,
 						table_invalidated);
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("after_publish");
+	if (pglc_test_pause_point != NULL &&
+		strcmp(pglc_test_pause_point, "after_publish_abort") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("test abort after dirty publication")));
+#endif
 }
 
 static void
@@ -2078,10 +2475,11 @@ forget_relation_states_locked(bool committed)
 						  local->key.nspace);
 		state = hash_search(pglc_relation_hash, &relation_key,
 							HASH_FIND, NULL);
-		if (state != NULL)
+		if (state != NULL && local->target_relation_incarnation != 0 &&
+			state->relation_incarnation == local->target_relation_incarnation)
 		{
 			state->pending_forget = true;
-			if (state->dirty_writers == 0)
+			if (state->dirty_writers == 0 && state->identity_pins == 0)
 				(void) hash_search(pglc_relation_hash, &relation_key,
 								   HASH_REMOVE, NULL);
 		}
@@ -2098,68 +2496,41 @@ pglc_finish_dirty(bool committed)
 	if (local_dirty_hash == NULL)
 		return;
 
-	if (local_dirty_published)
+	if (local_dirty_published || !committed)
 	{
 		LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-		if (local_global_fallback)
+		if (local_dirty_published && local_global_fallback)
 		{
 			Assert(pglc_shared->global_dirty_writers > 0);
 			pglc_shared->global_dirty_writers--;
 		}
-		else
+		else if (local_dirty_published)
 		{
 			hash_seq_init(&sequence, local_dirty_hash);
 			while ((local = hash_seq_search(&sequence)) != NULL)
 			{
-				if (local->key.kind == PGLC_DIRTY_KEY)
+				if (local->key.kind == PGLC_DIRTY_KEY &&
+					local->shared_marker_reserved &&
+					!local->shared_relation_fallback)
 				{
 					PgLocalCacheCacheEntry *entry;
 
 					entry = get_cache_entry(local->key.database_oid,
 											local->relation_oid,
-											local->key.nspace,
-											local->key.key,
-											false);
+										local->key.nspace,
+										local->key.key,
+										false);
 					if (entry != NULL)
-					{
 						entry->valid = false;
-						Assert(entry->dirty_writers > 0);
-						entry->dirty_writers--;
-					}
-				}
-				else if (local->key.kind == PGLC_DIRTY_RELATION ||
-						 local->key.kind == PGLC_DIRTY_FORGET_RELATION)
-				{
-					PgLocalCacheRelationState *state;
-
-					state = get_relation_state(local->key.database_oid,
-											   local->relation_oid,
-											   local->key.nspace,
-											   false);
-					if (state != NULL)
-					{
-						PgLocalCacheRelationKey relation_key;
-
-						Assert(state->dirty_writers > 0);
-						state->dirty_writers--;
-						if (state->dirty_writers == 0 &&
-							state->pending_forget)
-						{
-							make_relation_key(
-								&relation_key,
-								local->key.database_oid,
-								local->key.nspace);
-							(void) hash_search(
-								pglc_relation_hash,
-								&relation_key,
-								HASH_REMOVE, NULL);
-						}
-					}
 				}
 			}
+			release_shared_reservations_locked();
 		}
-		forget_relation_states_locked(committed);
-		if (bump_config_after_unlock)
+		else
+			release_shared_reservations_locked();
+		if (local_dirty_published)
+			forget_relation_states_locked(committed);
+		if (local_dirty_published && bump_config_after_unlock)
 		{
 			pg_atomic_fetch_add_u64(&pglc_shared->config_generation, 1);
 			bump_config_after_unlock = false;

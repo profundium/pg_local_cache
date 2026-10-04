@@ -7,7 +7,7 @@ seo_title: 在 PostgreSQL 14–18 上安装 pg_local_cache
 description: 安装经过验证的 Debian 或 RPM 软件包，使用 PGXN 或 PGXS，配置 preload，重启 PostgreSQL，并初始化、升级或卸载 pg_local_cache。
 section: 安装
 permalink: /zh/docs/INSTALL_EXISTING.html
-last_modified_at: "2026-10-04"
+last_modified_at: "2026-10-05"
 ---
 
 # 在现有 PostgreSQL 服务器上安装 pg_local_cache {#install-pg_local_cache-on-an-existing-postgresql-server}
@@ -162,7 +162,7 @@ SELECT local_cache.health();
 ## 6. 升级 {#recover-a-failed-binary-install}
 
 从 2.x 升级到 3.0 时，请先遵循[升级指南](UPGRADING.md)。将应用从 SQL
-`mget` 迁移到 RESP `MGET`，安装对应的 3.0.0 软件包，重启 PostgreSQL，
+`mget` 迁移到 RESP `MGET`，安装对应的 3.1.0 软件包，重启 PostgreSQL，
 然后在每个安装了该扩展的数据库中更新扩展：
 
 ```sql

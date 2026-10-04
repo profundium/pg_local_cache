@@ -2,15 +2,15 @@
 layout: doc
 lang: en
 translation_key: UPGRADING
-title: Upgrade pg_local_cache from 2.x to 3.0.0
-seo_title: "Upgrade pg_local_cache 2.x to 3.0.0"
+title: Upgrade pg_local_cache from 2.x to 3.1.0
+seo_title: "Upgrade pg_local_cache 2.x to 3.1.0"
 description: Move applications from SQL mget to RESP MGET, install and upgrade the extension safely, understand dependency errors, and roll back to 2.0.4.
 section: Install
 permalink: /docs/UPGRADING.html
-last_modified_at: "2026-10-04"
+last_modified_at: "2026-10-05"
 ---
 
-# Upgrade pg_local_cache from 2.x to 3.0.0 {#upgrade-pg_local_cache-from-2x-to-300}
+# Upgrade pg_local_cache from 2.x to 3.1.0 {#upgrade-pg_local_cache-from-2x-to-310}
 
 Version 3.0.0 removes the SQL function `local_cache.mget(regclass, anyarray)`.
 Use authenticated RESP `MGET` for cached whole-row lookups:
@@ -28,7 +28,7 @@ semantics. The [RESP guide](resp.md) covers client setup and key encoding.
 
 1. Change applications to stop calling SQL `mget`; verify RESP `MGET` reads
    use a dedicated worker role and meet the required authorization model.
-2. Install the 3.0.0 package or library for the running PostgreSQL major.
+2. Install the 3.1.0 package or library for the running PostgreSQL major.
 3. If the 2.x listener used a non-loopback `pg_local_cache.bind_address`,
    configure native RESP TLS and provide its certificate and key before
    restarting. Set `pg_local_cache.tls_ca_file` to require client certificates
@@ -45,7 +45,7 @@ semantics. The [RESP guide](resp.md) covers client setup and key encoding.
    SELECT current_setting('pg_local_cache.binary_version');
    ```
 
-   The result must be `3.0.0`.
+   The result must be `3.1.0`.
 7. In every database that has the extension installed, connect as a database
    superuser and run:
 

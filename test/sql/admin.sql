@@ -34,10 +34,10 @@ WITH old_versions(version) AS (
 )
 SELECT 'update-paths=', (
     SELECT count(paths.source) = 10
-       AND bool_and(paths.target = '3.0.0' AND paths.path IS NOT NULL)
+       AND bool_and(paths.target = '3.1.0' AND paths.path IS NOT NULL)
       FROM old_versions
       LEFT JOIN paths ON paths.source = old_versions.version
-                     AND paths.target = '3.0.0'
+                     AND paths.target = '3.1.0'
 );
 
 SET client_min_messages = warning;
