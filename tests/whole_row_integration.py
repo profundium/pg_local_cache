@@ -322,12 +322,45 @@ def main() -> None:
         f"CRUD:{PGDATABASE}.public.{table}:"
     ), attached
 
+    corrupt_hook = False
     try:
+        corrupt_hook = admin_sql(
+            "SELECT pg_catalog.current_setting("
+            "'pg_local_cache.test_pause_point', true) IS NOT NULL"
+        ) == "t"
+        if corrupt_hook:
+            admin_sql(
+                "CREATE OR REPLACE FUNCTION public.pglc_test_corrupt_value_len("
+                "regclass, text, text) RETURNS boolean "
+                "AS '$libdir/pg_local_cache', "
+                "'pg_local_cache_test_corrupt_value_len' LANGUAGE C STRICT"
+            )
         client = RespClient()
 
         # Full native row types, including NULL, numeric, bool, and jsonb.
         assert_row_one(wait_for_json(client, key_one))
         assert_row_one(wait_for_json(client, key_one))
+
+        if corrupt_hook:
+            corrupted = admin_sql(
+                "SELECT public.pglc_test_corrupt_value_len("
+                f"'{relation}'::regclass, '{namespace}', '{key_one}')"
+            )
+            assert corrupted == "t", corrupted
+            before_corruption_read = stat(client)
+            assert_row_one(wait_for_json(client, key_one))
+            after_corruption_read = stat(client)
+            assert (
+                after_corruption_read["database_reads"]
+                - before_corruption_read["database_reads"]
+                == 1
+            ), {"before": before_corruption_read, "after": after_corruption_read}
+            assert (
+                after_corruption_read["invalidations"]
+                - before_corruption_read["invalidations"]
+                == 1
+            ), {"before": before_corruption_read, "after": after_corruption_read}
+            assert_row_one(wait_for_json(client, key_one))
 
         # A negative entry suppresses duplicate PostgreSQL reads for RESP.
         before_missing = stat(client)
@@ -539,8 +572,15 @@ def main() -> None:
     finally:
         if client is not None:
             client.close()
+        cleanup_sql = (
+            "DROP FUNCTION IF EXISTS public.pglc_test_corrupt_value_len"
+            "(regclass, text, text);"
+            if corrupt_hook
+            else ""
+        )
         admin_sql(
-            f"DROP TABLE IF EXISTS {relation};"
+            cleanup_sql
+            + f"DROP TABLE IF EXISTS {relation};"
             f"DROP TABLE IF EXISTS public.{identity_table};"
             f"DROP TABLE IF EXISTS public.{enum_table};"
             f"DROP TYPE IF EXISTS public.{enum_type}"

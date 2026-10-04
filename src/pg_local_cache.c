@@ -135,6 +135,7 @@ PG_FUNCTION_INFO_V1(pg_local_cache_test_relation_identity_pins);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_recreate_relation_state);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_collect_global);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_abort_after_reservation);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_corrupt_value_len);
 #endif
 
 static void pglc_shmem_request(void);
@@ -1195,13 +1196,41 @@ invalidate_all_locked(void)
 	return 1;
 }
 
+/* Caller holds the cache lock exclusively. */
+static bool
+cache_retire_malformed_entry_locked(const PgLocalCacheMapping *mapping,
+									const char *canonical_key)
+{
+	PgLocalCacheRelationState *relation_state;
+	PgLocalCacheCacheEntry *entry;
+
+	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
+									   mapping->nspace, false);
+	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
+							mapping->nspace, canonical_key, false);
+	if (relation_state == NULL || entry == NULL ||
+		entry->value_len <= PGLC_VALUE_MAX ||
+		!cache_entry_is_current_locked(entry, relation_state))
+		return false;
+
+	entry->valid = false;
+	entry->loading = false;
+	entry->load_id++;
+	entry->version = next_entry_generation();
+	entry->source_xmin = InvalidTransactionId;
+	entry->source_observed_full_xid = 0;
+	pg_atomic_fetch_add_u64(&pglc_shared->invalidations, 1);
+	pg_atomic_fetch_add_u64(&pglc_shared->key_invalidations, 1);
+	return true;
+}
+
 static bool
 cache_lookup_locked(const PgLocalCacheMapping *mapping,
 					const char *canonical_key,
 					char *value, Size value_capacity, Size *value_len,
 					bool *negative, TransactionId *source_xmin,
 					PgLocalCacheReadToken *token,
-					bool create, bool *complete)
+					bool create, bool *complete, bool *malformed)
 {
 	PgLocalCacheRelationState *relation_state;
 	PgLocalCacheCacheEntry *entry;
@@ -1209,6 +1238,7 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 	bool		mapping_current;
 	bool		hit = false;
 
+	*malformed = false;
 	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
 										mapping->nspace, create);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
@@ -1242,7 +1272,9 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 	{
 		uint64		access_clock;
 
-		if (entry->negative)
+		if (entry->value_len > PGLC_VALUE_MAX)
+			*malformed = true;
+		else if (entry->negative)
 		{
 			*negative = true;
 			hit = true;
@@ -1277,6 +1309,7 @@ pglc_cache_lookup_internal(const PgLocalCacheMapping *mapping,
 						   bool count_stats)
 {
 	bool		complete = false;
+	bool		malformed = false;
 	bool		hit;
 
 	pglc_require_preload();
@@ -1289,10 +1322,23 @@ pglc_cache_lookup_internal(const PgLocalCacheMapping *mapping,
 	hit = cache_lookup_locked(mapping, canonical_key,
 							  value, value_capacity, value_len,
 							  negative, source_xmin, token,
-							  false, &complete);
+							  false, &complete, &malformed);
 	LWLockRelease(pglc_shared->lock);
 
-	if (!complete)
+	if (malformed)
+	{
+		/* Recheck, retire and refresh the token while holding the write lock. */
+		*negative = false;
+		*value_len = 0;
+		LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
+		(void) cache_retire_malformed_entry_locked(mapping, canonical_key);
+		hit = cache_lookup_locked(mapping, canonical_key,
+								  value, value_capacity, value_len,
+								  negative, source_xmin, token,
+								  false, &complete, &malformed);
+		LWLockRelease(pglc_shared->lock);
+	}
+	else if (!complete)
 	{
 		*negative = false;
 		*value_len = 0;
@@ -1300,7 +1346,7 @@ pglc_cache_lookup_internal(const PgLocalCacheMapping *mapping,
 		hit = cache_lookup_locked(mapping, canonical_key,
 								  value, value_capacity, value_len,
 								  negative, source_xmin, token,
-								  true, &complete);
+								  true, &complete, &malformed);
 		LWLockRelease(pglc_shared->lock);
 	}
 
@@ -2073,6 +2119,27 @@ pg_local_cache_test_abort_after_reservation(PG_FUNCTION_ARGS)
 {
 	pglc_test_abort_after_reservation = true;
 	PG_RETURN_VOID();
+}
+
+Datum
+pg_local_cache_test_corrupt_value_len(PG_FUNCTION_ARGS)
+{
+	Oid			relation_oid = PG_GETARG_OID(0);
+	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	PgLocalCacheCacheEntry *entry;
+	bool		corrupted = false;
+
+	pglc_require_preload();
+	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
+	entry = get_cache_entry(MyDatabaseId, relation_oid, nspace, key, false);
+	if (entry != NULL && entry->relation_oid == relation_oid && entry->valid)
+	{
+		entry->value_len = PGLC_VALUE_MAX + 1;
+		corrupted = true;
+	}
+	LWLockRelease(pglc_shared->lock);
+	PG_RETURN_BOOL(corrupted);
 }
 #endif
 
