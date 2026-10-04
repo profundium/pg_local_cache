@@ -10,6 +10,8 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ### Fixed
 
+- A reader that reclaimed an expired load lease no longer received an unusable claim
+  that blocked the key for another lease period.
 - RESP workers no longer leak memory on cache misses and writes (could grow by
   ~2 KB per miss until the OOM killer restarted PostgreSQL).
 
