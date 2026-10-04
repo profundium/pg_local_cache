@@ -11,7 +11,8 @@ DATA := $(patsubst $(PGLC_SRCDIR)%,%,$(wildcard $(PGLC_SRCDIR)sql/pg_local_cache
 REGRESS = admin
 REGRESS_OPTS = --inputdir=$(PGLC_SRCDIR)test
 PGFILEDESC = "pg_local_cache - transaction-aware primary-key row cache"
-EXTRA_CLEAN = tests/unit/resp_test tests/unit/resp_test_sanitized
+EXTRA_CLEAN = tests/unit/resp_test tests/unit/resp_test_sanitized \
+	tests/unit/resp_parse_replay tests/unit/resp_parse_replay_sanitized
 
 PG_CPPFLAGS = -I$(srcdir)/src
 SHLIB_LINK =
