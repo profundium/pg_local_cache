@@ -37,6 +37,10 @@ jobs:
       - name: Test the Node.js query helpers once
         if: matrix.postgres == 16
         run: node --test examples/node-postgres/queries.test.mjs
+      - name: Install redis-cli for the documented RESP commands
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update -qq && sudo apt-get install -y -qq redis-tools && break; sleep "$i"; done
+          redis-cli --version
       - name: Build the checked-out extension
         run: docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build --wait --wait-timeout 120
       - name: Run quickstart commands and the default benchmark
