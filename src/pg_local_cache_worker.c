@@ -161,9 +161,36 @@ static bool cached_row_json(PgLocalCacheMapping *mapping,
 static void ensure_mapping_current(const PgLocalCacheMapping *mapping);
 static char *command_mget_one(PgLocalCacheMapping *mapping,
 								  const char *canonical, Datum *key_values,
-								  TimestampTz deadline, Size *response_length);
+								  TimestampTz deadline,
+								  bool waiter_already_counted,
+								  Size *response_length);
 static char *command_mget(PgLocalCacheRespArg *args, int argc,
 							  Size *response_length);
+
+typedef struct PgLocalCacheMgetItem
+{
+	PgLocalCacheMapping *mapping;
+	char	   *canonical;
+	Datum		key_values[PGLC_MAX_KEY_COLUMNS];
+	PgLocalCacheReadToken token;
+	char	   *json;
+	Size		json_length;
+	char	   *payload;
+	Size		payload_length;
+	char	   *response_element;
+	Size		response_element_length;
+	TransactionId database_xmin;
+	Size		response_slots;
+	uint64		load_id;
+	bool		cache_enabled;
+	bool		result_ready;
+	bool		null_result;
+	bool		deferred;
+	bool		owns_load;
+	bool		payload_cacheable;
+	bool		database_read;
+} PgLocalCacheMgetItem;
+
 static char *command_set(PgLocalCacheMapping *mapping, const char *raw_key,
 							 const PgLocalCacheRespArg *value_arg,
 							 Size *response_length);
@@ -2393,9 +2420,196 @@ note_resp_cache_lookup(bool hit, bool negative)
 		pg_atomic_fetch_add_u64(&pglc_shared->cache_misses, 1);
 }
 
+static bool
+mget_quiet_lookup(PgLocalCacheMgetItem *item, bool count_lookup)
+{
+	char		cached_value[PGLC_VALUE_MAX];
+	Size		cached_length;
+	bool		negative;
+	TransactionId source_xmin;
+	bool		hit;
+
+	hit = pglc_cache_lookup_quiet(item->mapping, item->canonical,
+								 cached_value, sizeof(cached_value),
+								 &cached_length, &negative, &source_xmin,
+								 &item->token);
+	if (hit)
+	{
+		if (negative)
+		{
+			if (count_lookup)
+				note_resp_cache_lookup(true, true);
+			else
+				pglc_note_singleflight_reuse();
+			item->null_result = true;
+			item->result_ready = true;
+			item->response_element = pglc_resp_null(
+				&item->response_element_length);
+			return true;
+		}
+		if (cached_row_json(item->mapping, cached_value, cached_length,
+							CurrentMemoryContext, &item->json,
+							&item->json_length))
+		{
+			if (count_lookup)
+				note_resp_cache_lookup(true, false);
+			else
+				pglc_note_singleflight_reuse();
+			item->result_ready = true;
+			item->response_element = pglc_resp_bulk(item->json,
+				item->json_length, &item->response_element_length);
+			return true;
+		}
+
+		/* Corrupt or descriptor-stale payloads are never exposed. */
+		(void) pglc_cache_invalidate_key(item->mapping, item->canonical);
+		(void) pglc_cache_lookup_quiet(item->mapping, item->canonical,
+									cached_value, sizeof(cached_value),
+									&cached_length, &negative, &source_xmin,
+									&item->token);
+	}
+	if (count_lookup)
+		note_resp_cache_lookup(false, false);
+	return false;
+}
+
+static void
+mget_release_claims(PgLocalCacheMgetItem *items, int item_count)
+{
+	int			i;
+
+	for (i = 0; i < item_count; i++)
+	{
+		if (items[i].owns_load)
+		{
+			pglc_cache_release_load(items[i].mapping, items[i].canonical,
+								&items[i].token, items[i].load_id);
+			items[i].owns_load = false;
+		}
+	}
+}
+
+static Size
+mget_decimal_digits(Size value)
+{
+	Size		digits = 1;
+
+	while (value >= 10)
+	{
+		value /= 10;
+		digits++;
+	}
+	return digits;
+}
+
+static bool
+mget_account_result(PgLocalCacheMgetItem *item, Size *response_size)
+{
+	Size		element_length;
+
+	if (item->response_element != NULL)
+		element_length = item->response_element_length;
+	else if (item->null_result)
+		element_length = 5; /* $-1\r\n */
+	else
+		element_length = 1 + mget_decimal_digits(item->json_length) + 2 +
+			item->json_length + 2;
+
+	if (element_length > PGLC_RESPONSE_MAX ||
+		item->response_slots >
+		(PGLC_RESPONSE_MAX - *response_size) / element_length)
+		return false;
+	*response_size += element_length * item->response_slots;
+	return true;
+}
+
+static void
+mget_read_one(PgLocalCacheMgetItem *item, MemoryContext result_context)
+{
+	char		cached_value[PGLC_VALUE_MAX];
+	Size		database_payload_length = 0;
+	bool		database_payload_cacheable = false;
+
+	ensure_mapping_current(item->mapping);
+	pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
+	if (SPI_execute_plan(item->mapping->get_plan, item->key_values,
+						 NULL, true, 1) != SPI_OK_SELECT)
+		elog(ERROR, "pg_local_cache MGET plan failed");
+	ensure_mapping_current(item->mapping);
+	item->database_read = true;
+	if (SPI_processed != 1)
+	{
+		item->null_result = true;
+		item->result_ready = true;
+		return;
+	}
+	{
+		bool		xmin_is_null;
+		Datum		xmin_value;
+		Datum		row_value;
+		bool		row_is_null;
+		TupleTableSlot *row_slot;
+		char	   *rendered_json;
+		Size		rendered_json_length;
+
+		row_value = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+								 1, &row_is_null);
+		if (row_is_null)
+			elog(ERROR, "pg_local_cache whole row unexpectedly became NULL");
+		row_slot = MakeSingleTupleTableSlot(item->mapping->row_desc,
+											&TTSOpsVirtual);
+		ExecStoreHeapTupleDatum(row_value, row_slot);
+		database_payload_cacheable = pglc_row_payload_encode(
+			row_slot, item->mapping->row_desc, PGLC_ROW_PAYLOAD_FLAG_HAS_JSON,
+			cached_value, sizeof(cached_value), &database_payload_length);
+		if (!database_payload_cacheable)
+		{
+			/* Keep a SQL-usable tuple even when tuple+JSON cannot fit. */
+			database_payload_cacheable = pglc_row_payload_encode(
+				row_slot, item->mapping->row_desc, 0, cached_value,
+				sizeof(cached_value), &database_payload_length);
+		}
+		if (database_payload_cacheable &&
+			cached_row_json(item->mapping, cached_value,
+							database_payload_length, result_context,
+							&rendered_json, &rendered_json_length))
+		{
+			/* JSON and payload both outlive the SPI context. */
+		}
+		else if (!source_row_json(row_slot, item->mapping->row_desc,
+								 row_value, result_context,
+								 &rendered_json, &rendered_json_length))
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("row JSON exceeds the RESP limit of %d bytes",
+							PGLC_RESPONSE_VALUE_MAX)));
+		ExecDropSingleTupleTableSlot(row_slot);
+		if (database_payload_cacheable)
+		{
+			item->payload = MemoryContextAlloc(result_context,
+										 database_payload_length);
+			memcpy(item->payload, cached_value, database_payload_length);
+			item->payload_length = database_payload_length;
+			item->payload_cacheable = true;
+		}
+		item->json = MemoryContextAlloc(result_context,
+										 rendered_json_length + 1);
+		memcpy(item->json, rendered_json, rendered_json_length);
+		item->json[rendered_json_length] = '\0';
+		item->json_length = rendered_json_length;
+		xmin_value = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+								  2, &xmin_is_null);
+		if (xmin_is_null)
+			elog(ERROR, "pg_local_cache row xmin unexpectedly became NULL");
+		item->database_xmin = (TransactionId) DatumGetUInt32(xmin_value);
+		item->result_ready = true;
+	}
+}
+
 static char *
 command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 					Datum *key_values, TimestampTz deadline,
+					bool waiter_already_counted,
 					Size *response_length)
 {
 	char		cached_value[PGLC_VALUE_MAX];
@@ -2406,7 +2620,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 	bool		cache_enabled;
 	bool		hit;
 	bool		owns_load = false;
-	bool		waiter_counted = false;
+	bool		waiter_counted = waiter_already_counted;
 	uint64		load_id = 0;
 	TimestampTz wait_started;
 	char	   *database_value = NULL;
@@ -2649,51 +2863,300 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 	int			key_count = argc - 1;
 	TimestampTz deadline = TimestampTzPlusMilliseconds(
 		GetCurrentTimestamp(), pglc_statement_timeout_ms);
-	PgLocalCacheMapping **mappings;
-	char	  **canonical_keys;
-	Datum	 (*key_values)[PGLC_MAX_KEY_COLUMNS];
+	PgLocalCacheMgetItem *items;
+	int		   *slot_items;
+	int			item_count = 0;
 	int			key_index;
+	Size		response_size;
+	volatile bool failed = false;
+	volatile int failure_code = 0; /* 1 = deadline, 2 = response limit */
+	char	   * volatile command_error = NULL;
+	volatile Size command_error_length = 0;
+	MemoryContext volatile transaction_context = NULL;
+	MemoryContext result_context = CurrentMemoryContext;
 	StringInfoData response;
 
-	mappings = palloc(mul_size(sizeof(*mappings), (Size) key_count));
-	canonical_keys = palloc(mul_size(sizeof(*canonical_keys), (Size) key_count));
-	key_values = palloc(mul_size(sizeof(*key_values), (Size) key_count));
+	items = palloc0(mul_size(sizeof(*items), (Size) key_count));
+	slot_items = palloc(mul_size(sizeof(*slot_items), (Size) key_count));
 	for (key_index = 0; key_index < key_count; key_index++)
 	{
+		PgLocalCacheMapping *mapping;
 		char	   *raw_key;
+		char	   *canonical;
 		char	   *key_error = NULL;
+		Datum		key_values[PGLC_MAX_KEY_COLUMNS];
+		int			item_index;
 
-		if (!resolve_wire_key(&args[key_index + 1], &mappings[key_index],
+		if (!resolve_wire_key(&args[key_index + 1], &mapping,
 							  &raw_key, &key_error) ||
-			!canonicalize_key(mappings[key_index], raw_key,
-							  key_values[key_index], &canonical_keys[key_index],
+			!canonicalize_key(mapping, raw_key, key_values, &canonical,
 							  &key_error))
 			return pglc_resp_error(key_error, response_length);
+
+		for (item_index = 0; item_index < item_count; item_index++)
+		{
+			if (items[item_index].mapping->relation_oid == mapping->relation_oid &&
+				strcmp(items[item_index].mapping->nspace, mapping->nspace) == 0 &&
+				strcmp(items[item_index].canonical, canonical) == 0)
+				break;
+		}
+		if (item_index == item_count)
+		{
+			items[item_index].mapping = mapping;
+			items[item_index].canonical = canonical;
+			memcpy(items[item_index].key_values, key_values,
+				   sizeof(items[item_index].key_values));
+			items[item_index].cache_enabled = pglc_cache_is_enabled();
+			item_count++;
+		}
+		slot_items[key_index] = item_index;
+		items[item_index].response_slots++;
 	}
 
 	pg_atomic_fetch_add_u64(&pglc_shared->client_mget_keys, (uint64) key_count);
+	response_size = 1 + mget_decimal_digits((Size) key_count) + 2;
+	for (key_index = 0; key_index < item_count; key_index++)
+	{
+		PgLocalCacheMgetItem *item = &items[key_index];
+
+		if (item->cache_enabled && mget_quiet_lookup(item, true) &&
+			!mget_account_result(item, &response_size))
+		{
+			mget_release_claims(items, item_count);
+			return pglc_resp_error("ERR response exceeds limit", response_length);
+		}
+	}
+
+	PG_TRY();
+	{
+		int			item_index;
+		bool		have_database_reads = false;
+
+		/* Claim every miss first. WAIT entries are deferred; never wait here. */
+		for (item_index = 0; item_index < item_count && !failed; item_index++)
+		{
+			PgLocalCacheMgetItem *item = &items[item_index];
+
+			if (item->result_ready || !item->cache_enabled)
+				continue;
+			for (;;)
+			{
+				PgLocalCacheLoadClaim claim;
+
+				if (GetCurrentTimestamp() >= deadline)
+				{
+					failed = true;
+					failure_code = 1;
+					break;
+				}
+				claim = pglc_cache_claim_load(item->mapping, item->canonical,
+												&item->token, &item->load_id);
+				if (claim == PGLC_LOAD_OWNER)
+				{
+					item->owns_load = true;
+					break;
+				}
+				if (claim == PGLC_LOAD_BYPASS)
+					break;
+				if (claim == PGLC_LOAD_WAIT)
+				{
+					item->deferred = true;
+					pglc_note_singleflight_waiter();
+					break;
+				}
+
+				/* RETRY only: refresh quietly, then retry the non-blocking claim. */
+				if (mget_quiet_lookup(item, false))
+				{
+					if (!mget_account_result(item, &response_size))
+					{
+						failed = true;
+						failure_code = 2;
+					}
+					break;
+				}
+			}
+		}
+
+		for (item_index = 0; item_index < item_count; item_index++)
+			if (!items[item_index].result_ready && !items[item_index].deferred)
+				have_database_reads = true;
+
+		if (!failed && have_database_reads)
+		{
+			long		remaining_ms = TimestampDifferenceMilliseconds(
+				GetCurrentTimestamp(), deadline);
+
+			if (remaining_ms <= 0)
+			{
+				failed = true;
+				failure_code = 1;
+			}
+			else
+			{
+				int			statement_timeout_ms = (int) Min(
+					(long) pglc_statement_timeout_ms, remaining_ms);
+
+				transaction_context = begin_spi_transaction(
+					statement_timeout_ms);
+				for (item_index = 0; item_index < item_count; item_index++)
+				{
+					PgLocalCacheMgetItem *item = &items[item_index];
+
+					if (item->result_ready || item->deferred)
+						continue;
+					if (GetCurrentTimestamp() >= deadline)
+					{
+						failed = true;
+						failure_code = 1;
+						break;
+					}
+					mget_read_one(item, result_context);
+					if (!mget_account_result(item, &response_size))
+					{
+						failed = true;
+						failure_code = 2;
+						break;
+					}
+				}
+				{
+					MemoryContext commit_context =
+						(MemoryContext) transaction_context;
+
+					/* commit_spi_transaction aborts internally before rethrowing. */
+					transaction_context = NULL;
+					commit_spi_transaction(commit_context);
+				}
+				for (item_index = 0; item_index < item_count; item_index++)
+				{
+					PgLocalCacheMgetItem *item = &items[item_index];
+
+					if (!item->database_read)
+						continue;
+					pglc_note_database_read();
+					if (!failed)
+					{
+						if (item->null_result)
+							item->response_element = pglc_resp_null(
+								&item->response_element_length);
+						else
+							item->response_element = pglc_resp_bulk(
+								item->json, item->json_length,
+								&item->response_element_length);
+					}
+				}
+				if (!failed && GetCurrentTimestamp() >= deadline)
+				{
+					failed = true;
+					failure_code = 1;
+				}
+			}
+		}
+
+		if (!failed)
+		{
+			for (item_index = 0; item_index < item_count; item_index++)
+			{
+				PgLocalCacheMgetItem *item = &items[item_index];
+				bool		stored = false;
+
+				if (!item->owns_load)
+					continue;
+				if (item->null_result)
+					stored = pglc_cache_store(item->mapping,
+						item->canonical, &item->token, NULL, 0, true,
+						item->load_id, InvalidTransactionId);
+				else if (item->payload_cacheable)
+					stored = pglc_cache_store(item->mapping,
+						item->canonical, &item->token, item->payload,
+						item->payload_length, false, item->load_id,
+						item->database_xmin);
+				if (!stored)
+					pglc_cache_release_load(item->mapping, item->canonical,
+										&item->token, item->load_id);
+				item->owns_load = false;
+			}
+		}
+
+		/* WAIT handling starts only after every owner claim is stored/released. */
+		for (item_index = 0; item_index < item_count && !failed; item_index++)
+		{
+			PgLocalCacheMgetItem *item = &items[item_index];
+
+			if (!item->deferred)
+				continue;
+			if (GetCurrentTimestamp() >= deadline)
+			{
+				failed = true;
+				failure_code = 1;
+				break;
+			}
+			item->response_element = command_mget_one(
+				item->mapping, item->canonical, item->key_values,
+				deadline, true, &item->response_element_length);
+			if (item->response_element_length > 0 &&
+				item->response_element[0] == '-')
+			{
+				command_error = item->response_element;
+				command_error_length = item->response_element_length;
+				failed = true;
+				break;
+			}
+			item->result_ready = true;
+			if (!mget_account_result(item, &response_size))
+			{
+				failed = true;
+				failure_code = 2;
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		if (transaction_context != NULL)
+			abort_spi_transaction((MemoryContext) transaction_context);
+		mget_release_claims(items, item_count);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	if (failed)
+	{
+		mget_release_claims(items, item_count);
+		if (command_error != NULL)
+		{
+			*response_length = command_error_length;
+			return command_error;
+		}
+		return pglc_resp_error(failure_code == 2 ?
+							   "ERR response exceeds limit" :
+							   "ERR MGET deadline exceeded",
+							   response_length);
+	}
+	if (GetCurrentTimestamp() >= deadline)
+	{
+		mget_release_claims(items, item_count);
+		return pglc_resp_error("ERR MGET deadline exceeded", response_length);
+	}
+
 	initStringInfo(&response);
 	appendStringInfo(&response, "*%d\r\n", key_count);
 	for (key_index = 0; key_index < key_count; key_index++)
 	{
-		Size		element_length;
-		char	   *element = command_mget_one(
-			mappings[key_index], canonical_keys[key_index],
-			key_values[key_index], deadline, &element_length);
+		PgLocalCacheMgetItem *item = &items[slot_items[key_index]];
 
-		if (element_length > 0 && element[0] == '-')
+		if (!item->result_ready || item->response_element == NULL)
+			elog(ERROR, "pg_local_cache MGET result was not prepared");
+		if (item->response_element_length > PGLC_RESPONSE_MAX ||
+			(Size) response.len > PGLC_RESPONSE_MAX -
+			item->response_element_length)
 		{
-			*response_length = element_length;
-			return element;
-		}
-		if (element_length > PGLC_RESPONSE_MAX ||
-			(Size) response.len > PGLC_RESPONSE_MAX - element_length)
+			mget_release_claims(items, item_count);
 			return pglc_resp_error("ERR response exceeds limit",
-								  response_length);
-		appendBinaryStringInfo(&response, element, (int) element_length);
+							  response_length);
+		}
+		appendBinaryStringInfo(&response, item->response_element,
+							   (int) item->response_element_length);
 	}
-	if (GetCurrentTimestamp() >= deadline)
-		return pglc_resp_error("ERR MGET deadline exceeded", response_length);
 	*response_length = (Size) response.len;
 	return response.data;
 }

@@ -16,6 +16,7 @@ import re
 import ssl
 import socket
 import subprocess
+import threading
 import time
 
 
@@ -59,11 +60,12 @@ class RespConnection:
         *,
         authenticate: bool = True,
         receive_buffer: int | None = None,
+        socket_timeout: float = 5,
     ) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if receive_buffer is not None:
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer)
-        self.socket.settimeout(5)
+        self.socket.settimeout(socket_timeout)
         self.socket.connect((RESP_HOST, RESP_PORT))
         if TLS_CA_FILE:
             if bool(TLS_CERT_FILE) != bool(TLS_KEY_FILE):
@@ -255,8 +257,8 @@ def composite_row_bytes(tenant: str, row_id: int, value: str) -> bytes:
     ).encode()
 
 
-def start_idle_writer(
-    table: str, value: str, *, application_name: str
+def start_idle_transaction(
+    statements: str, *, application_name: str
 ) -> subprocess.Popen[str]:
     role = (
         f"SET ROLE {sql_identifier(WORKER_ROLE)};"
@@ -279,8 +281,7 @@ def start_idle_writer(
     )
     assert process.stdin is not None
     process.stdin.write(
-        f"{role}BEGIN; "
-        f"UPDATE public.{table} SET value = '{value}' WHERE id = 1;"
+        f"{role}BEGIN; {statements};"
         f"SET application_name = '{application_name}';\n"
     )
     process.stdin.flush()
@@ -303,6 +304,29 @@ def start_idle_writer(
             raise AssertionError(f"writer did not become idle in transaction: {output}")
         time.sleep(0.02)
     return process
+
+
+def start_idle_writer(
+    table: str,
+    value: str,
+    *,
+    application_name: str,
+    row_id: int = 1,
+) -> subprocess.Popen[str]:
+    return start_idle_transaction(
+        f"UPDATE public.{sql_identifier(table)} SET value = '{value}' "
+        f"WHERE id = {row_id}",
+        application_name=application_name,
+    )
+
+
+def start_table_locker(
+    table: str, *, application_name: str
+) -> subprocess.Popen[str]:
+    return start_idle_transaction(
+        f"LOCK TABLE public.{sql_identifier(table)} IN ACCESS EXCLUSIVE MODE",
+        application_name=application_name,
+    )
 
 
 def finish_writer(process: subprocess.Popen[str], *, commit: bool) -> str:
@@ -410,6 +434,7 @@ def test_mget(table: str, composite_table: str, scoped_table: str) -> None:
         key_one = crud_key(table, 1)
         key_two = crud_key(table, 2)
         missing = crud_key(table, 9_000_000_000)
+        cold_missing = crud_key(table, 9_000_000_001)
         composite = composite_key(composite_table, "tenant-a", 1)
         scoped = crud_key(scoped_table, 1)
         other_database = crud_key(table, 1, database=f"{PGDATABASE}_other")
@@ -442,6 +467,32 @@ def test_mget(table: str, composite_table: str, scoped_table: str) -> None:
                 after_invalid,
             )
 
+        before_duplicate_miss = json.loads(client.command("STAT"))
+        assert client.command("MGET", cold_missing, cold_missing) == [None, None]
+        after_duplicate_miss = json.loads(client.command("STAT"))
+        assert (
+            after_duplicate_miss["cache_misses"]
+            - before_duplicate_miss["cache_misses"]
+            == 1
+        )
+        assert (
+            after_duplicate_miss["database_reads"]
+            - before_duplicate_miss["database_reads"]
+            == 1
+        )
+        assert after_duplicate_miss["loading_entries"] == 0
+        assert client.command("MGET", cold_missing, cold_missing) == [None, None]
+        after_duplicate_negative_hit = json.loads(client.command("STAT"))
+        assert (
+            after_duplicate_negative_hit["negative_hits"]
+            - after_duplicate_miss["negative_hits"]
+            == 1
+        )
+        assert (
+            after_duplicate_negative_hit["database_reads"]
+            == after_duplicate_miss["database_reads"]
+        )
+
         mixed_arguments = (key_one, missing, key_one, composite, key_two)
         mixed_request = client.encode("MGET", *mixed_arguments)
         assert len(mixed_request) < MAX_PIPELINE_INPUT_BYTES
@@ -457,7 +508,7 @@ def test_mget(table: str, composite_table: str, scoped_table: str) -> None:
         ], mixed
         after = json.loads(client.command("STAT"))
         assert after["client_mget_keys"] - before["client_mget_keys"] == 5
-        assert after["cache_hits"] - before["cache_hits"] == 3
+        assert after["cache_hits"] - before["cache_hits"] == 2
         assert after["cache_misses"] - before["cache_misses"] == 2
         assert after["database_reads"] - before["database_reads"] == 2
 
@@ -465,7 +516,7 @@ def test_mget(table: str, composite_table: str, scoped_table: str) -> None:
         assert repeated == mixed
         repeated_stats = json.loads(client.command("STAT"))
         assert repeated_stats["client_mget_keys"] - after["client_mget_keys"] == 5
-        assert repeated_stats["cache_hits"] - after["cache_hits"] == 5
+        assert repeated_stats["cache_hits"] - after["cache_hits"] == 4
         assert repeated_stats["negative_hits"] - after["negative_hits"] == 1
         assert repeated_stats["database_reads"] == after["database_reads"]
 
@@ -505,7 +556,347 @@ def test_mget(table: str, composite_table: str, scoped_table: str) -> None:
         except RespError as error:
             assert "response exceeds limit" in str(error)
         assert client.command("PING") == "PONG"
+
+        # A cold oversized MGET must release its claim without publishing it.
+        sql(
+            f"UPDATE public.{sql_identifier(table)} "
+            "SET value = repeat('x', 3900) WHERE id = 2"
+        )
+        before_cold_oversize = json.loads(client.command("STAT"))
+        try:
+            client.command("MGET", *([key_two] * (large_count + 1)))
+            raise AssertionError("cold oversized MGET did not fail")
+        except RespError as error:
+            assert "response exceeds limit" in str(error)
+        after_cold_oversize = json.loads(client.command("STAT"))
+        assert after_cold_oversize["loading_entries"] == 0
+        assert (
+            after_cold_oversize["database_reads"]
+            - before_cold_oversize["database_reads"]
+            == 1
+        )
+        assert (
+            after_cold_oversize["singleflight_leaders"]
+            - before_cold_oversize["singleflight_leaders"]
+            == 1
+        )
+        assert mget_one(client, key_two) == large_value
+        after_cold_refill = json.loads(client.command("STAT"))
+        assert after_cold_refill["loading_entries"] == 0
+        assert (
+            after_cold_refill["singleflight_leaders"]
+            - after_cold_oversize["singleflight_leaders"]
+            == 1
+        )
     finally:
+        client.close()
+
+
+def read_cache_stats() -> dict[str, object]:
+    return json.loads(sql("SELECT local_cache.stats()::text"))
+
+
+def wait_for_stat_at_least(
+    field: str,
+    target: int,
+    *,
+    timeout: float = 6,
+    poll_interval: float = 0.02,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    last: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        last = read_cache_stats()
+        if int(last[field]) >= target:
+            return last
+        time.sleep(poll_interval)
+    raise AssertionError(f"STAT {field} did not reach {target}: {last}")
+
+
+def wait_for_blocked_worker_pid(table: str, *, timeout: float = 6) -> int:
+    relation = f"public.{sql_identifier(table)}"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pid = sql(
+            "SELECT lock.pid FROM pg_catalog.pg_locks AS lock "
+            "JOIN pg_catalog.pg_stat_activity AS activity USING (pid) "
+            f"WHERE lock.relation = '{relation}'::regclass "
+            "AND lock.locktype = 'relation' "
+            "AND lock.mode = 'AccessShareLock' AND NOT lock.granted "
+            "AND activity.backend_type = 'pg_local_cache RESP worker' "
+            "LIMIT 1"
+        )
+        if pid:
+            return int(pid)
+        time.sleep(0.01)
+    raise AssertionError(f"RESP worker did not block on {relation}")
+
+
+def run_mget_thread(
+    client: RespConnection,
+    keys: list[str],
+    results: dict[str, object],
+    name: str,
+) -> None:
+    try:
+        results[name] = client.command("MGET", *keys)
+    except BaseException as error:
+        results[name] = error
+
+
+def finish_mget_threads(
+    threads: list[threading.Thread],
+    results: dict[str, object],
+    *,
+    timeout: float,
+) -> None:
+    for thread in threads:
+        thread.join(timeout=timeout)
+        assert not thread.is_alive(), f"MGET thread did not finish: {thread.name}"
+
+
+def distinct_worker_connections(
+    count: int, *, socket_timeout: float = 5, max_attempts: int = 64
+) -> list[RespConnection]:
+    clients: list[RespConnection] = []
+    worker_ids: set[object] = set()
+    try:
+        for _ in range(max_attempts):
+            candidate = RespConnection(socket_timeout=socket_timeout)
+            try:
+                worker_id = candidate.command("CLIENT", "ID")
+            except BaseException:
+                candidate.close()
+                raise
+            if worker_id in worker_ids:
+                candidate.close()
+                continue
+            clients.append(candidate)
+            worker_ids.add(worker_id)
+            if len(clients) == count:
+                return clients
+        raise AssertionError(
+            f"could not connect to {count} distinct RESP workers after "
+            f"{max_attempts} attempts (found {len(clients)})"
+        )
+    except BaseException:
+        for client in clients:
+            client.close()
+        raise
+
+
+def test_mget_does_not_hold_claim_while_waiting(
+    table: str, scoped_table: str
+) -> None:
+    clients = distinct_worker_connections(3, socket_timeout=45)
+    locker: subprocess.Popen[str] | None = None
+    threads: list[threading.Thread] = []
+    results: dict[str, object] = {}
+    row_a_id = 9_100_000_006
+    key_a = crud_key(table, row_a_id)
+    key_b = crud_key(scoped_table, 1)
+    try:
+        locker = start_table_locker(
+            scoped_table, application_name=f"pglc_mget_order_lock_{os.getpid()}"
+        )
+        sql(
+            f"INSERT INTO public.{sql_identifier(table)} (id, value) "
+            f"VALUES ({row_a_id}, 'deferred-a')"
+        )
+        before = read_cache_stats()
+        owner = threading.Thread(
+            target=run_mget_thread,
+            args=(clients[0], [key_b], results, "owner"),
+            name="mget-blocked-owner",
+        )
+        threads.append(owner)
+        owner.start()
+        wait_for_blocked_worker_pid(scoped_table, timeout=10)
+
+        deferred = threading.Thread(
+            target=run_mget_thread,
+            args=(clients[1], [key_a, key_b], results, "deferred"),
+            name="mget-deferred-owner",
+        )
+        threads.append(deferred)
+        deferred.start()
+        waiting = wait_for_stat_at_least(
+            "singleflight_waiters",
+            before["singleflight_waiters"] + 1,
+            timeout=5,
+            poll_interval=0.001,
+        )
+
+        assert clients[2].command("MGET", key_a) == [row_bytes(row_a_id, "deferred-a")]
+        after_probe = read_cache_stats()
+        assert after_probe["cache_hits"] - waiting["cache_hits"] == 1
+        assert after_probe["database_reads"] == waiting["database_reads"]
+
+        finish_writer(locker, commit=True)
+        locker = None
+        finish_mget_threads(threads, results, timeout=10)
+
+        assert results["owner"] == [row_bytes(1, "scope-only")], results
+        assert results["deferred"] == [
+            row_bytes(row_a_id, "deferred-a"),
+            row_bytes(1, "scope-only"),
+        ], results
+        after = read_cache_stats()
+        assert after["loading_entries"] == 0
+        assert after["singleflight_leaders"] - before["singleflight_leaders"] == 2
+        assert after["singleflight_waiters"] - before["singleflight_waiters"] >= 1
+        assert after["singleflight_timeouts"] == before["singleflight_timeouts"]
+        assert after["database_reads"] - before["database_reads"] == 2
+        assert after["cache_hits"] - before["cache_hits"] == 1
+    finally:
+        try:
+            if locker is not None:
+                finish_writer(locker, commit=True)
+        finally:
+            for thread in threads:
+                if thread.is_alive():
+                    thread.join(timeout=10)
+            for client in clients:
+                client.close()
+
+
+def test_mget_cancelled_owner_releases_claim(table: str) -> None:
+    clients = distinct_worker_connections(2, socket_timeout=45)
+    locker = start_table_locker(
+        table, application_name=f"pglc_mget_cancel_lock_{os.getpid()}"
+    )
+    threads: list[threading.Thread] = []
+    results: dict[str, object] = {}
+    key = crud_key(table, 9_100_000_003)
+    try:
+        before = read_cache_stats()
+        owner = threading.Thread(
+            target=run_mget_thread,
+            args=(clients[0], [key], results, "owner"),
+            name="mget-canceled-owner",
+        )
+        threads.append(owner)
+        owner.start()
+        owner_pid = wait_for_blocked_worker_pid(table, timeout=10)
+        assert sql(f"SELECT pg_cancel_backend({owner_pid})") == "t"
+
+        owner.join(timeout=10)
+        assert not owner.is_alive(), "canceled MGET owner did not finish"
+        assert isinstance(results["owner"], RespError), results["owner"]
+        after_cancel = read_cache_stats()
+        assert after_cancel["loading_entries"] == 0
+        assert after_cancel["singleflight_timeouts"] == before["singleflight_timeouts"]
+        assert (
+            after_cancel["expired_loading_entries"]
+            == before["expired_loading_entries"]
+        )
+
+        finish_writer(locker, commit=True)
+        locker = None
+        assert clients[1].command("MGET", key) == [None]
+        after = read_cache_stats()
+        assert after["loading_entries"] == 0
+        assert after["singleflight_leaders"] - before["singleflight_leaders"] == 2
+        assert after["singleflight_timeouts"] == before["singleflight_timeouts"]
+        assert (
+            after["expired_loading_entries"]
+            == before["expired_loading_entries"]
+        )
+    finally:
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(timeout=10)
+        for client in clients:
+            client.close()
+
+
+def test_mget_statement_timeout_cleanup(table: str) -> None:
+    client = RespConnection()
+    locker = start_table_locker(
+        table, application_name=f"pglc_mget_error_lock_{os.getpid()}"
+    )
+    results: dict[str, object] = {}
+    key = crud_key(table, 9_100_000_004)
+    before = read_cache_stats()
+    thread = threading.Thread(
+        target=run_mget_thread,
+        args=(client, [key], results, "timed-out"),
+        name="mget-read-statement-timeout",
+    )
+    try:
+        thread.start()
+        wait_for_stat_at_least(
+            "loading_entries",
+            before["loading_entries"] + 1,
+            timeout=10,
+        )
+        wait_for_blocked_worker_pid(table, timeout=10)
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "read lock timeout did not fail promptly"
+        assert isinstance(results["timed-out"], RespError), results["timed-out"]
+        during_error = read_cache_stats()
+        assert during_error["loading_entries"] == 0
+        finish_writer(locker, commit=True)
+        locker = None
+        assert mget_one(client, key) is None
+        after = read_cache_stats()
+        assert after["loading_entries"] == 0
+        assert after["singleflight_leaders"] - before["singleflight_leaders"] == 2
+    finally:
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        if thread.is_alive():
+            thread.join(timeout=6)
+        client.close()
+
+
+def test_mget_mapping_reload_cleanup(table: str) -> None:
+    client = RespConnection()
+    locker = start_table_locker(
+        table, application_name=f"pglc_mget_reload_lock_{os.getpid()}"
+    )
+    results: dict[str, object] = {}
+    key = crud_key(table, 9_100_000_005)
+    before = read_cache_stats()
+    thread = threading.Thread(
+        target=run_mget_thread,
+        args=(client, [key], results, "reloaded"),
+        name="mget-mapping-reload",
+    )
+    try:
+        thread.start()
+        wait_for_stat_at_least(
+            "loading_entries",
+            before["loading_entries"] + 1,
+            timeout=10,
+        )
+        wait_for_blocked_worker_pid(table, timeout=10)
+        sql("SELECT local_cache._reload()")
+        finish_writer(locker, commit=True)
+        locker = None
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "mapping reload did not release the blocked MGET"
+        assert isinstance(results["reloaded"], RespError), results["reloaded"]
+        assert "mapping changed while the command was running" in str(
+            results["reloaded"]
+        )
+        after_error = read_cache_stats()
+        assert after_error["loading_entries"] == 0
+        assert mget_one(client, key) is None
+        after_refill = read_cache_stats()
+        assert after_refill["loading_entries"] == 0
+        assert (
+            after_refill["singleflight_leaders"]
+            - before["singleflight_leaders"]
+            == 2
+        )
+    finally:
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        if thread.is_alive():
+            thread.join(timeout=6)
         client.close()
 
 
@@ -869,6 +1260,7 @@ def test_enabled_kill_switch(table: str) -> None:
         missing_key = crud_key(table, 99999999)
         for _ in range(3):
             assert mget_one(client, missing_key) is None
+        assert client.command("MGET", missing_key, missing_key) == [None, None]
         after_disabled_reads = json.loads(client.command("STAT"))
         assert after_disabled_reads["cache_hits"] == before_disabled_reads["cache_hits"]
         assert after_disabled_reads["cache_misses"] == before_disabled_reads["cache_misses"]
@@ -884,7 +1276,7 @@ def test_enabled_kill_switch(table: str) -> None:
         assert (
             after_disabled_reads["database_reads"]
             - before_disabled_reads["database_reads"]
-            == 11
+            == 12
         )
 
         rewritten_value = row_bytes(1, "updated-while-cache-disabled")
@@ -904,6 +1296,14 @@ def test_enabled_kill_switch(table: str) -> None:
         after_enable = json.loads(client.command("STAT"))
         assert after_enable["invalidations"] > before_enable["invalidations"]
         assert after_enable["cache_hits"] == before_enable["cache_hits"]
+        assert client.command("MGET", missing_key, missing_key) == [None, None]
+        after_bypass_refill = json.loads(client.command("STAT"))
+        assert after_bypass_refill["singleflight_leaders"] == (
+            after_enable["singleflight_leaders"] + 1
+        )
+        assert after_bypass_refill["database_reads"] == (
+            after_enable["database_reads"] + 1
+        )
         assert mget_one(client, key) == rewritten_value
         assert mget_one(client, inserted_key) == expected_inserted
         assert mget_one(client, surviving_key) == surviving_expected
@@ -977,29 +1377,36 @@ def main() -> None:
         finally:
             bootstrap.close()
 
-        test_fragmented_suffix_and_order(table)
-        test_command_error_does_not_poison_batch(table)
-        test_warm_pipeline_has_no_sql_reads(table)
-        test_mget(table, composite_table, scoped_table)
-        test_pipeline_budget_is_a_fairness_yield()
-        if not TLS_CA_FILE:
-            test_half_close_drains_final_pipeline(table)
-        test_backpressure_preserves_every_response(table)
-        test_close_after_flush(table)
-        test_transactional_commit_and_rollback(table)
-        test_uncommitted_write_is_not_served_before_commit(table)
-        test_enabled_kill_switch(table)
-        half_close_coverage = "half-close drain, " if not TLS_CA_FILE else ""
-        print(
-            "pipeline integration passed: fragmentation/order, warm-hit stats, "
-            "error recovery, fairness resume, "
-            + half_close_coverage
-            + "backpressure, "
-            "bounded MGET, close-after-flush, commit/rollback fence, "
-            "database/table key scope, uncommitted-write visibility, "
-            "SIGHUP cache kill switch, "
-            "non-superuser writer"
-        )
+        if os.environ.get("PGLC_MGET_CONCURRENCY_ONLY") == "1":
+            test_mget_does_not_hold_claim_while_waiting(table, scoped_table)
+            test_mget_cancelled_owner_releases_claim(table)
+            print("MGET concurrent claim integration passed")
+        else:
+            test_fragmented_suffix_and_order(table)
+            test_command_error_does_not_poison_batch(table)
+            test_warm_pipeline_has_no_sql_reads(table)
+            test_mget(table, composite_table, scoped_table)
+            # Existing stale-read stress test covers the snapshot/store race statistically.
+            test_mget_statement_timeout_cleanup(table)
+            test_mget_mapping_reload_cleanup(table)
+            test_pipeline_budget_is_a_fairness_yield()
+            if not TLS_CA_FILE:
+                test_half_close_drains_final_pipeline(table)
+            test_backpressure_preserves_every_response(table)
+            test_close_after_flush(table)
+            test_transactional_commit_and_rollback(table)
+            test_uncommitted_write_is_not_served_before_commit(table)
+            test_enabled_kill_switch(table)
+            half_close_coverage = "half-close drain, " if not TLS_CA_FILE else ""
+            print(
+                "pipeline integration passed: fragmentation/order, warm-hit stats, "
+                "error recovery, fairness resume, "
+                + half_close_coverage
+                + "backpressure, phased MGET, close-after-flush, "
+                "commit/rollback fence, database/table key scope, "
+                "uncommitted-write visibility, SIGHUP cache kill switch, "
+                "non-superuser writer"
+            )
     finally:
         sql(
             f"SELECT local_cache.detach_table('public.{table}'::regclass);"
