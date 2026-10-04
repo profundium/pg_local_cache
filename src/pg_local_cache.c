@@ -886,31 +886,33 @@ cache_load_is_active_locked(PgLocalCacheCacheEntry *entry, TimestampTz now)
 	return false;
 }
 
-static bool
-evict_one_cache_entry(void)
+static int
+evict_cache_entries(void)
 {
 	HASH_SEQ_STATUS sequence;
 	PgLocalCacheCacheEntry *entry;
-	PgLocalCacheCacheKey victim;
-	uint64		oldest = PG_UINT64_MAX;
+	PgLocalCacheCacheKey victims[PGLC_EVICTION_BATCH];
+	PgLocalCacheCacheKey candidates[PGLC_EVICTION_BATCH];
+	uint64		candidate_access[PGLC_EVICTION_BATCH];
 	uint32		initial_cursor = pglc_shared->eviction_bucket_cursor;
 	uint32		start_bucket;
+	int			victim_count = 0;
+	int			candidate_count = 0;
+	int			removed = 0;
 	int			scanned = 0;
 	int			pass;
-	bool		have_victim = false;
+	int			i;
+	bool		sample_limited = false;
 	bool		have_cached_relation_key = false;
 	Oid			cached_database_oid = InvalidOid;
 	char		cached_nspace[PGLC_NAMESPACE_MAX];
 	PgLocalCacheRelationState *cached_relation_state = NULL;
 	TimestampTz now = GetCurrentTimestamp();
 
-	/* Exclusive cache lock keeps relation state stable throughout this sample. */
 	/*
-	 * Rotate a strictly bounded dynahash sample so no bucket is permanently
-	 * pinned.  Reclaim a stale entry immediately when the sample encounters one;
-	 * otherwise evict the least recently used live candidate in the sample.
-	 * Counting protected entries keeps admission work bounded even during long
-	 * transactions or abandoned loader leases.
+	 * The exclusive cache lock keeps relation state stable.  Victims still rank
+	 * within the same 64-entry sample, preserving approximate LRU; eight
+	 * removals amortize that scan and bound lock work.
 	 */
 	for (pass = 0; pass < 2; pass++)
 	{
@@ -923,6 +925,7 @@ evict_one_cache_entry(void)
 		{
 			PgLocalCacheRelationState *relation_state;
 			uint64		last_access;
+			int			position;
 
 			scanned++;
 			if (entry->dirty_writers == 0 &&
@@ -946,22 +949,33 @@ evict_one_cache_entry(void)
 				relation_state = cached_relation_state;
 				if (!cache_entry_is_current_locked(entry, relation_state))
 				{
-					victim = entry->key;
-					have_victim = true;
-					pglc_shared->eviction_bucket_cursor =
-						sequence.curBucket;
-					if (sequence.curEntry != NULL)
-						pglc_shared->eviction_bucket_cursor++;
-					hash_seq_term(&sequence);
-					goto remove_victim;
+					if (victim_count < PGLC_EVICTION_BATCH)
+						victims[victim_count++] = entry->key;
 				}
-
-				last_access = pg_atomic_read_u64(&entry->last_access);
-				if (last_access <= oldest)
+				else
 				{
-					oldest = last_access;
-					victim = entry->key;
-					have_victim = true;
+					last_access = pg_atomic_read_u64(&entry->last_access);
+					if (candidate_count < PGLC_EVICTION_BATCH ||
+						last_access < candidate_access[candidate_count - 1])
+					{
+						if (candidate_count < PGLC_EVICTION_BATCH)
+						{
+							position = candidate_count;
+							candidate_count++;
+						}
+						else
+							position = PGLC_EVICTION_BATCH - 1;
+						while (position > 0 &&
+							   candidate_access[position - 1] > last_access)
+						{
+							candidate_access[position] =
+								candidate_access[position - 1];
+							candidates[position] = candidates[position - 1];
+							position--;
+						}
+						candidate_access[position] = last_access;
+						candidates[position] = entry->key;
+					}
 				}
 			}
 
@@ -971,26 +985,34 @@ evict_one_cache_entry(void)
 				if (sequence.curEntry != NULL)
 					pglc_shared->eviction_bucket_cursor++;
 				hash_seq_term(&sequence);
-				goto sample_complete;
+				sample_limited = true;
+				break;
 			}
 		}
+		if (sample_limited)
+			break;
 
 		/* hash_seq_search reached the end and terminated the scan. */
 		pglc_shared->eviction_bucket_cursor = 0;
-		if (have_victim || start_bucket == 0 ||
+		if (victim_count > 0 || candidate_count > 0 || start_bucket == 0 ||
 			scanned >= PGLC_EVICTION_SAMPLE)
 			break;
 	}
 
-sample_complete:
-	if (!have_victim)
-		return false;
+	entry = NULL;
+	for (i = 0; i < candidate_count &&
+		 i < PGLC_EVICTION_BATCH - victim_count; i++)
+		victims[victim_count++] = candidates[i];
 
-remove_victim:
-	if (hash_search(pglc_cache_hash, &victim, HASH_REMOVE, NULL) == NULL)
-		return false;
-	pg_atomic_fetch_add_u64(&pglc_shared->evictions, 1);
-	return true;
+	for (i = 0; i < victim_count; i++)
+	{
+		if (hash_search(pglc_cache_hash, &victims[i], HASH_REMOVE, NULL) != NULL)
+		{
+			pg_atomic_fetch_add_u64(&pglc_shared->evictions, 1);
+			removed++;
+		}
+	}
+	return removed;
 }
 
 static PgLocalCacheCacheEntry *
@@ -1008,7 +1030,7 @@ get_cache_entry(Oid database_oid, Oid relation_oid,
 	{
 		/* Enforce capacity explicitly; dynahash does not do so by default. */
 		if (hash_get_num_entries(pglc_cache_hash) >=
-			(uint64) pglc_cache_entries && !evict_one_cache_entry())
+			(uint64) pglc_cache_entries && !evict_cache_entries())
 		{
 			pg_atomic_fetch_add_u64(
 				&pglc_shared->cache_admission_rejections, 1);

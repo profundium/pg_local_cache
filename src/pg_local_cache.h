@@ -32,6 +32,7 @@
 #define PGLC_AUTH_TOKEN_MAX 1024
 #define PGLC_MAX_AUTH_FAILURES 5
 #define PGLC_EVICTION_SAMPLE 64
+#define PGLC_EVICTION_BATCH 8
 
 typedef struct PgLocalCacheCacheKey
 {

@@ -17,6 +17,8 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 - Evictions no longer rehash the relation key for every sampled candidate,
   which serialized RESP workers when the cache was full.
+- Evictions free up to 8 entries per sample so full caches no longer scan on
+  every fill.
 
 ## [3.0.0] - 2026-10-04
 
