@@ -32,6 +32,42 @@ npm --prefix examples/node-postgres ci --ignore-scripts
 node --test examples/node-postgres/queries.test.mjs
 ```
 
+## RESP fuzzing and stress testing
+
+The source test and sanitizer targets replay every file in
+`fuzz/corpus/resp_parse`, checking all strict prefixes of complete seed
+commands. Run the replay directly with:
+
+```bash
+make -C tests/unit check sanitize
+```
+
+With Clang and libFuzzer installed, build and run the parser fuzzer locally:
+
+```bash
+clang -DPGLC_RESP_STANDALONE -Isrc -g -O1 -fsanitize=fuzzer,address,undefined fuzz/resp_parse_fuzzer.c src/resp.c -o /tmp/resp_parse_fuzzer && /tmp/resp_parse_fuzzer -max_total_time=60 fuzz/corpus/resp_parse
+```
+
+Pull requests run ClusterFuzzLite with AddressSanitizer and
+UndefinedBehaviorSanitizer. No `infra/helper.py` setup is needed for that CI
+path.
+
+Against a running PostgreSQL instance with `pg_local_cache` loaded, the
+integration test creates and attaches `public.stress_items`, runs concurrent
+committed and rolled-back writes, RESP readers, invalidations, a cache kill
+switch cycle, and malformed input. It checks sampled reads and finishes with
+an exact SQL-to-RESP scan after writers stop. Configure PostgreSQL and RESP
+connections with the same `PG*` and `PG_LOCAL_CACHE_*` environment variables
+used by the other integration suites. Run the default 30-second test with:
+
+```bash
+python3 tests/stress_integration.py
+```
+
+Set `PGLC_STRESS_SECONDS=10` for a shorter run. `PGLC_STRESS_KEYS`,
+`PGLC_STRESS_WRITERS`, and `PGLC_STRESS_READERS` tune the workload; key count
+must exceed configured cache capacity to verify eviction churn.
+
 ## Releasing the extension
 
 Run `scripts/bump-version.sh X.Y.Z` to move the non-empty `[Unreleased]` notes in

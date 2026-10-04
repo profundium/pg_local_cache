@@ -26,6 +26,12 @@ PostgreSQL `ssl_*` settings. For non-loopback listeners, prefer TLS; enable
 `pg_local_cache.allow_plaintext_network` only for plaintext on a trusted
 network.
 
+The RESP parser runs continuously under ClusterFuzzLite with AddressSanitizer
+and UndefinedBehaviorSanitizer on pull requests. PostgreSQL integration CI also
+runs a concurrent stale-read stress test with committed and rolled-back writes,
+cache invalidation, kill-switch changes, malformed RESP input, and plaintext
+and TLS listeners.
+
 We aim to acknowledge reports within 3 business days and provide an initial
 triage within 10 business days. Confirmed active exploitation receives priority.
 Response times are targets, not a service-level guarantee.

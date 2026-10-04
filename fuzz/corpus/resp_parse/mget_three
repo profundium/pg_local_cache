@@ -1,0 +1,9 @@
+*4
+$4
+MGET
+$31
+CRUD:db.public.items:{"id":"1"}
+$31
+CRUD:db.public.items:{"id":"2"}
+$31
+CRUD:db.public.items:{"id":"3"}

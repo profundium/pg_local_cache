@@ -88,7 +88,16 @@ test_binary_and_empty_bulk_strings(void)
 static void
 test_all_valid_prefixes_are_incomplete(void)
 {
-	const char *request = "*2\r\n$4\r\nMGET\r\n$5\r\nns:k1\r\n";
+	/* The second request keeps a sign that must not error when split after it. */
+	static const char *const requests[] = {
+		"*2\r\n$4\r\nMGET\r\n$5\r\nns:k1\r\n",
+		"*1\r\n$-0\r\n\r\n",
+	};
+	Size		r;
+
+	for (r = 0; r < sizeof(requests) / sizeof(requests[0]); r++)
+	{
+	const char *request = requests[r];
 	Size		length = strlen(request);
 	Size		prefix;
 
@@ -105,6 +114,7 @@ test_all_valid_prefixes_are_incomplete(void)
 		CHECK(error == NULL);
 		CHECK(argc == 0);
 		CHECK(consumed == 0);
+	}
 	}
 }
 

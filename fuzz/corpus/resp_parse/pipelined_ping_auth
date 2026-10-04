@@ -1,0 +1,8 @@
+*1
+$4
+PING
+*2
+$4
+AUTH
+$10
+seed-token
