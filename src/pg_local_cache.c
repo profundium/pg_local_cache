@@ -1429,6 +1429,12 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 		result = PGLC_LOAD_WAIT;
 		goto done;
 	}
+	/* An expired lease revokes this token; retry with the new entry version. */
+	if (entry->version != token->key_version)
+	{
+		result = PGLC_LOAD_RETRY;
+		goto done;
+	}
 
 	entry->loading = true;
 	entry->load_started = now;
