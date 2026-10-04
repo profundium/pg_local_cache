@@ -13,6 +13,11 @@ All notable changes to pg_local_cache are documented here. This project follows
 - RESP workers no longer leak memory on cache misses and writes (could grow by
   ~2 KB per miss until the OOM killer restarted PostgreSQL).
 
+### Changed
+
+- Evictions no longer rehash the relation key for every sampled candidate,
+  which serialized RESP workers when the cache was full.
+
 ## [3.0.0] - 2026-10-04
 
 3.0.0 makes pg_local_cache RESP-only and ready for distribution packages. Read
