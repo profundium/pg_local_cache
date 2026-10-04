@@ -80,22 +80,22 @@ class BumpVersionChecks(unittest.TestCase):
         # fixture with an Unreleased section so the tests exercise the next bump.
         changelog_path = self.repo / "CHANGELOG.md"
         changelog = changelog_path.read_text(encoding="utf-8")
-        release = re.search(
-            rf"(?m)^## \[{re.escape(self.old)}\](?: - \d{{4}}-\d{{2}}-\d{{2}})?\n",
-            changelog,
-        )
-        if release is None:
-            raise AssertionError(f"missing current release section for {self.old}")
-        next_release = re.search(r"(?m)^## \[", changelog[release.end():])
-        release_end = release.end() + next_release.start() if next_release else len(changelog)
-        notes = changelog[release.end():release_end].strip()
-        if not notes:
-            raise AssertionError("current release section has no notes")
-        changelog_path.write_text(
-            changelog[:release.start()] + "## [Unreleased]\n\n" + notes + "\n\n" +
-            changelog[release.start():],
-            encoding="utf-8",
-        )
+        # Give the next bump synthetic notes: reuse an existing [Unreleased]
+        # heading or add one, so the test does not depend on release prose.
+        notes = "### Added\n\n- Synthetic bump-test note.\n"
+        unreleased = re.search(r"(?m)^## \[Unreleased\]\n", changelog)
+        if unreleased is None:
+            release = re.search(r"(?m)^## \[", changelog)
+            if release is None:
+                raise AssertionError("CHANGELOG.md has no release sections")
+            changelog = (changelog[:release.start()] + "## [Unreleased]\n\n" +
+                         notes + "\n" + changelog[release.start():])
+        else:
+            following = re.search(r"(?m)^## \[", changelog[unreleased.end():])
+            body_end = unreleased.end() + following.start() if following else len(changelog)
+            changelog = (changelog[:unreleased.end()] + "\n" + notes + "\n" +
+                         changelog[body_end:])
+        changelog_path.write_text(changelog, encoding="utf-8")
 
         command(["git", "init", "--quiet"], self.repo)
         command(["git", "config", "user.name", "Bump Version Test"], self.repo)
@@ -130,10 +130,7 @@ class BumpVersionChecks(unittest.TestCase):
             project_changelog,
             rf"(?m)^## \[Unreleased\]\n\n## \[{re.escape(self.new)}\] - ",
         )
-        self.assertIn(
-            "### Added\n\n- Add the SIGHUP `pg_local_cache.enabled` operational kill switch.",
-            project_changelog,
-        )
+        self.assertIn("### Added\n\n- Synthetic bump-test note.", project_changelog)
         rpm_spec = (self.repo / "rpm/pg_local_cache.spec").read_text(encoding="utf-8")
         self.assertRegex(rpm_spec, rf"(?m)^Version:\s*{re.escape(self.new)}\s*$")
 

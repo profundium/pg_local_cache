@@ -6,47 +6,52 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ## [Unreleased]
 
-### Added
-
-- Add continuous RESP parser fuzzing and deterministic seed-corpus replay.
-- Add concurrent stale-read stress coverage for committed writes, rollbacks,
-  invalidation, worker health, malformed input, and TLS.
-
 ## [3.0.0] - 2026-10-04
 
+3.0.0 makes pg_local_cache RESP-only and ready for distribution packages. Read
+[UPGRADING.md](https://github.com/profundium/pg_local_cache/blob/v3.0.0/docs/UPGRADING.md) before upgrading from 2.x.
+
 ### Added
 
-- Add the SIGHUP `pg_local_cache.enabled` operational kill switch.
-- Add an explicit opt-in for plaintext RESP listeners on non-loopback addresses.
-- Add native TLS and optional mutual TLS for the RESP listener, with
-  handshake metrics.
-- Add an upgrade path from 2.0.4 that preserves existing trigger function OIDs.
-
-- Debian and RPM package references and package-build CI for PGDG repositories.
-- Release `.deb` and `.rpm` packages, a source tarball, `SHA256SUMS`, and build
-  provenance attestations.
-- pg_regress administrative coverage, package installcheck, and security policy.
-- SPDX license identifiers to all C source and header files.
+- Native TLS and optional mutual TLS for the RESP listener
+  (`pg_local_cache.tls`, `tls_cert_file`, `tls_key_file`, `tls_ca_file`,
+  `tls_min_protocol_version`), with handshake metrics and `tls_enabled` in
+  `health()`.
+- `pg_local_cache.enabled`, a kill switch applied on reload without a restart.
+- `.deb` packages (PostgreSQL 14-18, amd64/arm64) and EL9 RPMs (x86_64/aarch64)
+  in releases, with a source tarball, `SHA256SUMS` and build provenance
+  attestations; Debian and RPM packaging in the repository.
+- pg_regress coverage (`make installcheck`), package installchecks, an upgrade
+  test from 2.0.4 on a populated database, continuous fuzzing of the RESP
+  parser, and a concurrent stale-read stress test over plaintext and TLS.
+- `SECURITY.md`, `UPGRADING.md` and SPDX license identifiers.
 
 ### Changed
 
-- Make the extension RESP-only; RESP `MGET` replaces SQL `local_cache.mget`.
-- Advance the global cache epoch when the kill switch is re-enabled.
-- Require `pg_local_cache.allow_plaintext_network` for non-loopback plaintext
-  listeners.
-- Require TLS or explicit trusted-network opt-in for non-loopback RESP
-  access.
-- Move the multilingual documentation site under `site/` and keep release
-  archives focused on extension source, SQL, tests, and Markdown documentation.
-- Replace legacy release helpers with the tested `scripts/bump-version.sh`
-  workflow and extend it to update and validate Debian changelog metadata.
+- RESP `MGET` is the read API; SQL `local_cache.mget` is removed.
+- A non-loopback listener requires `tls = on` or an explicit
+  `allow_plaintext_network = on`.
+- `module_pathname` is the bare library name, as PostgreSQL 18
+  `extension_control_path` and CloudNativePG image-volume extensions require.
+  The upgrade script re-points existing functions.
+- Releases are cut from `v*` tags after the full CI; versions are prepared with
+  `scripts/bump-version.sh`.
+- The documentation site moved under `site/`; release archives contain only
+  the extension source, SQL, tests and Markdown documentation.
+
+### Fixed
+
+- `health()` no longer reports ready before a RESP worker accepts
+  connections.
+- A request split by TCP right after a length sign is no longer rejected.
+- Source builds from archives without `.git` no longer fail on a missing build
+  id.
 
 ### Removed
 
-- Remove SQL `local_cache.mget(regclass, anyarray)` and its SQL-only counters.
-- Remove the bespoke installer and glibc/musl binary tarballs.
-- Remove duplicate historical install SQL copies, obsolete release helpers, and
-  superseded contract tests; retain current install SQL and upgrade paths.
+- SQL `local_cache.mget(regclass, anyarray)` and its `sql_cache_*` counters.
+- The bespoke installer scripts and the glibc/musl binary tarballs.
+- Duplicate historical install SQL copies and obsolete release helpers.
 
 ## [2.0.4] - 2026-09-16
 
