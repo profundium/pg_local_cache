@@ -19,6 +19,103 @@ docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build
 
 这会在 `127.0.0.1:56379` 启用 RESP。重新创建演示会丢弃其数据。下方令牌是公开的，仅适用于本地演示。
 
+## TLS 与 mTLS 客户端 {#tls-mtls-clients}
+
+连接 loopback 之外的 RESP listener 时建议使用 TLS。RESP 原生 TLS 配置独立于 PostgreSQL 的 `ssl_*`
+配置。以下示例使用 RESP2 和双向 TLS (mTLS)：`cache.example` 必须与服务器证书匹配，`./ca.crt`
+必须信任该证书，客户端证书必须由 `pg_local_cache.tls_ca_file` 配置的 CA 签发。仅验证服务器的 TLS
+连接可省略客户端证书和密钥选项。
+
+**redis-cli**
+
+```bash
+export REDISCLI_AUTH="$PGLC_RESP_TOKEN"
+redis-cli -2 --tls --cacert ./ca.crt --cert ./client.crt --key ./client.key -h cache.example -p 6380 MGET 'CRUD:app.public.items:{"id":42}'
+```
+
+**go-redis**
+
+```go
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"log"
+	"os"
+
+	"github.com/redis/go-redis/v9"
+)
+
+func main() {
+	caPEM, err := os.ReadFile("./ca.crt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if ok := roots.AppendCertsFromPEM(caPEM); !ok {
+		log.Fatal("no CA certificates found")
+	}
+	clientCert, err := tls.LoadX509KeyPair("./client.crt", "./client.key")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	client := redis.NewClient(&redis.Options{
+		Addr:            "cache.example:6380",
+		Password:        os.Getenv("PGLC_RESP_TOKEN"),
+		Protocol:        2,
+		DisableIdentity: true,
+		TLSConfig: &tls.Config{
+			RootCAs:      roots,
+			MinVersion:   tls.VersionTLS12,
+			ServerName:   "cache.example",
+			Certificates: []tls.Certificate{clientCert},
+		},
+	})
+	defer client.Close()
+
+	rows, err := client.MGet(context.Background(), `CRUD:app.public.items:{"id":42}`).Result()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("%v", rows)
+}
+```
+
+**node-redis**
+
+```js
+import { readFileSync } from 'node:fs';
+import { createClient } from '@redis/client';
+
+const client = createClient({
+  socket: {
+    host: 'cache.example',
+    port: 6380,
+    tls: true,
+    servername: 'cache.example',
+    ca: readFileSync('./ca.crt'),
+    cert: readFileSync('./client.crt'),
+    key: readFileSync('./client.key'),
+  },
+  password: process.env.PGLC_RESP_TOKEN,
+  RESP: 2,
+  disableClientInfo: true,
+});
+client.on('error', console.error);
+await client.connect();
+
+try {
+  const values = await client.mGet(['CRUD:app.public.items:{"id":42}']);
+  const rows = values.map(value => value === null ? null : JSON.parse(value));
+  console.log(rows);
+} finally {
+  await client.close();
+}
+```
+
 ## redis-cli {#redis-cli}
 
 ```bash
@@ -62,7 +159,13 @@ try {
 
 RESP 工作进程为所有客户端使用一个配置的 PostgreSQL 角色。如果需要在 SQL 事务内读取，请使用 [Node.js SQL](node-postgres.md) 或 [Go SQL](go.md)。支持的命令与限制见 [RESP 参考](TECHNICAL.md#optional-resp2-endpoint)。
 
-监听器默认绑定到 loopback。绑定到非本地 IPv4 地址需要设置 `pg_local_cache.allow_plaintext_network=on`；演示仅在其容器网络中启用该项。监听器不提供 TLS：请使用 loopback 或受信任的网络。`pg_local_cache.enabled` 是 SIGHUP 紧急开关。每个 RESP worker 都会在下一个命令边界异步应用重载，且会等当前执行的命令结束。`local_cache.health()` 中的 `cache_enabled` 字段报告调用它的 SQL 会话所见设置；它不表示所有 worker 都已应用该设置。若要在不重启的情况下关闭缓存读取，请执行 `ALTER SYSTEM SET pg_local_cache.enabled = off;` 和 `SELECT pg_reload_conf();`。关闭期间，RESP 会为每次读取直接查询源表。
+监听器默认绑定到 loopback。loopback 之外建议使用 TLS；RESP TLS 使用独立配置，与 PostgreSQL 的 `ssl_*`
+配置互不影响。TLS 关闭时，loopback 之外的明文 listener 必须显式设置
+`pg_local_cache.allow_plaintext_network=on`，且仅限可信网络。演示仅在其容器网络内启用该项。参阅 [TLS 与
+mTLS 客户端](#tls-mtls-clients)。 `pg_local_cache.enabled` 是 SIGHUP 紧急开关。每个 RESP
+worker 都会在下一个命令边界异步应用重载，且会等当前执行的命令结束。`local_cache.health()` 中的 `cache_enabled`
+字段报告调用它的 SQL 会话所见设置；它不表示所有 worker 都已应用该设置。若要在不重启的情况下关闭缓存读取，请执行 `ALTER SYSTEM SET pg_local_cache.enabled = off;` 和 `SELECT pg_reload_conf();`。关闭期间，RESP
+会为每次读取直接查询源表。
 
 ## 与 SQL 比较 {#compare-with-sql}
 

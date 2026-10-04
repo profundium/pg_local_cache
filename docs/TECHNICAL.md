@@ -94,6 +94,11 @@ the source table instead of allocating unbounded memory.
 | `pg_local_cache.auth_token_file` | empty | preferred RESP credential |
 | `pg_local_cache.auth_token` | empty | development-only inline token |
 | `pg_local_cache.enabled` | `on` | SIGHUP cache kill switch; RESP reads go directly to source while off |
+| `pg_local_cache.tls` | `off` | enable TLS on the RESP listener; requires PostgreSQL built with OpenSSL |
+| `pg_local_cache.tls_cert_file` | empty | PEM server certificate/chain; required when TLS is on |
+| `pg_local_cache.tls_key_file` | empty | PEM server private key; required when TLS is on |
+| `pg_local_cache.tls_ca_file` | empty | trusted client CA; setting it enables mutual TLS |
+| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | minimum TLS version (`TLSv1.2` or `TLSv1.3`) |
 | `pg_local_cache.allow_plaintext_network` | `off` | postmaster opt-in for plaintext listeners outside IPv4 loopback |
 | `pg_local_cache.allow_superuser` | `off` | development-only role override |
 
@@ -113,11 +118,18 @@ Supported commands are authenticated, bounded `MGET`, `SET`, `DEL`, and scoped
 invalidation. RESP workers use one configured PostgreSQL role; they do not
 inherit each network client's database ACLs.
 
-Native TLS is not included in 3.0.0. By default, workers accept only IPv4
-loopback listeners. Set `pg_local_cache.allow_plaintext_network = on` only when
-the listener is on a trusted network and protected by network controls. A
-non-loopback listener still requires a token of at least 32 bytes. Prefer a
-mode-restricted token file over an inline token.
+RESP TLS uses dedicated `pg_local_cache.tls_*` settings and is independent of
+PostgreSQL `ssl_*` settings. PostgreSQL TLS on the SQL port does not secure
+RESP, and RESP TLS does not change the SQL listener. Enable `pg_local_cache.tls`
+and provide a server certificate and key; setting `pg_local_cache.tls_ca_file`
+verifies client certificates and enables mutual TLS. The minimum protocol
+defaults to `TLSv1.2` and can be raised to `TLSv1.3`. OpenSSL system cipher
+defaults apply. The private key follows [PostgreSQL's server key file
+rule](https://www.postgresql.org/docs/current/ssl-tcp.html). Prefer TLS beyond
+loopback. With TLS off, plaintext on a non-loopback listener requires the
+explicit `pg_local_cache.allow_plaintext_network = on` opt-in, limited to
+trusted networks. A non-loopback listener still requires a token of at least 32
+bytes; prefer a mode-restricted token file over an inline token.
 
 `pg_local_cache.enabled` is a SIGHUP setting. Each RESP worker applies a reload
 asynchronously at its next command boundary, after any command it is executing
@@ -144,6 +156,9 @@ SELECT pg_reload_conf();
 `local_cache.health()` reports readiness, `cache_enabled`, and mapping convergence.
 `local_cache.stats()` returns JSON counters. `local_cache.metrics()` exposes the
 typed metrics row used by the exporter.
+
+TLS counters `tls_handshakes_total` and `tls_handshake_failures_total` are
+exposed in `stats()` and `metrics()`.
 
 Database reads, invalidations, admission rejection, dirty-key fallback,
 singleflight, worker, and RESP counters remain available. The four counters for

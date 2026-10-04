@@ -47,7 +47,8 @@ for attempt in 1 2 3 4 5; do
     echo "PGDG repository setup attempt $attempt/5 failed" >&2
     sleep $((attempt * 4))
 done
-retry_apt "postgresql-$PG" "postgresql-server-dev-$PG" build-essential python3 git
+retry_apt "postgresql-$PG" "postgresql-server-dev-$PG" build-essential \
+    python3 git openssl libssl-dev
 # Runs as root over a checkout owned by another user (sudo on CI runners).
 git config --global --add safe.directory "$repo"
 # Build an isolated working copy so PGXS artifacts do not dirty the checkout.
@@ -132,6 +133,136 @@ for integration in whole_row_integration pipeline_integration \
     echo "==> $integration"
     python3 "$repo/tests/$integration.py"
 done
+
+# Keep TLS fixtures inside the cluster data directory so PostgreSQL can read
+# them with relative paths and tests never depend on a host certificate store.
+tls_dir="$cluster_data/tls"
+install -d -o postgres -g postgres -m 0700 "$tls_dir"
+old_umask=$(umask)
+umask 077
+openssl genrsa -out "$tls_dir/ca.key" 2048
+openssl req -x509 -new -key "$tls_dir/ca.key" -sha256 -days 2 \
+    -subj '/CN=pg_local_cache test CA' \
+    -addext 'basicConstraints=critical,CA:TRUE' \
+    -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+    -out "$tls_dir/ca.crt"
+openssl genrsa -out "$tls_dir/server.key" 2048
+openssl req -new -key "$tls_dir/server.key" -subj '/CN=127.0.0.1' \
+    -out "$tls_dir/server.csr"
+cat >"$tls_dir/server.ext" <<'EXT'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=IP:127.0.0.1
+EXT
+openssl x509 -req -in "$tls_dir/server.csr" -CA "$tls_dir/ca.crt" \
+    -CAkey "$tls_dir/ca.key" -CAcreateserial -days 2 -sha256 \
+    -extfile "$tls_dir/server.ext" -out "$tls_dir/server.crt"
+openssl genrsa -out "$tls_dir/client.key" 2048
+openssl req -new -key "$tls_dir/client.key" -subj '/CN=pg_local_cache test client' \
+    -out "$tls_dir/client.csr"
+cat >"$tls_dir/client.ext" <<'EXT'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=clientAuth
+EXT
+openssl x509 -req -in "$tls_dir/client.csr" -CA "$tls_dir/ca.crt" \
+    -CAkey "$tls_dir/ca.key" -CAcreateserial -days 2 -sha256 \
+    -extfile "$tls_dir/client.ext" -out "$tls_dir/client.crt"
+umask "$old_umask"
+chown -R postgres:postgres "$tls_dir"
+chmod 0600 "$tls_dir/ca.key" "$tls_dir/server.key" "$tls_dir/client.key"
+chmod 0644 "$tls_dir/ca.crt" "$tls_dir/server.crt" "$tls_dir/client.crt"
+
+cat >/etc/postgresql/"$PG"/ci/pglc.conf <<CONF
+shared_preload_libraries = 'pg_local_cache'
+pg_local_cache.database = 'postgres'
+pg_local_cache.role = 'local_cache_worker'
+pg_local_cache.port = 6391
+pg_local_cache.bind_address = '127.0.0.1'
+pg_local_cache.auth_token_file = '$token_file'
+pg_local_cache.workers = 1
+pg_local_cache.cache_entries = 512
+pg_local_cache.max_clients = 16
+pg_local_cache.max_clients_per_worker = 16
+pg_local_cache.memory_budget_mb = 64
+pg_local_cache.idle_timeout_ms = 1000
+pg_local_cache.tls = on
+pg_local_cache.tls_cert_file = 'tls/server.crt'
+pg_local_cache.tls_key_file = 'tls/server.key'
+CONF
+pg_ctlcluster "$PG" ci restart
+echo "==> TLS handshake deadline"
+PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
+    python3 "$repo/tests/tls_integration.py" --handshake-timeout
+sed -i 's/pg_local_cache.idle_timeout_ms = 1000/pg_local_cache.idle_timeout_ms = 60000/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+pg_ctlcluster "$PG" ci restart
+echo "==> tls_integration"
+PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
+    python3 "$repo/tests/tls_integration.py"
+echo "==> pipeline_integration over TLS"
+PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
+    python3 "$repo/tests/pipeline_integration.py"
+
+cat >>/etc/postgresql/"$PG"/ci/pglc.conf <<'CONF'
+pg_local_cache.tls_min_protocol_version = 'TLSv1.3'
+CONF
+pg_ctlcluster "$PG" ci restart
+echo "==> TLS protocol floor"
+PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
+    python3 "$repo/tests/tls_integration.py" --protocol-floor
+
+cat >/etc/postgresql/"$PG"/ci/pglc.conf <<CONF
+shared_preload_libraries = 'pg_local_cache'
+pg_local_cache.database = 'postgres'
+pg_local_cache.role = 'local_cache_worker'
+pg_local_cache.port = 6391
+pg_local_cache.bind_address = '0.0.0.0'
+pg_local_cache.auth_token_file = '$token_file'
+pg_local_cache.workers = 1
+pg_local_cache.cache_entries = 512
+pg_local_cache.max_clients = 16
+pg_local_cache.max_clients_per_worker = 16
+pg_local_cache.memory_budget_mb = 64
+pg_local_cache.idle_timeout_ms = 60000
+pg_local_cache.tls = on
+pg_local_cache.tls_cert_file = 'tls/server.crt'
+pg_local_cache.tls_key_file = 'tls/server.key'
+CONF
+pg_ctlcluster "$PG" ci restart
+echo "==> TLS non-loopback health"
+PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
+    python3 "$repo/tests/tls_integration.py" --bind-health
+
+cat >/etc/postgresql/"$PG"/ci/pglc.conf <<CONF
+shared_preload_libraries = 'pg_local_cache'
+pg_local_cache.database = 'postgres'
+pg_local_cache.role = 'local_cache_worker'
+pg_local_cache.port = 6391
+pg_local_cache.bind_address = '127.0.0.1'
+pg_local_cache.auth_token_file = '$token_file'
+pg_local_cache.workers = 1
+pg_local_cache.cache_entries = 512
+pg_local_cache.max_clients = 16
+pg_local_cache.max_clients_per_worker = 16
+pg_local_cache.memory_budget_mb = 64
+pg_local_cache.idle_timeout_ms = 60000
+pg_local_cache.tls = on
+pg_local_cache.tls_cert_file = 'tls/server.crt'
+pg_local_cache.tls_key_file = 'tls/server.key'
+pg_local_cache.tls_ca_file = 'tls/ca.crt'
+CONF
+pg_ctlcluster "$PG" ci restart
+echo "==> mTLS integration"
+PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" \
+    PG_LOCAL_CACHE_TLS_CERT="$tls_dir/client.crt" \
+    PG_LOCAL_CACHE_TLS_KEY="$tls_dir/client.key" \
+    PG_LOCAL_CACHE_TLS_WRONG_CERT="$tls_dir/server.crt" \
+    PG_LOCAL_CACHE_TLS_WRONG_KEY="$tls_dir/server.key" \
+    PG_LOCAL_CACHE_RESP_PORT=6391 \
+    python3 "$repo/tests/tls_integration.py" --mtls
+
 default_version=$(sed -n "s/^default_version = '\([^']*\)'$/\1/p" "$repo/pg_local_cache.control")
 mapfile -t sorted_versions < <(
     {

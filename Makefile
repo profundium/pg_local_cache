@@ -53,6 +53,9 @@ PG_CPPFLAGS += -DPGLC_BUILD_ID='"$(PGLC_BUILD_ID_RESOLVED)"'
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+ifeq ($(with_ssl),openssl)
+SHLIB_LINK += -lssl -lcrypto
+endif
 endif
 
 .PHONY: verify-static source-test source-sanitize integration docker-smoke

@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -13,6 +14,11 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#ifdef USE_OPENSSL
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#endif
 
 #include "access/detoast.h"
 #include "access/htup_details.h"
@@ -57,6 +63,7 @@
 	(PGLC_RESPONSE_MAX + PGLC_OUTPUT_BATCH_BYTES)
 #define PGLC_READY_CLIENTS_PER_TURN 8
 #define PGLC_AUTH_TOKEN_FILE_MAX 256
+#define PGLC_TLS_READ_MAX 8192
 
 typedef struct PgLocalCacheClient
 {
@@ -70,6 +77,19 @@ typedef struct PgLocalCacheClient
 	Size		output_used;
 	Size		output_sent;
 	TimestampTz last_activity;
+#ifdef USE_OPENSSL
+	SSL		   *ssl;
+	bool		tls_ready;
+	bool		tls_skip_shutdown;
+	bool		tls_handshake_failure_counted;
+	TimestampTz tls_accepted_at;
+	/* Handshake wait is separate; SSL_read and SSL_write waits never alias. */
+	int			tls_handshake_wait;
+	int			tls_read_wait;
+	int			tls_write_wait;
+	Size		tls_write_retry_offset;
+	Size		tls_write_retry_length;
+#endif
 	char		input[PGLC_REQUEST_MAX];
 	char		output[PGLC_OUTPUT_BUFFER_MAX];
 } PgLocalCacheClient;
@@ -88,11 +108,15 @@ static char *worker_auth_token = NULL;
 static bool bind_address_is_loopback(const char *address);
 static uint64 worker_client_reservations = 0;
 static bool worker_counted_active = false;
+#ifdef USE_OPENSSL
+static SSL_CTX *worker_ssl_ctx = NULL;
+#endif
 
 static void load_auth_token(void);
 static void worker_before_exit(int code, Datum arg);
 static void validate_file_descriptor_limit(void);
 static int create_listener(void);
+static void initialize_tls_server(void);
 static void run_server(int listener);
 static void close_client(PgLocalCacheClient *client);
 static void compact_client_input(PgLocalCacheClient *client);
@@ -101,6 +125,16 @@ static bool queue_response(PgLocalCacheClient *client,
 						   const char *response, Size response_length,
 						   bool close_after);
 static bool process_client(PgLocalCacheClient *client);
+#ifdef USE_OPENSSL
+static bool drive_tls_handshake(PgLocalCacheClient *client);
+static bool client_has_tls_input(PgLocalCacheClient *client);
+static ssize_t client_recv(PgLocalCacheClient *client, void *buffer, Size length);
+static ssize_t client_send(PgLocalCacheClient *client, const void *buffer, Size length);
+static void count_tls_handshake_failure(PgLocalCacheClient *client);
+#else
+static ssize_t client_recv(PgLocalCacheClient *client, void *buffer, Size length);
+static ssize_t client_send(PgLocalCacheClient *client, const void *buffer, Size length);
+#endif
 static char *execute_command(PgLocalCacheClient *client,
 							 PgLocalCacheRespArg *args, int argc,
 							 Size *response_length, bool *close_after);
@@ -175,6 +209,7 @@ pg_local_cache_worker_main(Datum main_arg)
 										ALLOCSET_SMALL_SIZES);
 	maybe_reload_mappings();
 
+	initialize_tls_server();
 	listener = create_listener();
 	/* Count the worker only once it accepts connections: health() reads this. */
 	pglc_note_worker_start();
@@ -396,6 +431,142 @@ load_auth_token(void)
 
 }
 
+#ifdef USE_OPENSSL
+static int
+reject_ssl_passphrase(char *buffer, int size, int rwflag, void *userdata)
+{
+	/* This worker must never prompt for, or retain, a private-key passphrase. */
+	(void) buffer;
+	(void) size;
+	(void) rwflag;
+	(void) userdata;
+	return 0;
+}
+
+static void
+report_ssl_configuration_error(const char *operation)
+{
+	unsigned long error_code = ERR_get_error();
+	char		ssl_error[256];
+
+	if (error_code != 0)
+		ERR_error_string_n(error_code, ssl_error, sizeof(ssl_error));
+	else
+		strlcpy(ssl_error, "no OpenSSL error details", sizeof(ssl_error));
+	ereport(FATAL,
+			(errmsg("pg_local_cache TLS %s failed: %s", operation, ssl_error),
+			 errhint("Check the RESP TLS certificate, key, CA files, protocol version, and key permissions.")));
+}
+
+static char *
+resolve_tls_path(const char *path)
+{
+	if (path[0] == '/')
+		return pstrdup(path);
+	return psprintf("%s/%s", DataDir, path);
+}
+
+static void
+check_tls_key_file_permissions(const char *path)
+{
+	struct stat statbuf;
+	uid_t		server_uid = geteuid();
+	mode_t		mode;
+
+	if (stat(path, &statbuf) < 0)
+		ereport(FATAL,
+				(errcode_for_file_access(),
+				 errmsg("could not stat pg_local_cache TLS private key file: %m"),
+				 errhint("Set pg_local_cache.tls_key_file to a regular file readable by the PostgreSQL server user.")));
+	if (!S_ISREG(statbuf.st_mode))
+		ereport(FATAL,
+				(errmsg("pg_local_cache TLS private key file must be a regular file"),
+				 errhint("Use a regular file owned by the PostgreSQL server user or root.")));
+	if (statbuf.st_uid != server_uid && statbuf.st_uid != 0)
+		ereport(FATAL,
+				(errmsg("pg_local_cache TLS private key file must be owned by the PostgreSQL server user or root"),
+				 errhint("Change the file owner to the PostgreSQL server user or root.")));
+
+	mode = statbuf.st_mode;
+	if ((statbuf.st_uid == server_uid && (mode & (S_IRWXG | S_IRWXO)) != 0) ||
+		(statbuf.st_uid == 0 &&
+		 (mode & (S_IWGRP | S_IXGRP | S_IRWXO)) != 0))
+		ereport(FATAL,
+				(errmsg("pg_local_cache TLS private key file permissions are too permissive"),
+				 errhint("For a server-owned key, remove all group and other permissions; for a root-owned key, allow at most root and group read.")));
+}
+
+static void
+initialize_tls_server(void)
+{
+	char	   *certificate_path;
+	char	   *key_path;
+	int			protocol_version;
+
+	if (!pglc_tls)
+		return;
+	if (pglc_tls_cert_file == NULL || pglc_tls_cert_file[0] == '\0' ||
+		pglc_tls_key_file == NULL || pglc_tls_key_file[0] == '\0')
+		ereport(FATAL,
+				(errmsg("pg_local_cache.tls requires tls_cert_file and tls_key_file"),
+				 errhint("Set pg_local_cache.tls_cert_file and pg_local_cache.tls_key_file to PEM files.")));
+
+	ERR_clear_error();
+	worker_ssl_ctx = SSL_CTX_new(TLS_server_method());
+	if (worker_ssl_ctx == NULL)
+		report_ssl_configuration_error("context creation");
+
+	SSL_CTX_set_options(worker_ssl_ctx, SSL_OP_NO_COMPRESSION);
+#ifdef SSL_OP_NO_RENEGOTIATION
+	SSL_CTX_set_options(worker_ssl_ctx, SSL_OP_NO_RENEGOTIATION);
+#endif
+	protocol_version = pglc_tls_min_protocol_version == 13 ?
+		TLS1_3_VERSION : TLS1_2_VERSION;
+	if (SSL_CTX_set_min_proto_version(worker_ssl_ctx, protocol_version) != 1)
+		report_ssl_configuration_error("minimum protocol configuration");
+	if (SSL_CTX_set_session_id_context(worker_ssl_ctx,
+									  (const unsigned char *) "pg_local_cache",
+									  strlen("pg_local_cache")) != 1)
+		report_ssl_configuration_error("session ID context configuration");
+
+	certificate_path = resolve_tls_path(pglc_tls_cert_file);
+	key_path = resolve_tls_path(pglc_tls_key_file);
+	ERR_clear_error();
+	if (SSL_CTX_use_certificate_chain_file(worker_ssl_ctx, certificate_path) != 1)
+		report_ssl_configuration_error("certificate chain loading");
+	check_tls_key_file_permissions(key_path);
+	SSL_CTX_set_default_passwd_cb(worker_ssl_ctx, reject_ssl_passphrase);
+	ERR_clear_error();
+	if (SSL_CTX_use_PrivateKey_file(worker_ssl_ctx, key_path,
+									SSL_FILETYPE_PEM) != 1)
+		report_ssl_configuration_error("private key loading");
+	ERR_clear_error();
+	if (SSL_CTX_check_private_key(worker_ssl_ctx) != 1)
+		report_ssl_configuration_error("certificate and private key validation");
+
+	if (pglc_tls_ca_file != NULL && pglc_tls_ca_file[0] != '\0')
+	{
+		char *ca_path = resolve_tls_path(pglc_tls_ca_file);
+
+		ERR_clear_error();
+		if (SSL_CTX_load_verify_locations(worker_ssl_ctx, ca_path, NULL) != 1)
+			report_ssl_configuration_error("client CA loading");
+		SSL_CTX_set_verify(worker_ssl_ctx,
+						   SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
+						   NULL);
+	}
+}
+#else
+static void
+initialize_tls_server(void)
+{
+	if (pglc_tls)
+		ereport(FATAL,
+				(errmsg("pg_local_cache.tls requires PostgreSQL built with OpenSSL"),
+				 errhint("Install or build PostgreSQL with OpenSSL support, or set pg_local_cache.tls = off.")));
+}
+#endif
+
 static int
 create_listener(void)
 {
@@ -411,11 +582,11 @@ create_listener(void)
 		ereport(FATAL,
 				(errmsg("pg_local_cache.bind_address must be an IPv4 literal")));
 	loopback = bind_address_is_loopback(pglc_bind_address);
-	if (!loopback && !pglc_allow_plaintext_network)
+	if (!loopback && !pglc_tls && !pglc_allow_plaintext_network)
 		ereport(FATAL,
-				(errmsg("pg_local_cache refuses plaintext RESP on non-loopback address %s",
+				(errmsg("pg_local_cache refuses a non-TLS RESP listener on non-loopback address %s",
 						pglc_bind_address),
-				 errhint("Set pg_local_cache.allow_plaintext_network = on only on a trusted network.")));
+				 errhint("Enable pg_local_cache.tls, or set pg_local_cache.allow_plaintext_network = on only on a trusted network.")));
 
 	if (!loopback &&
 		(worker_auth_token == NULL || worker_auth_token[0] == '\0'))
@@ -473,6 +644,181 @@ create_listener(void)
 	return fd;
 }
 
+static ssize_t
+client_recv(PgLocalCacheClient *client, void *buffer, Size length)
+{
+#ifdef USE_OPENSSL
+	if (client->ssl != NULL)
+	{
+		int			result;
+		int			ssl_error;
+		int			read_length;
+
+		Assert(length <= INT_MAX);
+		Assert(client->tls_read_wait == 0 ||
+			   client->tls_read_wait == POLLIN ||
+			   client->tls_read_wait == POLLOUT);
+		read_length = length > PGLC_TLS_READ_MAX ?
+			PGLC_TLS_READ_MAX : (int) length;
+		ERR_clear_error();
+		result = SSL_read(client->ssl, buffer, read_length);
+		ssl_error = SSL_get_error(client->ssl, result);
+		if (result > 0)
+		{
+			client->tls_read_wait = 0;
+			return result;
+		}
+		if (ssl_error == SSL_ERROR_WANT_READ ||
+			ssl_error == SSL_ERROR_WANT_WRITE)
+		{
+			client->tls_read_wait = ssl_error == SSL_ERROR_WANT_WRITE ?
+				POLLOUT : POLLIN;
+			errno = EAGAIN;
+			return -1;
+		}
+		if (ssl_error == SSL_ERROR_ZERO_RETURN)
+		{
+			client->tls_read_wait = 0;
+			return 0;
+		}
+		client->tls_skip_shutdown = true;
+		errno = ECONNRESET;
+		return -1;
+	}
+#endif
+	return recv(client->fd, buffer, length, 0);
+}
+
+static ssize_t
+client_send(PgLocalCacheClient *client, const void *buffer, Size length)
+{
+#ifdef USE_OPENSSL
+	if (client->ssl != NULL)
+	{
+		int			result;
+		int			ssl_error;
+
+		Assert(length <= INT_MAX);
+		Assert(client->tls_write_wait == 0 ||
+			   client->tls_write_wait == POLLIN ||
+			   client->tls_write_wait == POLLOUT);
+		if (client->tls_write_wait != 0)
+		{
+			Assert(buffer == client->output + client->tls_write_retry_offset);
+			Assert(length == client->tls_write_retry_length);
+		}
+		ERR_clear_error();
+		result = SSL_write(client->ssl, buffer, (int) length);
+		ssl_error = SSL_get_error(client->ssl, result);
+		if (result > 0)
+		{
+			client->tls_write_wait = 0;
+			client->tls_write_retry_length = 0;
+			return result;
+		}
+		if (ssl_error == SSL_ERROR_WANT_READ ||
+			ssl_error == SSL_ERROR_WANT_WRITE)
+		{
+			client->tls_write_wait = ssl_error == SSL_ERROR_WANT_WRITE ?
+				POLLOUT : POLLIN;
+			client->tls_write_retry_offset =
+				(Size) ((const char *) buffer - client->output);
+			client->tls_write_retry_length = length;
+			errno = EAGAIN;
+			return -1;
+		}
+		client->tls_skip_shutdown = true;
+		errno = ECONNRESET;
+		return -1;
+	}
+#endif
+	return send(client->fd, buffer, length,
+#ifdef MSG_NOSIGNAL
+				MSG_NOSIGNAL
+#else
+				0
+#endif
+		);
+}
+
+#ifdef USE_OPENSSL
+static bool
+client_has_tls_input(PgLocalCacheClient *client)
+{
+	return client->ssl != NULL && client->tls_ready &&
+		client->tls_read_wait == 0 && client->tls_write_wait == 0 &&
+		SSL_pending(client->ssl) > 0;
+}
+
+static TimestampTz
+tls_handshake_deadline(PgLocalCacheClient *client)
+{
+	Assert(client->ssl != NULL && !client->tls_ready);
+	return client->tls_accepted_at + (int64) pglc_idle_timeout_ms * 1000;
+}
+
+static void
+count_tls_handshake_failure(PgLocalCacheClient *client)
+{
+	if (client->ssl == NULL || client->tls_ready ||
+		client->tls_handshake_failure_counted)
+		return;
+	client->tls_handshake_failure_counted = true;
+	pg_atomic_fetch_add_u64(&pglc_shared->tls_handshake_failures, 1);
+	ereport(DEBUG1,
+			(errmsg("pg_local_cache TLS handshake failed or timed out")));
+}
+
+static bool
+drive_tls_handshake(PgLocalCacheClient *client)
+{
+	int			result;
+	int			ssl_error;
+
+	Assert(client->ssl != NULL && !client->tls_ready);
+	Assert(client->tls_handshake_wait == 0 ||
+		   client->tls_handshake_wait == POLLIN ||
+		   client->tls_handshake_wait == POLLOUT);
+	if (GetCurrentTimestamp() > tls_handshake_deadline(client))
+	{
+		client->tls_skip_shutdown = true;
+		count_tls_handshake_failure(client);
+		return false;
+	}
+	ERR_clear_error();
+	result = SSL_do_handshake(client->ssl);
+	ssl_error = SSL_get_error(client->ssl, result);
+	if (result == 1)
+	{
+		TimestampTz handshake_completed_at = GetCurrentTimestamp();
+
+		if (handshake_completed_at > tls_handshake_deadline(client))
+		{
+			client->tls_skip_shutdown = true;
+			count_tls_handshake_failure(client);
+			return false;
+		}
+		client->tls_ready = true;
+		client->tls_handshake_wait = 0;
+		/* Probe once for application data buffered with the handshake. */
+		client->input_ready = true;
+		client->last_activity = handshake_completed_at;
+		pg_atomic_fetch_add_u64(&pglc_shared->tls_handshakes, 1);
+		return true;
+	}
+	if (ssl_error == SSL_ERROR_WANT_READ ||
+		ssl_error == SSL_ERROR_WANT_WRITE)
+	{
+		client->tls_handshake_wait = ssl_error == SSL_ERROR_WANT_WRITE ?
+			POLLOUT : POLLIN;
+		return true;
+	}
+	client->tls_skip_shutdown = true;
+	count_tls_handshake_failure(client);
+	return false;
+}
+#endif
+
 static void
 run_server(int listener)
 {
@@ -500,6 +846,7 @@ run_server(int listener)
 	for (;;)
 	{
 		bool		have_buffered_ready = false;
+		int			poll_timeout = 250;
 		int			poll_count = 1;
 		int			poll_result;
 		int			ready_clients_processed = 0;
@@ -522,10 +869,30 @@ run_server(int listener)
 			int			client_index =
 				(ready_scan_start + step) % client_slots;
 			PgLocalCacheClient *client = &clients[client_index];
+#ifdef USE_OPENSSL
+			bool		buffered_tls_input = client_has_tls_input(client);
+#else
+			bool		buffered_tls_input = false;
+#endif
 
-			if (client->fd < 0 || !client->input_ready ||
+			if (client->fd < 0 ||
+				(!client->input_ready && !buffered_tls_input) ||
 				client->output_sent < client->output_used)
 				continue;
+#ifdef USE_OPENSSL
+			Assert(client->tls_handshake_wait == 0 ||
+				   client->tls_handshake_wait == POLLIN ||
+				   client->tls_handshake_wait == POLLOUT);
+			Assert(client->tls_read_wait == 0 ||
+				   client->tls_read_wait == POLLIN ||
+				   client->tls_read_wait == POLLOUT);
+			Assert(client->tls_write_wait == 0 ||
+				   client->tls_write_wait == POLLIN ||
+				   client->tls_write_wait == POLLOUT);
+			if (client->tls_handshake_wait != 0 ||
+				client->tls_read_wait != 0 || client->tls_write_wait != 0)
+				continue;
+#endif
 			client->input_ready = false;
 			if (!process_client(client))
 				close_client(client);
@@ -547,6 +914,27 @@ run_server(int listener)
 		{
 			if (clients[i].fd >= 0)
 			{
+#ifdef USE_OPENSSL
+				if (clients[i].ssl != NULL && !clients[i].tls_ready)
+				{
+					TimestampTz deadline =
+						tls_handshake_deadline(&clients[i]);
+					TimestampTz current_time = GetCurrentTimestamp();
+					int64		remaining_us;
+
+					if (current_time > deadline)
+					{
+						clients[i].tls_skip_shutdown = true;
+						count_tls_handshake_failure(&clients[i]);
+						close_client(&clients[i]);
+						continue;
+					}
+					remaining_us = deadline - current_time;
+					poll_timeout = Min(poll_timeout,
+										 (int) (remaining_us / 1000));
+				}
+				else
+#endif
 				if (TimestampDifferenceExceeds(clients[i].last_activity,
 										  now,
 										  pglc_idle_timeout_ms))
@@ -558,20 +946,62 @@ run_server(int listener)
 					continue;
 				}
 				poll_fds[poll_count].fd = clients[i].fd;
+#ifdef USE_OPENSSL
+				if (clients[i].ssl != NULL)
+				{
+					poll_fds[poll_count].events = 0;
+					Assert(clients[i].tls_read_wait == 0 ||
+						   clients[i].tls_read_wait == POLLIN ||
+						   clients[i].tls_read_wait == POLLOUT);
+					Assert(clients[i].tls_write_wait == 0 ||
+						   clients[i].tls_write_wait == POLLIN ||
+						   clients[i].tls_write_wait == POLLOUT);
+					if (!clients[i].tls_ready)
+						poll_fds[poll_count].events =
+							clients[i].tls_handshake_wait != 0 ?
+							clients[i].tls_handshake_wait : POLLIN;
+					else
+					{
+						if (clients[i].output_sent < clients[i].output_used &&
+							clients[i].tls_write_wait == 0)
+							poll_fds[poll_count].events |= POLLOUT;
+						poll_fds[poll_count].events |=
+							clients[i].tls_write_wait |
+							clients[i].tls_read_wait;
+						if (clients[i].tls_read_wait == 0 &&
+							clients[i].output_sent == clients[i].output_used)
+							poll_fds[poll_count].events |= POLLIN;
+					}
+					Assert(poll_fds[poll_count].events != 0);
+				}
+				else
+#endif
 				poll_fds[poll_count].events =
 					(clients[i].output_sent < clients[i].output_used) ?
 					POLLOUT : POLLIN;
 				poll_fds[poll_count].revents = 0;
 				poll_to_client[poll_count] = i;
 				poll_count++;
-				if (clients[i].input_ready &&
+				if ((clients[i].input_ready
+#ifdef USE_OPENSSL
+					 || client_has_tls_input(&clients[i])
+#endif
+					) &&
 					clients[i].output_sent == clients[i].output_used)
+				{
+#ifdef USE_OPENSSL
+					if (clients[i].tls_handshake_wait != 0 ||
+						clients[i].tls_read_wait != 0 ||
+						clients[i].tls_write_wait != 0)
+						continue;
+#endif
 					have_buffered_ready = true;
+				}
 			}
 		}
 
 		poll_result = poll(poll_fds, poll_count,
-						   have_buffered_ready ? 0 : 250);
+						   have_buffered_ready ? 0 : poll_timeout);
 		if (poll_result < 0 && errno != EINTR)
 			ereport(LOG,
 					(errcode_for_socket_access(),
@@ -600,6 +1030,10 @@ run_server(int listener)
 				int			slot = -1;
 				int			flags;
 				int			enabled = 1;
+				TimestampTz accepted_at;
+#ifdef USE_OPENSSL
+				SSL		   *ssl = NULL;
+#endif
 
 				client_fd = accept(listener, NULL, NULL);
 				if (client_fd < 0)
@@ -613,6 +1047,7 @@ run_server(int listener)
 							 errmsg("pg_local_cache accept failed: %m")));
 					break;
 				}
+				accepted_at = GetCurrentTimestamp();
 
 				for (i = 0; i < client_slots; i++)
 				{
@@ -658,6 +1093,26 @@ run_server(int listener)
 					close(client_fd);
 					continue;
 				}
+#ifdef USE_OPENSSL
+				if (pglc_tls)
+				{
+					ERR_clear_error();
+					ssl = SSL_new(worker_ssl_ctx);
+					if (ssl == NULL || SSL_set_fd(ssl, client_fd) != 1)
+					{
+						if (ssl != NULL)
+							SSL_free(ssl);
+						pg_atomic_fetch_add_u64(
+							&pglc_shared->rejected_connections, 1);
+						pglc_release_clients(1);
+						worker_client_reservations--;
+						close(client_fd);
+						continue;
+					}
+					SSL_set_accept_state(ssl);
+					SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE);
+				}
+#endif
 
 				clients[slot].fd = client_fd;
 				clients[slot].input_start = 0;
@@ -667,7 +1122,23 @@ run_server(int listener)
 				clients[slot].close_after_flush = false;
 				clients[slot].input_ready = false;
 				clients[slot].authentication_failures = 0;
-				clients[slot].last_activity = GetCurrentTimestamp();
+#ifdef USE_OPENSSL
+				clients[slot].last_activity = ssl == NULL ? accepted_at : 0;
+				clients[slot].ssl = ssl;
+				clients[slot].tls_ready = ssl == NULL;
+				clients[slot].tls_accepted_at = ssl != NULL ?
+					accepted_at : 0;
+				clients[slot].tls_skip_shutdown = false;
+				clients[slot].tls_handshake_failure_counted = false;
+				clients[slot].tls_handshake_wait =
+					ssl == NULL ? 0 : POLLIN;
+				clients[slot].tls_read_wait = 0;
+				clients[slot].tls_write_wait = 0;
+				clients[slot].tls_write_retry_offset = 0;
+				clients[slot].tls_write_retry_length = 0;
+#else
+				clients[slot].last_activity = accepted_at;
+#endif
 				clients[slot].authenticated =
 					worker_auth_token == NULL || worker_auth_token[0] == '\0';
 				pg_atomic_fetch_add_u64(&pglc_shared->client_connects, 1);
@@ -682,9 +1153,139 @@ run_server(int listener)
 				continue;
 			if (poll_fds[i].revents & (POLLERR | POLLNVAL))
 			{
+#ifdef USE_OPENSSL
+				clients[client_index].tls_skip_shutdown = true;
+#endif
 				close_client(&clients[client_index]);
 				continue;
 			}
+#ifdef USE_OPENSSL
+			if (clients[client_index].ssl != NULL)
+			{
+				short		revents = poll_fds[i].revents;
+				bool		operation_ok = true;
+				bool		read_retry_ready;
+				bool		write_retry_ready;
+
+				Assert(clients[client_index].tls_read_wait == 0 ||
+					   clients[client_index].tls_read_wait == POLLIN ||
+					   clients[client_index].tls_read_wait == POLLOUT);
+				Assert(clients[client_index].tls_write_wait == 0 ||
+					   clients[client_index].tls_write_wait == POLLIN ||
+					   clients[client_index].tls_write_wait == POLLOUT);
+				if (!clients[client_index].tls_ready)
+				{
+					short		required_event =
+						clients[client_index].tls_handshake_wait != 0 ?
+						clients[client_index].tls_handshake_wait : POLLIN;
+
+					if (revents & (required_event | POLLHUP))
+						operation_ok =
+							drive_tls_handshake(&clients[client_index]);
+					if (!operation_ok || (revents & POLLHUP))
+					{
+						clients[client_index].tls_skip_shutdown = true;
+						close_client(&clients[client_index]);
+					}
+					continue;
+				}
+
+				read_retry_ready =
+					clients[client_index].tls_read_wait != 0 &&
+					(revents & clients[client_index].tls_read_wait) != 0;
+				write_retry_ready =
+					clients[client_index].tls_write_wait != 0 &&
+					(revents & clients[client_index].tls_write_wait) != 0;
+				if (write_retry_ready)
+				{
+					operation_ok = flush_client_output(&clients[client_index]);
+					if (operation_ok && clients[client_index].close_after_flush &&
+						clients[client_index].output_sent ==
+						clients[client_index].output_used)
+						operation_ok = false;
+					if (operation_ok &&
+						clients[client_index].output_sent ==
+						clients[client_index].output_used &&
+						clients[client_index].input_start <
+						clients[client_index].used)
+						clients[client_index].input_ready = true;
+				}
+				if (operation_ok && read_retry_ready &&
+					clients[client_index].fd >= 0)
+					operation_ok = process_client(&clients[client_index]);
+				if (!operation_ok)
+				{
+					close_client(&clients[client_index]);
+					continue;
+				}
+				if (clients[client_index].fd < 0)
+					continue;
+
+				if (clients[client_index].output_sent <
+					clients[client_index].output_used &&
+					clients[client_index].tls_write_wait == 0 &&
+					(revents & POLLOUT))
+				{
+					if (!flush_client_output(&clients[client_index]) ||
+						(clients[client_index].close_after_flush &&
+						 clients[client_index].output_sent ==
+						 clients[client_index].output_used))
+					{
+						close_client(&clients[client_index]);
+						continue;
+					}
+					if (clients[client_index].output_sent ==
+						clients[client_index].output_used &&
+						clients[client_index].input_start <
+						clients[client_index].used)
+						clients[client_index].input_ready = true;
+				}
+				if (clients[client_index].fd >= 0 &&
+					clients[client_index].output_sent ==
+					clients[client_index].output_used &&
+					clients[client_index].tls_read_wait == 0 &&
+					(revents & POLLIN))
+				{
+					if (!process_client(&clients[client_index]))
+						close_client(&clients[client_index]);
+				}
+				if (clients[client_index].fd < 0)
+					continue;
+				if (revents & POLLHUP)
+				{
+					if (clients[client_index].tls_read_wait != 0 ||
+						clients[client_index].tls_write_wait != 0 ||
+						clients[client_index].output_sent <
+						clients[client_index].output_used)
+					{
+						clients[client_index].tls_skip_shutdown = true;
+						close_client(&clients[client_index]);
+						continue;
+					}
+					if (!(revents & POLLIN))
+					{
+						if (!process_client(&clients[client_index]))
+						{
+							close_client(&clients[client_index]);
+							continue;
+						}
+						if (clients[client_index].fd < 0)
+							continue;
+					}
+					if (clients[client_index].tls_read_wait != 0 ||
+						clients[client_index].tls_write_wait != 0 ||
+						clients[client_index].output_sent <
+						clients[client_index].output_used)
+					{
+						clients[client_index].tls_skip_shutdown = true;
+						close_client(&clients[client_index]);
+						continue;
+					}
+					clients[client_index].input_ready = true;
+				}
+				continue;
+			}
+#endif
 			if (poll_fds[i].revents & POLLOUT)
 			{
 				if (!flush_client_output(&clients[client_index]) ||
@@ -726,6 +1327,15 @@ run_server(int listener)
 					clients[client_index].input_ready = true;
 					continue;
 				}
+#ifdef USE_OPENSSL
+				if (client_has_tls_input(&clients[client_index]) &&
+					clients[client_index].output_sent ==
+					clients[client_index].output_used)
+				{
+					clients[client_index].input_ready = true;
+					continue;
+				}
+#endif
 				close_client(&clients[client_index]);
 			}
 		}
@@ -743,6 +1353,27 @@ close_client(PgLocalCacheClient *client)
 {
 	if (client->fd >= 0)
 	{
+#ifdef USE_OPENSSL
+		if (client->ssl != NULL)
+		{
+			if (!client->tls_ready)
+				count_tls_handshake_failure(client);
+			if (client->tls_ready && !client->tls_skip_shutdown &&
+				client->tls_read_wait == 0 &&
+				client->tls_write_wait == 0)
+			{
+				int			shutdown_result;
+				int			ssl_error;
+
+				ERR_clear_error();
+				shutdown_result = SSL_shutdown(client->ssl);
+				ssl_error = SSL_get_error(client->ssl, shutdown_result);
+				(void) ssl_error;
+			}
+			SSL_free(client->ssl);
+			client->ssl = NULL;
+		}
+#endif
 		close(client->fd);
 		pg_atomic_fetch_add_u64(&pglc_shared->client_disconnects, 1);
 		pglc_release_clients(1);
@@ -758,6 +1389,17 @@ close_client(PgLocalCacheClient *client)
 	client->input_ready = false;
 	client->authentication_failures = 0;
 	client->authenticated = false;
+#ifdef USE_OPENSSL
+	client->tls_ready = false;
+	client->tls_accepted_at = 0;
+	client->tls_skip_shutdown = false;
+	client->tls_handshake_failure_counted = false;
+	client->tls_handshake_wait = 0;
+	client->tls_read_wait = 0;
+	client->tls_write_wait = 0;
+	client->tls_write_retry_offset = 0;
+	client->tls_write_retry_length = 0;
+#endif
 }
 
 static void
@@ -783,15 +1425,9 @@ flush_client_output(PgLocalCacheClient *client)
 
 	while (client->output_sent < client->output_used)
 	{
-		ssize_t		written = send(client->fd,
-								   client->output + client->output_sent,
-								   client->output_used - client->output_sent,
-#ifdef MSG_NOSIGNAL
-								   MSG_NOSIGNAL
-#else
-								   0
-#endif
-			);
+		ssize_t		written = client_send(
+			client, client->output + client->output_sent,
+			client->output_used - client->output_sent);
 
 		if (written > 0)
 		{
@@ -840,6 +1476,10 @@ finish_client_turn(PgLocalCacheClient *client)
 		client->input_start = 0;
 		client->used = 0;
 	}
+#ifdef USE_OPENSSL
+	if (client->ssl != NULL && client->tls_write_wait != 0)
+		return true;
+#endif
 	if (!flush_client_output(client))
 		return false;
 	return !(client->close_after_flush &&
@@ -852,14 +1492,27 @@ process_client(PgLocalCacheClient *client)
 	bool		read_attempted = false;
 	int			commands_processed = 0;
 
-	if (client->output_sent < client->output_used)
+#ifdef USE_OPENSSL
+	Assert(client->tls_read_wait == 0 ||
+		   client->tls_read_wait == POLLIN ||
+		   client->tls_read_wait == POLLOUT);
+#endif
+	if (client->output_sent < client->output_used
+#ifdef USE_OPENSSL
+		&& (client->ssl == NULL || client->tls_read_wait == 0)
+#endif
+		)
 		return true;
 	client->input_ready = false;
 	maybe_reload_mappings();
 
 	for (;;)
 	{
-		while (client->input_start < client->used)
+		while (client->input_start < client->used
+#ifdef USE_OPENSSL
+			   && client->tls_read_wait == 0
+#endif
+			)
 		{
 			PgLocalCacheRespArg args[PGLC_RESP_MAX_ARGS];
 			int			argc;
@@ -880,6 +1533,13 @@ process_client(PgLocalCacheClient *client)
 			if (sizeof(client->output) - client->output_used <
 				PGLC_RESPONSE_MAX)
 			{
+#ifdef USE_OPENSSL
+				if (client->ssl != NULL && client->tls_write_wait != 0)
+				{
+					client->input_ready = true;
+					return true;
+				}
+#endif
 				if (!flush_client_output(client))
 					return false;
 				if (client->output_sent < client->output_used)
@@ -955,13 +1615,33 @@ process_client(PgLocalCacheClient *client)
 		if (read_attempted)
 			break;
 
-		compact_client_input(client);
+#ifdef USE_OPENSSL
+		if (client->tls_read_wait == 0)
+#endif
+			compact_client_input(client);
 		for (;;)
 		{
 			ssize_t		received;
 
-			received = recv(client->fd, client->input + client->used,
-								sizeof(client->input) - client->used, 0);
+#ifdef USE_OPENSSL
+			if (client->ssl != NULL && client->tls_read_wait == 0 &&
+				client->output_sent < client->output_used)
+			{
+				if (client->tls_write_wait != 0)
+					return finish_client_turn(client);
+				if (!flush_client_output(client))
+					return false;
+				if (client->output_sent < client->output_used)
+				{
+					client->input_ready = true;
+					return true;
+				}
+			}
+			Assert(client->ssl == NULL || client->output_sent ==
+				   client->output_used || client->tls_read_wait != 0);
+#endif
+			received = client_recv(client, client->input + client->used,
+							   sizeof(client->input) - client->used);
 			if (received < 0 && errno == EINTR)
 				continue;
 			read_attempted = true;
@@ -974,6 +1654,14 @@ process_client(PgLocalCacheClient *client)
 			{
 				client->used += (Size) received;
 				client->last_activity = GetCurrentTimestamp();
+#ifdef USE_OPENSSL
+				if (client->ssl != NULL &&
+					client->output_sent < client->output_used)
+				{
+					client->input_ready = true;
+					return true;
+				}
+#endif
 				break;
 			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK)

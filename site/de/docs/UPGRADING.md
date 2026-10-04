@@ -33,11 +33,13 @@ Client-Setup und Schlüsselcodierung.
 2. Installieren Sie das Paket oder die Bibliothek 3.0.0 für die laufende
    PostgreSQL-Hauptversion.
 3. Wenn der 2.x-Listener eine Nicht-Loopback-Adresse in
-   `pg_local_cache.bind_address` verwendete, binden Sie ihn vor dem Neustart an
-   Loopback und verwenden Sie für entfernte Clients einen lokalen Proxy oder
-   Sidecar, oder setzen Sie `pg_local_cache.allow_plaintext_network = on`
-   ausdrücklich, wenn Klartext in diesem Netzwerk beabsichtigt ist. Native TLS
-   kommt in einer späteren Version. Andernfalls starten die RESP-Worker nicht.
+   `pg_local_cache.bind_address` verwendete, konfigurieren Sie vor dem
+   Neustart natives RESP-TLS mit Serverzertifikat und Schlüssel. Mit
+   `pg_local_cache.tls_ca_file` erzwingen Sie Clientzertifikate (mTLS). RESP-TLS
+   ist unabhängig von PostgreSQL-`ssl_*`-Einstellungen. Wenn Klartext
+   erforderlich ist, setzen Sie `pg_local_cache.allow_plaintext_network = on`
+   ausdrücklich und nur in einem vertrauenswürdigen Netzwerk. Ohne TLS oder
+   dieses explizite Klartext-Opt-in starten die RESP-Worker nicht.
 4. Starten Sie PostgreSQL neu, damit es die neue Shared Library lädt.
 5. Prüfen Sie den Listener: `SELECT local_cache.health();` muss
    `workers_running = workers_configured` anzeigen. Senden Sie RESP `PING` und

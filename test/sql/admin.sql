@@ -13,6 +13,17 @@ SELECT 'enabled-guc-context=', (
       FROM pg_catalog.pg_settings
      WHERE name = 'pg_local_cache.enabled'
 );
+SELECT 'tls-guc-contexts=', (
+    SELECT count(*) = 5 AND bool_and(context = 'postmaster')
+      FROM pg_catalog.pg_settings
+     WHERE name = ANY (ARRAY[
+         'pg_local_cache.tls',
+         'pg_local_cache.tls_cert_file',
+         'pg_local_cache.tls_key_file',
+         'pg_local_cache.tls_ca_file',
+         'pg_local_cache.tls_min_protocol_version'
+     ])
+);
 
 WITH old_versions(version) AS (
     VALUES ('1.0.0'), ('1.1.0'), ('1.2.0'), ('1.2.1'), ('1.3.0'),
@@ -133,6 +144,7 @@ SELECT 'reconcile-all=', (local_cache.reconcile_all() >= 1);
 SELECT 'health-shape=', (
     jsonb_typeof(local_cache.health()) = 'object'
     AND local_cache.health() ?& ARRAY['ready', 'resp_enabled', 'cache_enabled',
+                                      'tls_enabled',
                                       'workers_configured', 'workers_running',
                                       'active_clients', 'max_clients']
     AND jsonb_typeof(local_cache.health() -> 'ready') = 'boolean'
@@ -141,7 +153,8 @@ SELECT 'health-shape=', (
 SELECT 'stats-shape=', (
     jsonb_typeof(local_cache.stats()) = 'object'
     AND local_cache.stats() ?& ARRAY['cache_hits', 'cache_misses', 'database_reads',
-                                     'invalidations']
+                                     'invalidations', 'tls_handshakes_total',
+                                     'tls_handshake_failures_total']
     AND NOT (local_cache.stats() ?| ARRAY[
         'sql_cache_hits', 'sql_cache_misses', 'sql_cache_fills', 'sql_cache_bypasses'
     ])
@@ -152,6 +165,9 @@ SELECT 'metrics-shape=', (
        FROM local_cache.metrics())
     AND (SELECT pg_catalog.jsonb_typeof(pg_catalog.to_jsonb(m)) = 'object'
                 AND pg_catalog.to_jsonb(m) ?& ARRAY['up', 'cache_capacity', 'workers_running']
+                AND pg_catalog.to_jsonb(m) ?& ARRAY[
+                    'tls_handshakes_total', 'tls_handshake_failures_total'
+                ]
                 AND NOT (pg_catalog.to_jsonb(m) ?| ARRAY[
                     'sql_cache_hits_total', 'sql_cache_misses_total',
                     'sql_cache_fills_total', 'sql_cache_bypasses_total'

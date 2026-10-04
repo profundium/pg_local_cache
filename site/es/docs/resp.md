@@ -19,7 +19,123 @@ docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build
 
 Esto habilita RESP en `127.0.0.1:56379`. Recrear la demo descarta sus datos. El token siguiente es público y solo sirve para esta demo local.
 
-Los workers RESP usan el rol de PostgreSQL configurado para todos los clientes. No heredan los permisos SQL, la transacción ni el snapshot del cliente que llama. Usa SQL si necesitas esas propiedades de sesión. El listener se vincula a loopback de forma predeterminada; una dirección IPv4 no local requiere `pg_local_cache.allow_plaintext_network=on`. La demo lo activa solo dentro de su red de contenedores. El listener no ofrece TLS: usa loopback o una red de confianza. `pg_local_cache.enabled` es un interruptor de emergencia SIGHUP. Cada worker RESP aplica la recarga de forma asíncrona en su siguiente límite entre comandos, después de que termine el comando que esté ejecutando. El campo `cache_enabled` de `local_cache.health()` muestra el valor que ve la sesión SQL que llama a la función; no confirma que todos los workers hayan aplicado el cambio. Para desactivar las lecturas de caché sin reiniciar, ejecuta `ALTER SYSTEM SET pg_local_cache.enabled = off;` y `SELECT pg_reload_conf();`; mientras esté desactivada, RESP lee directamente de la tabla de origen. Consulta la [referencia técnica](TECHNICAL.md).
+Los workers RESP usan el rol de PostgreSQL configurado para todos los clientes.
+No heredan los permisos SQL, la transacción ni el snapshot del cliente que
+llama. Usa SQL si necesitas esas propiedades de sesión. El listener se vincula a
+loopback de forma predeterminada. Prioriza TLS fuera de loopback; TLS para RESP
+usa ajustes propios e independientes de los ajustes `ssl_*` de PostgreSQL. Con
+TLS desactivado, un listener en claro fuera de loopback requiere la opción
+explícita `pg_local_cache.allow_plaintext_network=on`, limitada a redes de
+confianza. La demo solo la activa dentro de su red de contenedores. Consulta
+[clientes TLS y mTLS](#tls-mtls-clients). `pg_local_cache.enabled` es un
+interruptor de emergencia SIGHUP. Cada worker RESP aplica la recarga de forma
+asíncrona en su siguiente límite entre comandos, después de que termine el
+comando que esté ejecutando. El campo `cache_enabled` de `local_cache.health()`
+muestra el valor que ve la sesión SQL que llama a la función; no confirma que
+todos los workers hayan aplicado el cambio. Para desactivar las lecturas de
+caché sin reiniciar, ejecuta `ALTER SYSTEM SET pg_local_cache.enabled = off;` y
+`SELECT pg_reload_conf();`; mientras esté desactivada, RESP lee directamente de
+la tabla de origen. Consulta la [referencia técnica](TECHNICAL.md).
+
+## Clientes TLS y mTLS {#tls-mtls-clients}
+
+Prioriza TLS para acceder a RESP fuera de loopback. La configuración TLS nativa
+de RESP es independiente de los ajustes `ssl_*` de PostgreSQL. Estos ejemplos
+usan RESP2 y mTLS: `cache.example` debe coincidir con el certificado del
+servidor, `./ca.crt` debe confiar en él y el certificado de cliente debe
+encadenarse a la CA configurada en `pg_local_cache.tls_ca_file`. Para usar TLS
+con autenticación solo del servidor, omite las opciones del certificado y la
+clave de cliente.
+
+**redis-cli**
+
+```bash
+export REDISCLI_AUTH="$PGLC_RESP_TOKEN"
+redis-cli -2 --tls --cacert ./ca.crt --cert ./client.crt --key ./client.key -h cache.example -p 6380 MGET 'CRUD:app.public.items:{"id":42}'
+```
+
+**go-redis**
+
+```go
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"log"
+	"os"
+
+	"github.com/redis/go-redis/v9"
+)
+
+func main() {
+	caPEM, err := os.ReadFile("./ca.crt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if ok := roots.AppendCertsFromPEM(caPEM); !ok {
+		log.Fatal("no CA certificates found")
+	}
+	clientCert, err := tls.LoadX509KeyPair("./client.crt", "./client.key")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	client := redis.NewClient(&redis.Options{
+		Addr:            "cache.example:6380",
+		Password:        os.Getenv("PGLC_RESP_TOKEN"),
+		Protocol:        2,
+		DisableIdentity: true,
+		TLSConfig: &tls.Config{
+			RootCAs:      roots,
+			MinVersion:   tls.VersionTLS12,
+			ServerName:   "cache.example",
+			Certificates: []tls.Certificate{clientCert},
+		},
+	})
+	defer client.Close()
+
+	rows, err := client.MGet(context.Background(), `CRUD:app.public.items:{"id":42}`).Result()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("%v", rows)
+}
+```
+
+**node-redis**
+
+```js
+import { readFileSync } from 'node:fs';
+import { createClient } from '@redis/client';
+
+const client = createClient({
+  socket: {
+    host: 'cache.example',
+    port: 6380,
+    tls: true,
+    servername: 'cache.example',
+    ca: readFileSync('./ca.crt'),
+    cert: readFileSync('./client.crt'),
+    key: readFileSync('./client.key'),
+  },
+  password: process.env.PGLC_RESP_TOKEN,
+  RESP: 2,
+  disableClientInfo: true,
+});
+client.on('error', console.error);
+await client.connect();
+
+try {
+  const values = await client.mGet(['CRUD:app.public.items:{"id":42}']);
+  const rows = values.map(value => value === null ? null : JSON.parse(value));
+  console.log(rows);
+} finally {
+  await client.close();
+}
+```
 
 ## redis-cli {#redis-cli}
 

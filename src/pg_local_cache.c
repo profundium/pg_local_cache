@@ -55,6 +55,11 @@ char	   *pglc_auth_token_file = NULL;
 bool		pglc_allow_superuser = false;
 bool		pglc_enabled = true;
 bool		pglc_allow_plaintext_network = false;
+bool		pglc_tls = false;
+int			pglc_tls_min_protocol_version = 0;
+char	   *pglc_tls_cert_file = NULL;
+char	   *pglc_tls_key_file = NULL;
+char	   *pglc_tls_ca_file = NULL;
 
 PgLocalCacheSharedState *pglc_shared = NULL;
 HTAB	   *pglc_cache_hash = NULL;
@@ -62,6 +67,13 @@ HTAB	   *pglc_relation_hash = NULL;
 
 static char *pglc_binary_version = NULL;
 static char *pglc_binary_build_id = NULL;
+
+static const struct config_enum_entry pglc_tls_protocol_options[] =
+{
+	{"TLSv1.2", 12, false},
+	{"TLSv1.3", 13, false},
+	{NULL, 0, false}
+};
 
 #if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type previous_shmem_request_hook = NULL;
@@ -143,7 +155,7 @@ pglc_define_gucs(void)
 							 NULL);
 
 	DefineCustomBoolVariable("pg_local_cache.allow_plaintext_network",
-							 "Allow plaintext RESP on non-loopback IPv4 addresses.",
+							 "Allow plaintext RESP on non-loopback IPv4 addresses when TLS is disabled.",
 							 NULL,
 							 &pglc_allow_plaintext_network,
 							 false,
@@ -152,6 +164,62 @@ pglc_define_gucs(void)
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomBoolVariable("pg_local_cache.tls",
+							 "Enable native TLS for the RESP listener.",
+							 NULL,
+							 &pglc_tls,
+							 false,
+							 PGC_POSTMASTER,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomStringVariable("pg_local_cache.tls_cert_file",
+							   "PEM certificate chain file for native RESP TLS.",
+							   NULL,
+							   &pglc_tls_cert_file,
+							   "",
+							   PGC_POSTMASTER,
+							   0,
+							   NULL,
+							   NULL,
+							   NULL);
+
+	DefineCustomStringVariable("pg_local_cache.tls_key_file",
+							   "PEM private key file for native RESP TLS.",
+							   NULL,
+							   &pglc_tls_key_file,
+							   "",
+							   PGC_POSTMASTER,
+							   0,
+							   NULL,
+							   NULL,
+							   NULL);
+
+	DefineCustomStringVariable("pg_local_cache.tls_ca_file",
+							   "CA file used to require and verify RESP TLS client certificates.",
+							   NULL,
+							   &pglc_tls_ca_file,
+							   "",
+							   PGC_POSTMASTER,
+							   0,
+							   NULL,
+							   NULL,
+							   NULL);
+
+	DefineCustomEnumVariable("pg_local_cache.tls_min_protocol_version",
+							  "Minimum protocol version accepted by the RESP TLS listener.",
+							  NULL,
+							  &pglc_tls_min_protocol_version,
+							  12,
+							  pglc_tls_protocol_options,
+							  PGC_POSTMASTER,
+							  0,
+							  NULL,
+							  NULL,
+							  NULL);
 
 	DefineCustomStringVariable("pg_local_cache.binary_version",
 							   "Version compiled into the active pg_local_cache library.",
@@ -564,6 +632,8 @@ pglc_shmem_startup(void)
 		pg_atomic_init_u64(&pglc_shared->active_clients, 0);
 		pg_atomic_init_u64(&pglc_shared->peak_active_clients, 0);
 		pg_atomic_init_u64(&pglc_shared->rejected_connections, 0);
+		pg_atomic_init_u64(&pglc_shared->tls_handshakes, 0);
+		pg_atomic_init_u64(&pglc_shared->tls_handshake_failures, 0);
 		pg_atomic_init_u64(&pglc_shared->client_limit_rejections, 0);
 		pg_atomic_init_u64(&pglc_shared->authentication_failures, 0);
 		pg_atomic_init_u64(&pglc_shared->protocol_errors, 0);
@@ -2547,7 +2617,9 @@ pglc_stats_json(void)
 		",\"sql_meta\":" UINT64_FORMAT
 		",\"sql_sets\":" UINT64_FORMAT
 		",\"sql_dels\":" UINT64_FORMAT
-		",\"sql_result_reuses\":" UINT64_FORMAT "}",
+		",\"sql_result_reuses\":" UINT64_FORMAT
+		",\"tls_handshakes_total\":" UINT64_FORMAT
+		",\"tls_handshake_failures_total\":" UINT64_FORMAT "}",
 		pglc_cache_entries, pglc_relation_states,
 		pglc_port == 0 ? 0 : pglc_max_clients,
 		pglc_port == 0 ? 0 : pglc_max_clients_per_worker,
@@ -2590,7 +2662,9 @@ pglc_stats_json(void)
 		pg_atomic_read_u64(&pglc_shared->mapping_reload_attempts),
 		pg_atomic_read_u64(&pglc_shared->sql_sets),
 		pg_atomic_read_u64(&pglc_shared->sql_dels),
-		pg_atomic_read_u64(&pglc_shared->singleflight_reuses));
+		pg_atomic_read_u64(&pglc_shared->singleflight_reuses),
+		pg_atomic_read_u64(&pglc_shared->tls_handshakes),
+		pg_atomic_read_u64(&pglc_shared->tls_handshake_failures));
 	return expanded.data;
 }
 
@@ -2644,8 +2718,9 @@ pglc_metrics_json(void)
 		pglc_shared_memory_bytes(), pglc_worker_memory_bytes(),
 		pglc_estimated_memory_bytes(),
 		mul_size((Size) pglc_memory_budget_mb, (Size) 1024 * 1024));
-	appendStringInfo(&result, ",\"cache_enabled\":%s",
-					 pglc_cache_is_enabled() ? "true" : "false");
+	appendStringInfo(&result, ",\"cache_enabled\":%s,\"tls_enabled\":%s",
+					 pglc_cache_is_enabled() ? "true" : "false",
+					 pglc_tls ? "true" : "false");
 
 #define PGLC_APPEND_METRIC_COUNTER(json_name, field_name) \
 	appendStringInfo(&result, ",\"" json_name "\":" UINT64_FORMAT, \
@@ -2671,6 +2746,8 @@ pglc_metrics_json(void)
 	PGLC_APPEND_METRIC_COUNTER("dirty_key_limit_fallbacks_total", dirty_key_limit_fallbacks);
 	PGLC_APPEND_METRIC_COUNTER("mapping_reload_failures_total", mapping_reload_failures);
 	PGLC_APPEND_METRIC_COUNTER("mapping_reload_incomplete_retries_total", mapping_reload_incomplete_retries);
+	PGLC_APPEND_METRIC_COUNTER("tls_handshakes_total", tls_handshakes);
+	PGLC_APPEND_METRIC_COUNTER("tls_handshake_failures_total", tls_handshake_failures);
 #undef PGLC_APPEND_METRIC_COUNTER
 	appendStringInfoChar(&result, '}');
 	return result.data;

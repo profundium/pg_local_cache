@@ -78,22 +78,34 @@ make PG_CONFIG=/path/to/pg_config && \
 
 ### 配置 RESP 监听器 {#enable-optional-resp2}
 
-使用专用 worker 角色和受保护的令牌文件配置 RESP 监听器：
+使用专用 worker 角色、受保护的令牌文件和原生 TLS 配置 RESP listener。以下配置通过信任客户端 CA 启用双向 TLS (mTLS)。
+启用原生 RESP TLS 要求 PostgreSQL 构建时包含 OpenSSL 支持。
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
 pg_local_cache.database = 'app'
 pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
-pg_local_cache.bind_address = '127.0.0.1'
+pg_local_cache.bind_address = '10.0.0.10'
 pg_local_cache.auth_token_file = '/secure/path/token'
 pg_local_cache.cache_entries = 16384
 pg_local_cache.memory_budget_mb = 384
+pg_local_cache.tls = on
+pg_local_cache.tls_cert_file = '/secure/path/resp.crt'
+pg_local_cache.tls_key_file = '/secure/path/resp.key'
+pg_local_cache.tls_ca_file = '/secure/path/client-ca.crt'
+pg_local_cache.tls_min_protocol_version = 'TLSv1.2'
+pg_local_cache.allow_plaintext_network = off
 ```
 
-默认情况下，监听器仅接受 loopback 连接。远程客户端请使用本地代理或
-sidecar；如果确实需要在可信网络上使用明文连接，请显式设置
-`pg_local_cache.allow_plaintext_network = on`。3.0.0 尚不支持原生 TLS。
+将 `10.0.0.10` 替换为客户端可访问的地址。TLS 默认关闭；启用时必须提供服务器证书和密钥。此配置使用 TLS 保护非 loopback RESP
+listener，并通过 CA 设置验证客户端证书。若只验证服务器，请将 `pg_local_cache.tls_ca_file`
+留空并省略客户端证书。RESP TLS 与 PostgreSQL 的 `ssl_*` 配置独立。未启用 TLS 时，loopback 之外的 listener
+必须设置 `pg_local_cache.allow_plaintext_network = on`；此显式选项仅限可信网络。
+
+私钥须遵循 [PostgreSQL
+服务器密钥文件规则](https://www.postgresql.org/docs/current/ssl-tcp.html)：若归 PostgreSQL
+操作系统用户所有，权限为 `0600`；或者归 root 所有、权限为 `0640`，并可由服务器所属组读取。
 
 请共同规划缓存条目数、关系状态、worker 和客户端数量，以及
 `memory_budget_mb`。容量和内存建议见[技术参考](TECHNICAL.md#shared-memory-and-configuration)。

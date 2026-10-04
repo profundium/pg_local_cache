@@ -28,11 +28,12 @@ RESP worker 使用配置的 PostgreSQL 角色，不会继承应用的 SQL 权限
 1. 修改应用，不再调用 SQL `mget`。确认 RESP `MGET` 使用专用 worker
    角色，并符合所需的授权模型。
 2. 为当前运行的 PostgreSQL 主版本安装 3.0.0 软件包或库。
-3. 如果 2.x listener 使用了非 loopback 的 `pg_local_cache.bind_address`，请在
-   重启前将其绑定到 loopback，并为远程客户端使用本地代理或 sidecar；如果
-   确实需要在该网络上使用明文流量，也可显式设置
-   `pg_local_cache.allow_plaintext_network = on`。原生 TLS 将在后续版本提供。
-   否则 RESP workers 将拒绝启动。
+3. 如果 2.x listener 使用了 loopback 之外的
+   `pg_local_cache.bind_address`，请在重启前配置原生 RESP TLS，并提供服务器
+   证书和密钥。设置 `pg_local_cache.tls_ca_file` 可要求客户端证书
+   (mTLS)。RESP TLS 与 PostgreSQL 的 `ssl_*` 配置独立。如果确实需要明文
+   流量，请仅在可信网络中显式设置 `pg_local_cache.allow_plaintext_network = on`。
+   未启用 TLS 且未显式允许明文时，RESP worker 将拒绝启动。
 4. 重启 PostgreSQL，使其加载新的共享库。
 5. 验证 listener：`SELECT local_cache.health();` 必须显示
    `workers_running = workers_configured`。发送 RESP `PING`，确认返回 `PONG`。

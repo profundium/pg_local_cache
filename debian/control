@@ -2,7 +2,7 @@ Source: pg-local-cache
 Section: database
 Priority: optional
 Maintainer: maxbronnikov10 <bronnikovmr@gmail.com>
-Build-Depends: debhelper-compat (= 13),
+Build-Depends: debhelper-compat (= 13), libssl-dev,
                postgresql-server-dev-all (>= 217~)
 Standards-Version: 4.7.2
 Homepage: https://github.com/profundium/pg_local_cache

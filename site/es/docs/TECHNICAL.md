@@ -85,6 +85,11 @@ Las entradas de caché, los estados de relaciones, los contadores, las generacio
 | `pg_local_cache.auth_token_file` | vacío | credencial RESP preferida |
 | `pg_local_cache.auth_token` | vacío | token insertado solo para desarrollo |
 | `pg_local_cache.enabled` | `on` | interruptor de emergencia SIGHUP de la caché; con `off`, RESP lee directamente de la tabla de origen |
+| `pg_local_cache.tls` | `off` | activar TLS en el listener RESP; PostgreSQL debe incluir soporte de OpenSSL |
+| `pg_local_cache.tls_cert_file` | vacío | certificado/cadena de servidor PEM; obligatorio con TLS activo |
+| `pg_local_cache.tls_key_file` | vacío | clave privada de servidor PEM; obligatoria con TLS activo |
+| `pg_local_cache.tls_ca_file` | vacío | CA de cliente de confianza; al configurarla activa mTLS |
+| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | versión TLS mínima (`TLSv1.2` o `TLSv1.3`) |
 | `pg_local_cache.allow_plaintext_network` | `off` | opción de postmaster para listeners en claro fuera del loopback IPv4 |
 | `pg_local_cache.allow_superuser` | `off` | anulación de rol solo para desarrollo |
 
@@ -98,7 +103,21 @@ RESP2 usa los mismos mapeos y la misma caché compartida. Las claves del cable t
 CRUD:database.schema.table:{"pk_column":<json-scalar>,...}
 ```
 
-El endpoint no tiene TLS. `pg_local_cache.allow_plaintext_network` está desactivado de forma predeterminada. Para un listener en claro fuera de loopback, habilítalo explícitamente; el contenedor de demostración también requiere habilitarlo explícitamente para su listener en claro. Enlázalo a loopback o colócalo detrás de un proxy TLS autenticado. Prefiere un archivo de token con permisos restringidos en lugar de un token integrado.
+TLS para RESP usa ajustes `pg_local_cache.tls_*` propios e independientes de los
+ajustes `ssl_*` de PostgreSQL. TLS de PostgreSQL en el puerto SQL no protege
+RESP, y TLS de RESP no cambia el listener SQL. Activa `pg_local_cache.tls` y
+proporciona un certificado y una clave de servidor. Al configurar
+`pg_local_cache.tls_ca_file`, se verifican los certificados de cliente y se
+activa mTLS. La versión mínima del protocolo es `TLSv1.2` de forma
+predeterminada y puede elevarse a `TLSv1.3`. Se usan los cifrados
+predeterminados del sistema OpenSSL. La clave privada debe cumplir la [regla de
+PostgreSQL para claves de
+servidor](https://www.postgresql.org/docs/current/ssl-tcp.html). Prioriza TLS
+fuera de loopback. Con TLS desactivado, un listener fuera de loopback requiere
+la opción explícita `pg_local_cache.allow_plaintext_network = on`, limitada a
+redes de confianza. Un listener no local sigue necesitando un token de al menos
+32 bytes; prefiere un archivo de token con permisos restringidos a un token
+insertado.
 
 El parámetro operativo `pg_local_cache.enabled` es de tipo SIGHUP y funciona como interruptor de emergencia. Para desactivar el servicio de caché:
 
@@ -125,6 +144,8 @@ Los contadores RESP de `stats()` y `metrics()` incluyen:
 - `sql_sets`
 - `sql_dels`
 - `sql_result_reuses`
+- `tls_handshakes_total`
+- `tls_handshake_failures_total`
 
 Las lecturas de la base de datos, las invalidaciones, el rechazo de admisión, el fallback por claves sucias, el singleflight y los contadores de workers y RESP permanecen separados.
 

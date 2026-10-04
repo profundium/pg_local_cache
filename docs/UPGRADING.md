@@ -29,11 +29,13 @@ semantics. The [RESP guide](resp.md) covers client setup and key encoding.
 1. Change applications to stop calling SQL `mget`; verify RESP `MGET` reads
    use a dedicated worker role and meet the required authorization model.
 2. Install the 3.0.0 package or library for the running PostgreSQL major.
-3. If the 2.x listener used a non-loopback `pg_local_cache.bind_address`, either
-   bind it to loopback and use a local proxy or sidecar for remote clients, or
-   set `pg_local_cache.allow_plaintext_network = on` explicitly where plaintext
-   on that network is intended. Native TLS arrives in a later release. Without
-   one of these configuration changes, RESP workers refuse to start.
+3. If the 2.x listener used a non-loopback `pg_local_cache.bind_address`,
+   configure native RESP TLS and provide its certificate and key before
+   restarting. Set `pg_local_cache.tls_ca_file` to require client certificates
+   (mTLS). RESP TLS is independent of PostgreSQL `ssl_*` settings. If plaintext
+   is required, set `pg_local_cache.allow_plaintext_network = on` explicitly
+   and only on a trusted network. Without TLS or that explicit plaintext opt-in,
+   RESP workers refuse to start.
 4. Restart PostgreSQL so it loads the new shared library.
 5. Verify the listener: `SELECT local_cache.health();` must show
    `workers_running = workers_configured`. Send RESP `PING` and expect `PONG`.

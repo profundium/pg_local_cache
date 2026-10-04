@@ -81,25 +81,40 @@ Conservez les entrées existantes de `shared_preload_libraries` et ajoutez
 
 ### Configurer le listener RESP {#enable-optional-resp2}
 
-Configurez le listener RESP avec un rôle worker dédié et un fichier de jeton
-protégé :
+Configurez le listener RESP avec un rôle worker dédié, un fichier de jeton
+protégé et TLS natif. La configuration ci-dessous active mTLS en approuvant une
+CA cliente. TLS natif pour RESP nécessite PostgreSQL compilé avec le support
+OpenSSL.
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
 pg_local_cache.database = 'app'
 pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
-pg_local_cache.bind_address = '127.0.0.1'
+pg_local_cache.bind_address = '10.0.0.10'
 pg_local_cache.auth_token_file = '/secure/path/token'
 pg_local_cache.cache_entries = 16384
 pg_local_cache.memory_budget_mb = 384
+pg_local_cache.tls = on
+pg_local_cache.tls_cert_file = '/secure/path/resp.crt'
+pg_local_cache.tls_key_file = '/secure/path/resp.key'
+pg_local_cache.tls_ca_file = '/secure/path/client-ca.crt'
+pg_local_cache.tls_min_protocol_version = 'TLSv1.2'
+pg_local_cache.allow_plaintext_network = off
 ```
 
-Par défaut, le listener n'accepte que les connexions loopback. Pour les clients
-distants, utilisez un proxy ou sidecar local, ou autorisez explicitement le
-trafic en clair sur un réseau de confiance avec
-`pg_local_cache.allow_plaintext_network = on` ; TLS natif n'est pas disponible
-dans la version 3.0.0.
+Remplacez `10.0.0.10` par une adresse accessible aux clients. TLS est désactivé
+par défaut ; son activation exige le certificat et la clé serveur. Cette
+configuration protège par TLS un listener RESP hors loopback et vérifie les
+certificats clients via la CA. Pour un TLS avec authentification du serveur
+uniquement, laissez `pg_local_cache.tls_ca_file` vide et omettez les certificats
+clients. TLS RESP est indépendant des paramètres `ssl_*` de PostgreSQL. Sans
+TLS, un listener hors loopback exige `pg_local_cache.allow_plaintext_network = on` ; limitez cet opt-in explicite à un réseau de confiance.
+
+La clé privée doit suivre la [règle PostgreSQL sur les fichiers de clé
+serveur](https://www.postgresql.org/docs/current/ssl-tcp.html) : mode `0600` si
+elle appartient à l'utilisateur système de PostgreSQL, ou propriété de root avec
+le mode `0640` et un accès en lecture pour le groupe du serveur.
 
 Dimensionnez ensemble les entrées de cache, les états de relation, les workers,
 les clients et `memory_budget_mb`. Consultez les conseils de capacité et de

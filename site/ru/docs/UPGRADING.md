@@ -33,12 +33,14 @@ MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
    модели авторизации.
 2. Установите пакет или библиотеку 3.0.0 для используемой основной версии
    PostgreSQL.
-3. Если в 2.x `pg_local_cache.bind_address` указывал адрес вне loopback, до
-   перезапуска привяжите listener к loopback и используйте локальный прокси или
-   sidecar для удалённых клиентов либо явно задайте
-   `pg_local_cache.allow_plaintext_network = on`, если в этой сети допустим
-   незашифрованный трафик. Встроенный TLS появится в более позднем выпуске.
-   Иначе RESP workers откажутся запускаться.
+3. Если listener 2.x использовал адрес
+   `pg_local_cache.bind_address` вне loopback, до перезапуска настройте
+   встроенный TLS RESP и укажите сертификат и ключ. Параметр
+   `pg_local_cache.tls_ca_file` включает обязательную проверку сертификатов
+   клиентов (mTLS). TLS RESP независим от параметров PostgreSQL `ssl_*`. Если
+   нужен plaintext, явно задайте `pg_local_cache.allow_plaintext_network = on`
+   и используйте его только в доверенной сети. Без TLS или этого явного
+   разрешения RESP workers не запустятся.
 4. Перезапустите PostgreSQL, чтобы загрузить новую общую библиотеку.
 5. Проверьте listener: `SELECT local_cache.health();` должен показывать
    `workers_running = workers_configured`. Отправьте RESP `PING` и ожидайте `PONG`.
