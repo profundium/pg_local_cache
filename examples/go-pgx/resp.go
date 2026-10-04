@@ -1,6 +1,6 @@
 package main
 
-// Minimal RESP2 client for the disposable demo: AUTH and one MGET at a time.
+// RESP2 client for the benchmark's authenticated cache operations.
 import (
 	"bufio"
 	"context"
@@ -108,13 +108,23 @@ func openRESP(cfg inputConfig) (*respClient, error) {
 }
 
 func (c *respClient) query(ctx context.Context, keys []*int64) ([]map[string]any, error) {
+	return c.queryKeys(ctx, keys, func(key int64) string {
+		return `CRUD:pglc_demo.public.items:{"id":` + strconv.FormatInt(key, 10) + `}`
+	})
+}
+
+func (c *respClient) queryValkey(ctx context.Context, keys []*int64) ([]map[string]any, error) {
+	return c.queryKeys(ctx, keys, func(key int64) string { return "item:" + strconv.FormatInt(key, 10) })
+}
+
+func (c *respClient) queryKeys(ctx context.Context, keys []*int64, cacheKey func(int64) string) ([]map[string]any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	args := []string{"MGET"}
 	for _, key := range keys {
 		if key != nil {
-			args = append(args, `CRUD:pglc_demo.public.items:{"id":`+strconv.FormatInt(*key, 10)+`}`)
+			args = append(args, cacheKey(*key))
 		}
 	}
 	if len(args) == 1 {
@@ -139,27 +149,78 @@ func (c *respClient) query(ctx context.Context, keys []*int64) ([]map[string]any
 		if err != nil {
 			return nil, err
 		}
-		if !strings.HasPrefix(header, "$") {
-			return nil, fmt.Errorf("expected RESP bulk string")
-		}
-		length, err := strconv.Atoi(header[1:])
-		if err != nil || length < -1 || length > 1<<20 {
-			return nil, fmt.Errorf("invalid RESP bulk length")
-		}
-		if length == -1 {
-			continue
-		}
-		value := make([]byte, length+2)
-		if _, err := io.ReadFull(c.reader, value); err != nil {
+		value, err := c.readBulk(header)
+		if err != nil {
 			return nil, err
 		}
-		if string(value[length:]) != "\r\n" {
-			return nil, fmt.Errorf("invalid RESP bulk terminator")
+		if value == nil {
+			continue
 		}
-		text := string(value[:length])
+		text := string(value)
 		raw[i] = &text
 	}
 	return decodeJSONRows(raw)
+}
+
+func (c *respClient) readBulk(header string) ([]byte, error) {
+	if !strings.HasPrefix(header, "$") {
+		return nil, fmt.Errorf("expected RESP bulk string")
+	}
+	length, err := strconv.Atoi(header[1:])
+	if err != nil || length < -1 || length > 1<<20 {
+		return nil, fmt.Errorf("invalid RESP bulk length")
+	}
+	if length == -1 {
+		return nil, nil
+	}
+	value := make([]byte, length+2)
+	if _, err := io.ReadFull(c.reader, value); err != nil {
+		return nil, err
+	}
+	if string(value[length:]) != "\r\n" {
+		return nil, fmt.Errorf("invalid RESP bulk terminator")
+	}
+	return value[:length], nil
+}
+
+func (c *respClient) get(key string) ([]byte, bool, error) {
+	if err := c.send([]string{"GET", key}); err != nil {
+		return nil, false, err
+	}
+	header, err := c.line()
+	if err != nil {
+		return nil, false, err
+	}
+	value, err := c.readBulk(header)
+	return value, value != nil, err
+}
+
+func (c *respClient) set(key string, value []byte) error {
+	if err := c.send([]string{"SET", key, string(value)}); err != nil {
+		return err
+	}
+	response, err := c.line()
+	if err != nil {
+		return err
+	}
+	if response != "+OK" {
+		return fmt.Errorf("unexpected SET response: %q", response)
+	}
+	return nil
+}
+
+func (c *respClient) del(key string) error {
+	if err := c.send([]string{"DEL", key}); err != nil {
+		return err
+	}
+	response, err := c.line()
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(response, ":") {
+		return fmt.Errorf("unexpected DEL response: %q", response)
+	}
+	return nil
 }
 
 func runRESP(reader *bufio.Reader, writer *bufio.Writer, cfg inputConfig, ctx context.Context) error {
@@ -187,7 +248,7 @@ func runRESP(reader *bufio.Reader, writer *bufio.Writer, cfg inputConfig, ctx co
 	if err := prepareAll(ctx, conns, cfg); err != nil {
 		return err
 	}
-	for _, keys := range [][]*int64{edgeKeys(), {}, {nil, nil}} {
+	for _, keys := range [][]*int64{checkKeys(cfg.CheckIDs), {}, {nil, nil}} {
 		expected, _, err := queryAny(ctx, conns[0], keys)
 		if err != nil {
 			return err
@@ -202,12 +263,12 @@ func runRESP(reader *bufio.Reader, writer *bufio.Writer, cfg inputConfig, ctx co
 	}
 	closeConnections(conns)
 	keys := fixedKeys(cfg.Batch)
-	nextKeys := keySource(cfg)
 	requests := make([]func(context.Context) error, len(clients))
 	for i, c := range clients {
 		if _, err := c.query(ctx, keys); err != nil {
 			return err
 		}
+		nextKeys := keySource(cfg, uint64(i))
 		requests[i] = func(ctx context.Context) error { _, err := c.query(ctx, nextKeys()); return err }
 	}
 	if err := writeJSON(writer, readyMessage{Ready: true, ResultFormats: map[string][]string{"resp-mget": {"RESP2 bulk JSON strings"}}, Runtime: runtime.Version(), GOMAXPROCS: runtime.GOMAXPROCS(0)}); err != nil {
