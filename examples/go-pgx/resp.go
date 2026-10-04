@@ -4,9 +4,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -64,9 +67,29 @@ func (c *respClient) line() (string, error) {
 }
 
 func openRESP(cfg inputConfig) (*respClient, error) {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.RespPort)), 5*time.Second)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(benchHost(), strconv.Itoa(cfg.RespPort)), 5*time.Second)
 	if err != nil {
 		return nil, err
+	}
+	// PGLC_BENCH_TLS_CA switches the RESP connection to TLS, verifying the
+	// server certificate against that CA file.
+	if caFile := os.Getenv("PGLC_BENCH_TLS_CA"); caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			conn.Close()
+			return nil, fmt.Errorf("no certificates in %s", caFile)
+		}
+		tlsConn := tls.Client(conn, &tls.Config{RootCAs: roots, ServerName: benchHost(), MinVersion: tls.VersionTLS12})
+		if err := tlsConn.Handshake(); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		conn = tlsConn
 	}
 	c := &respClient{conn: conn, reader: bufio.NewReaderSize(conn, 64<<10)}
 	err = c.send([]string{"AUTH", cfg.RespToken})
@@ -179,12 +202,13 @@ func runRESP(reader *bufio.Reader, writer *bufio.Writer, cfg inputConfig, ctx co
 	}
 	closeConnections(conns)
 	keys := fixedKeys(cfg.Batch)
+	nextKeys := keySource(cfg)
 	requests := make([]func(context.Context) error, len(clients))
 	for i, c := range clients {
 		if _, err := c.query(ctx, keys); err != nil {
 			return err
 		}
-		requests[i] = func(ctx context.Context) error { _, err := c.query(ctx, keys); return err }
+		requests[i] = func(ctx context.Context) error { _, err := c.query(ctx, nextKeys()); return err }
 	}
 	if err := writeJSON(writer, readyMessage{Ready: true, ResultFormats: map[string][]string{"resp-mget": {"RESP2 bulk JSON strings"}}, Runtime: runtime.Version(), GOMAXPROCS: runtime.GOMAXPROCS(0)}); err != nil {
 		return err
