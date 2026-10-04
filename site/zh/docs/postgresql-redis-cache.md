@@ -2,41 +2,30 @@
 layout: doc
 lang: zh
 translation_key: postgresql-redis-cache
-title: PostgreSQL 与 Redis 的 cache-aside 模式
-seo_title: PostgreSQL 与 Redis 的 cache-aside 模式 | pg_local_cache
-description: 以 PostgreSQL 为权威数据源，理解 Redis cache-aside 的过期读取竞态，并了解 pg_local_cache 的适用边界。
+title: PostgreSQL 与 Redis cache-aside
+seo_title: "PostgreSQL 与 Redis cache-aside：失效与竞争条件"
+description: 比较由应用管理的 Redis cache-aside 与 pg_local_cache RESP 读取，包括过期填充竞争和写入失效。
 section: 指南
 permalink: /zh/docs/postgresql-redis-cache.html
-last_modified_at: '2026-10-04'
+last_modified_at: "2026-10-04"
 ---
 
-# PostgreSQL 与 Redis 的 cache-aside 模式 {#postgresql-and-redis-cache-aside}
+# PostgreSQL 与 Redis cache-aside {#postgresql-and-redis-cache-aside}
 
-Redis cache-aside 由应用协调读取与权威存储。未命中时，读取 PostgreSQL、返回结果并写入 Redis；写入时，更新 PostgreSQL 并使对应 Redis 键失效。[Redis 模式指南](https://redis.io/docs/latest/develop/use-cases/cache-aside/)描述了此流程，但该模式本身不会让应用缓存与 PostgreSQL 具有事务一致性。
+本指南介绍以 PostgreSQL 为事实来源的 Redis cache-aside、过期缓存填充导致的竞争条件，以及 `pg_local_cache` 如何处理已附加行的失效。
 
-对于以 `public.items.id` 为键的行，流程如下：
+Redis 未命中时，应用会从 PostgreSQL 读取并返回该行，再将其存入 Redis 的应用键中。写入时，应用先提交 PostgreSQL 数据，再删除对应的 Redis 键。TTL 限制缓存保留时间，但不能证明数据相对于 PostgreSQL 已提交状态仍然新鲜。请参阅 [Redis cache-aside 指南](https://redis.io/docs/latest/develop/use-cases/cache-aside/)。
 
-```text
-GET item:42
-miss -> SELECT * FROM public.items WHERE id = $1
-     -> SET item:42 <serialized row> EX <ttl>
-write -> UPDATE public.items ...
-      -> COMMIT
-      -> DEL item:42
-```
+## 失效竞争 {#the-invalidation-race}
 
-使用参数化 SQL 和独立键命名空间。TTL 限制值在 Redis 中保留的时间，但不能证明其相对于 PostgreSQL 提交仍然新鲜。显式删除可以处理普通写入，却无法消除所有竞态。
+读者可能先从 PostgreSQL 读取旧行并暂停，等写入者提交新数据并删除缓存键后，才把旧行写入 Redis。下一个读者会看到过期数据，直到缓存过期或该键再次被删除。
 
-## 失效竞态 {#the-invalidation-race}
+缓解方法包括拒绝使用旧数据库版本填充缓存、按键串行化读取，或通过 outbox/CDC 消费者发布已提交的变更。每种方法都会增加协调逻辑。请参阅[事务感知失效指南](cache-invalidation.md)，了解 PostgreSQL 内部类似的迟到填充边界。
 
-考虑两个请求：读者 R1 在 Redis 未命中，从 PostgreSQL 读取旧行。写者 W 提交新行并删除 `item:42`。随后 R1 恢复执行，将旧值写入 Redis。下一个读者会读到过期数据，直到该键到期或另一次写入删除它。
+## pg_local_cache 的适用场景 {#where-pg_local_cache-fits}
 
-可能的缓解方式包括加载完成后再次删除、保存数据库版本并拒绝更旧的值、按键串行化加载，或通过 outbox / CDC 消费者发布已提交变更。每种方案都增加了协调逻辑与失败情况。[缓存失效指南](cache-invalidation.md)展示了 PostgreSQL 内部类似的延迟填充问题。
+`pg_local_cache` 将完整行按主键存储在 PostgreSQL 有界共享内存中。应用使用经过身份验证的 RESP2 `MGET` 请求行；普通 SQL 和任意查询结果都不会使用此缓存。已附加表上的触发器会为写入设置屏障；缓存资格检查不允许命中时，读取会使用 PostgreSQL。
 
-## pg_local_cache 的适用位置 {#where-pg_local_cache-fits}
+与 Redis cache-aside 不同，这条路径利用数据库写入路径进行失效，不使用 TTL 或通用 Redis 数据结构。RESP worker 在独立的短事务中使用已配置的 PostgreSQL 角色。连接和安全详情请参阅[RESP 客户端](resp.md)和[技术参考](TECHNICAL.md)。
 
-`pg_local_cache` 是范围更窄的 PostgreSQL 本地方案，用于按主键读取完整行。`RESP `MGET`` 是显式 API；普通 `SELECT` 和任意形状查询都不会读取缓存。已关联表的触发器在数据库写入路径上为受影响的键或关系设置屏障。当事务或快照规则不允许命中时，读取可以回退到 PostgreSQL。先阅读[批量查找指南](batch-primary-key-lookups.md)与[技术约定](TECHNICAL.md)。
-
-此扩展不提供通用 Redis 兼容性、Redis TTL 或分布式应用缓存协议。RESP2 接口基于同一映射，提供有限且需认证的命令集，并具有自己的安全模型；原生 TLS 支持另行规划。当问题是 PostgreSQL 本地、具有事务感知能力的整行读取时，可考虑此扩展。当多个应用实例需要共享对象、基于 TTL 的新鲜度或 Redis 数据结构时，应使用 Redis。组合使用两者时，各层都需要独立的键、失效处理和指标。
-
-运行[快速开始](QUICKSTART.md)，与 [node-postgres 示例](node-postgres.md)中的普通客户端查询比较，并分别查看 缓存与 RESP 计数器。[缓存选择指南](postgresql-caching.md)列出了 PostgreSQL 的其他选项。
+当需要跨应用共享对象、基于 TTL 管理新鲜度或使用 Redis 数据结构时，请使用 Redis。当需要从一个 PostgreSQL 数据库反复按主键读取整行时，请使用 `pg_local_cache`。组合使用两层缓存时，必须分别管理键、失效和监控。

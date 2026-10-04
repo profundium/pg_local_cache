@@ -19,7 +19,7 @@ Los resultados publicados de SQL mget son datos históricos de 2.x; SQL mget se 
 
 Node.js y Go descodifican filas JSON de RESP; esos costes del cliente se incluyen en el tiempo medido. Las comparaciones históricas de SQL mget se identifican como datos de 2.x.
 
-Las [mediciones de Node.js](benchmarks-node.md) usan un cliente macOS y un servidor Docker; las [mediciones de Go y RESP](benchmarks-go.md) ejecutan ambos dentro de la VM de Docker. Cada página enlaza repeticiones brutas, versiones exactas y costes de recursos del servidor. Estas configuraciones separadas no clasifican los lenguajes. Para ver ejemplos de conexiones, consulta [Node.js](node-postgres.md), [Go](go.md) o [RESP](resp.md).
+Las [mediciones de Node.js](benchmarks-node.md) usan un cliente macOS y un servidor Docker; las [mediciones de Go y RESP](benchmarks-go.md) ejecutan ambos dentro de la VM de Docker. Cada página enlaza repeticiones brutas, versiones exactas y costes de recursos del servidor. Estas configuraciones separadas no clasifican los lenguajes. Para ver ejemplos de conexiones, consulta [Node.js](resp.md#nodejs), [Go](resp.md#go) o [RESP](resp.md).
 
 ## Ejecuta la misma comparación en cada cliente {#run-the-same-comparison-on-every-client}
 

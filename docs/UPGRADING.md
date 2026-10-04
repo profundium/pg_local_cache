@@ -85,3 +85,5 @@ The control file uses the bare library name `pg_local_cache` in
 `module_pathname`. PostgreSQL resolves it through `dynamic_library_path` (whose
 default includes `$libdir`). If your server overrides that setting, include the
 directory where the package installed `pg_local_cache` before restarting.
+
+Documentation for 2.x: https://github.com/profundium/pg_local_cache/tree/v2.0.4/docs

@@ -3,14 +3,12 @@ layout: post
 lang: en
 translation_key: blog-measure-postgresql-row-cache
 title: "When a PostgreSQL row cache helps: measure the whole read"
-description: Design a fair PostgreSQL row-cache comparison using prepared SQL, SQL mget and RESP MGET. Separate warm reads, misses, batch sizes, writes and client costs.
+description: Design a fair PostgreSQL row-cache comparison using prepared SQL and RESP MGET. Separate warm reads, misses, batch sizes, writes and client costs.
 permalink: /blog/measure-postgresql-row-cache/
 date: "2026-09-22"
 last_modified_at: "2026-10-04"
 topic: performance
 ---
-
-> **2026-10-04 release note:** SQL `mget` was removed in 3.0.0; RESP `MGET` replaces it.
 
 # When a PostgreSQL row cache helps {#when-a-postgresql-row-cache-helps}
 
@@ -20,9 +18,9 @@ avoid part of that repeated work. It also adds key handling, cache checks and
 serialization costs. The useful question is whether the complete application
 request becomes cheaper for your workload.
 
-`pg_local_cache` exposes an explicit `local_cache.mget` API. Ordinary `SELECT`
-queries retain their normal PostgreSQL execution path. A warm `shared_buffers`
-cache and a warm row cache are therefore different experimental conditions.
+> **2026-10-04 release note:** The 2.x SQL API `local_cache.mget(regclass, anyarray)` was removed in 3.0.0; use RESP `MGET` for row reads.
+
+`pg_local_cache` exposes an explicit RESP `MGET` endpoint for complete-row reads. Ordinary `SELECT` queries retain their normal PostgreSQL execution path. A warm `shared_buffers` cache and a warm row cache are therefore different experimental conditions.
 
 ## Write down the result contract first {#result-contract}
 
@@ -31,9 +29,10 @@ two columns, comparing that SQL projection with serialized whole rows measures
 different work. If callers expect duplicates, input order and a null result for
 each missing key, include that alignment work in every client.
 
-The [batch lookup guide](../docs/batch-primary-key-lookups.md) gives both an
-`ANY` baseline and an ordered `WITH ORDINALITY` baseline. Neither requires the
-extension. Establish the SQL baseline before adding a cache.
+The retained [Node.js example source](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/queries.mjs)
+contains the prepared `ANY` baseline and a helper that restores input positions.
+The [ordered `WITH ORDINALITY` example](ordered-batch-reads.md#explicit-positions)
+shows SQL-side position handling. Neither requires the extension.
 
 ## Change one workload dimension at a time {#workload-dimensions}
 
@@ -68,15 +67,6 @@ throughput. A short correctness smoke run is not a publishable speed result.
 
 ## Decide from the application boundary {#application-boundary}
 
-SQL `mget` and RESP `MGET` use different transports and result handling. A gain
-for one does not establish a gain for the other. The project's
-[dated Go measurements](../docs/benchmarks-go.md) include a single-key case
-where SQL `mget` was slower than prepared SQL. That is a reason to test, not a
-universal prediction.
+Prepared SQL and RESP `MGET` use different read paths and result handling. A gain for one does not establish a gain for the other. Benchmark each against your application's actual request pattern; no single result predicts performance for every workload.
 
-Keep ordinary SQL when joins, projections, locking or unsupported table shapes
-are required, or when the cache brings no measured benefit. For repeated
-whole-row reads by primary key, test the explicit API with the same client work
-your application actually performs. Continue with the
-[caching decision guide](../docs/postgresql-caching.md) and the
-[invalidation experiment](../docs/cache-invalidation.md).
+Keep ordinary SQL when joins, projections, locking or unsupported table shapes are required, or when the cache brings no measured benefit. For repeated whole-row reads by primary key, test RESP `MGET` with the same client work your application actually performs. Continue with the [caching decision guide](../docs/postgresql-caching.md) and the [invalidation experiment](../docs/cache-invalidation.md).

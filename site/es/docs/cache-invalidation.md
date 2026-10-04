@@ -3,24 +3,32 @@ layout: doc
 lang: es
 translation_key: cache-invalidation
 title: Invalidación de caché consciente de las transacciones en PostgreSQL
-seo_title: "Invalidación de caché de PostgreSQL: commit y rollback | pg_local_cache"
-description: "Comprende la invalidación mediante triggers para lecturas RESP de filas, actualizaciones confirmadas, lecturas de origen y el límite de la transacción SQL."
+seo_title: "Invalidación de caché en PostgreSQL: commit y rollback | pg_local_cache"
+description: Cómo los triggers de PostgreSQL protegen las lecturas de filas RESP frente a commits, rollbacks y cargas de caché simultáneas.
 section: Invalidación de caché
 permalink: /es/docs/cache-invalidation.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
 # Invalidación de caché consciente de las transacciones en PostgreSQL {#transaction-aware-cache-invalidation-in-postgresql}
 
-Eliminar una entrada de caché no basta si una lectura anterior puede volver a llenarla después de la eliminación. Supón que un lector empieza a cargar una fila antigua, un escritor confirma un valor nuevo e invalida la clave y después ese loader anterior publica su resultado. La caché también debe rechazar esa publicación tardía.
+Esta guía explica cómo los triggers de las tablas adjuntas impiden que un acierto RESP obsoleto siga a una escritura confirmada en PostgreSQL.
 
-La implementation pone una valla a las claves o relaciones afectadas en el recorrido de escritura de la base de datos. Un llenado lleva información de generación para poder rechazarlo después de una invalidación. Las entradas positivas almacenadas también llevan información de visibilidad de la tupla. Una entrada no elegible vuelve a leer la tabla de origen. Consulta la [referencia técnica](TECHNICAL.md#transaction-consistency) para conocer el contrato.
+![Invalidación de escrituras: las actualizaciones confirmadas publican una barrera; un rollback anterior a su publicación conserva válida la entrada.](../../docs/diagrams/write-invalidation.svg)
 
-{% include diagrams/transaction.html id="invalidation-transaction" %}
+Un trigger registra las claves modificadas o una relación modificada dentro de la transacción de escritura. Al confirmar, la extensión publica barreras de invalidación e incrementa las generaciones. Una carga que empezó antes de la barrera no puede publicar datos obsoletos. Un rollback antes de publicar la barrera descarta el estado modificado de la transacción y mantiene válidas las entradas anteriores. Si la transacción se aborta después de publicar la barrera, la invalidación no se revierte y las entradas afectadas siguen siendo inválidas.
 
-## Comprueba la invalidación entre SQL y RESP {#test-with-two-sessions}
+Consulte la [referencia técnica de coherencia](TECHNICAL.md#transaction-consistency) para conocer el contrato completo de la ruta de lectura.
 
-Inicia la [demo local](QUICKSTART.md). Lee la fila 42 por RESP y anota su revisión. Después, actualiza la fila en PostgreSQL y confirma la transacción:
+## Comprobar la invalidación entre SQL y RESP {#test-with-two-sessions}
+
+Inicie la [demostración local](QUICKSTART.md) y lea la misma clave desde RESP y PostgreSQL:
+
+```text
+MGET CRUD:pglc_demo.public.items:{"id":42}
+```
+
+En otra sesión SQL, actualice y confirme:
 
 ```sql
 BEGIN;
@@ -28,18 +36,14 @@ UPDATE public.items SET revision = revision + 1 WHERE id = 42;
 COMMIT;
 ```
 
-El trigger de la tabla asociada invalida la fila afectada al confirmar la transacción. La siguiente lectura RESP devuelve la revisión confirmada. Para observar un rollback, inicia otra actualización y reviértela; RESP seguirá devolviendo la última revisión confirmada.
+El siguiente comando RESP devuelve la revisión confirmada. Si el escritor revierte la transacción, RESP sigue devolviendo la última revisión confirmada.
 
-Los workers RESP usan el rol PostgreSQL configurado y no comparten la transacción SQL ni la instantánea de la aplicación. Una comprobación de lectura de los propios cambios debe usar SQL en la misma transacción de la aplicación, que sigue el recorrido normal por la tabla de origen. El endpoint RESP está pensado para lecturas separadas con el rol de worker.
+RESP usa el rol de PostgreSQL configurado en una transacción breve e independiente. No comparte el rol, la transacción ni la instantánea de la aplicación. Para leer las escrituras propias y usar `SELECT ... FOR UPDATE`, ejecute SQL en la transacción de la aplicación.
 
-La [prueba ejecutable de Node.js](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/demo.mjs) comprueba lecturas RESP alrededor de escrituras PostgreSQL.
+## Casos que omiten la caché deliberadamente {#cases-that-deliberately-bypass-the-cache}
 
-## Casos que omiten deliberadamente la caché {#cases-that-deliberately-bypass-the-cache}
+Con `pg_local_cache.enabled` desactivado, RESP `MGET` omite la consulta y la carga de caché y lee la tabla de origen. Una barrera de escritura activa para una clave, una relación o de forma global también bloquea las lecturas desde caché y las nuevas cargas, por lo que se lee la tabla de origen. Los workers RESP se inician después de que termina la recuperación; esta no es una condición independiente para omitir la caché. Una fila que no cabe en una entrada puede devolverse desde PostgreSQL si su JSON cabe en el límite de valor RESP, pero no se almacena.
 
-`REPEATABLE READ`, `SERIALIZABLE`, la recuperación, la ejecución paralela y las transacciones que han escrito datos mapeados usan el recorrido de la tabla de origen. Una fila sobredimensionada puede devolverse correctamente sin almacenarse en caché. Una tasa de aciertos cercana a cero no implica necesariamente una instalación fallida: comprueba la carga de trabajo y los contadores de omisiones.
+## Inspeccionar la causa de un fallo de caché {#inspect-the-cause-of-a-miss}
 
-Si la aplicación necesita `SELECT ... FOR UPDATE`, usa la operación PostgreSQL normal. RESP `MGET` no ofrece bloqueos de filas ni semántica de sesión SQL.
-
-## Inspecciona la causa de un fallo {#inspect-the-cause-of-a-miss}
-
-Como administrador, usa `local_cache.stats()` y `local_cache.health()`. Compara los contadores antes y después de una prueba controlada. Los contadores de caché describen la ruta de lectura RESP. Tras cambios DDL intencionados, sigue el procedimiento documentado `reconcile_table` o `reconcile_all`; no supongas que un mapeo anterior sigue describiendo la tabla modificada.
+Compare `local_cache.stats()` y `local_cache.health()` antes y después de una carga de trabajo controlada. Revise los contadores de bypass, fallos de caché, invalidaciones y recarga de asignaciones. Consulte la [lista técnica de métricas](TECHNICAL.md#health-and-monitoring).

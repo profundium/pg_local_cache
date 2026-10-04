@@ -3,24 +3,32 @@ layout: doc
 lang: zh
 translation_key: cache-invalidation
 title: PostgreSQL 中的事务感知缓存失效
-seo_title: PostgreSQL 中的事务感知缓存失效 | pg_local_cache
-description: "了解 RESP 行读取的触发器失效机制、已提交更新、源表读取以及独立的 SQL 事务边界。"
+seo_title: "PostgreSQL 缓存失效：提交与回滚 | pg_local_cache"
+description: 了解 PostgreSQL 触发器如何在提交、回滚和并发缓存填充期间保护 RESP 行读取。
 section: 缓存失效
 permalink: /zh/docs/cache-invalidation.html
-last_modified_at: '2026-09-16'
+last_modified_at: "2026-10-04"
 ---
 
 # PostgreSQL 中的事务感知缓存失效 {#transaction-aware-cache-invalidation-in-postgresql}
 
-如果较早开始的读取能在删除后重新填充缓存，仅删除条目是不够的。假设读者开始加载旧行，写者提交新值并使键失效，随后先前的加载器才发布结果。缓存还必须拒绝这种迟到的发布。
+本指南说明，已附加表上的触发器如何防止 PostgreSQL 写入提交后仍命中过期的 RESP 缓存项。
 
-2.0 实现在数据库写入路径上，为受影响的键或关系设置屏障。填充携带代次信息，因此失效后可以被拒绝。存在记录的缓存项还带有元组可见性信息。不符合条件的条目会回退读取源表。约定详见[技术参考](TECHNICAL.md#transaction-consistency)。
+![写入失效：已提交的更新发布屏障；仅在屏障发布前回滚才会保留原缓存项。](../../docs/diagrams/write-invalidation.svg)
 
-{% include diagrams/transaction.html id="invalidation-transaction" %}
+触发器会在写事务中记录脏键或脏关系。提交时，扩展发布失效屏障并递增代数。屏障建立前开始的填充无法发布过期数据。仅在屏障发布前回滚，事务的脏状态才会被丢弃，原缓存项仍然有效。若屏障发布后事务中止，失效不会撤销，受影响的缓存项仍为无效。
 
-## 检查 SQL 与 RESP 之间的失效行为 {#test-with-two-sessions}
+完整的读取路径约定请参阅[技术一致性参考](TECHNICAL.md#transaction-consistency)。
 
-启动[本地演示](QUICKSTART.md)。通过 RESP 读取行 42 并记下 revision。然后在 PostgreSQL 中更新该行并提交：
+## 检查 SQL 与 RESP 间的失效行为 {#test-with-two-sessions}
+
+启动[本地演示](QUICKSTART.md)，然后分别从 RESP 和 PostgreSQL 读取同一个键：
+
+```text
+MGET CRUD:pglc_demo.public.items:{"id":42}
+```
+
+在另一个 SQL 会话中更新并提交：
 
 ```sql
 BEGIN;
@@ -28,18 +36,14 @@ UPDATE public.items SET revision = revision + 1 WHERE id = 42;
 COMMIT;
 ```
 
-关联表的触发器会在提交时使受影响的缓存行失效。下一次 RESP 读取会返回已提交的 revision。要观察回滚行为，可再次开始更新并回滚；RESP 仍会返回最后一次已提交的 revision。
+下一条 RESP 命令会返回已提交的版本。如果写事务回滚，RESP 仍会返回最后一次已提交的版本。
 
-RESP worker 使用配置的 PostgreSQL 角色，不共享应用的 SQL 事务或快照。要检查读己之写，必须在同一应用事务中使用 SQL；该路径会照常读取源表。RESP 接口用于由独立 worker 角色执行的读取。
+RESP 使用配置的 PostgreSQL 角色，并运行在独立的短事务中。它不会共享应用程序的角色、事务或快照。需要在事务中读取自己的写入或使用 `SELECT ... FOR UPDATE` 时，请在应用程序事务中使用 SQL。
 
-可运行的 [Node.js 测试](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/demo.mjs)会检查 PostgreSQL 写入前后的 RESP 读取。
+## 会绕过缓存的情况 {#cases-that-deliberately-bypass-the-cache}
 
-## 主动绕过缓存的情况 {#cases-that-deliberately-bypass-the-cache}
-
-`REPEATABLE READ`、`SERIALIZABLE`、恢复、并行执行，以及已经写入映射数据的事务，都使用源表路径。超大行可能成功返回，但不会被缓存。命中率接近零不一定代表安装失败：请检查工作负载和绕过计数器。
-
-若应用需要 `SELECT ... FOR UPDATE`，请使用普通 PostgreSQL 操作。RESP `MGET` 不提供行锁或 SQL 会话语义。
+当 `pg_local_cache.enabled` 关闭时，RESP `MGET` 会跳过缓存查询和填充，直接读取源表。键、关系或全局范围内存在活动写入屏障时，也会阻止从缓存读取和写入缓存，读取改走源表。RESP worker 仅在恢复结束后启动，因此恢复不是单独的绕过条件。超出单个缓存项容量的行仍可由 PostgreSQL 返回，只要其 JSON 未超过 RESP 值大小限制；但不会存入缓存。
 
 ## 检查未命中的原因 {#inspect-the-cause-of-a-miss}
 
-以管理员身份使用 `local_cache.stats()` 和 `local_cache.health()`。比较受控测试前后的计数器。缓存计数器描述 RESP 读取路径。执行预期的 DDL 更改后，请按文档运行 `reconcile_table` 或 `reconcile_all`，不要假设旧映射仍描述修改后的表。
+在受控工作负载运行前后，对比 `local_cache.stats()` 和 `local_cache.health()`。检查 bypass、未命中、失效和映射重载计数器。指标列表请参阅[技术参考](TECHNICAL.md#health-and-monitoring)。

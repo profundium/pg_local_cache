@@ -9,6 +9,7 @@ blog: Blog
 releases: Versions
 docs: Documentation
 docs_sections: Sections de la documentation
+docs_2x: Documentation de 2.x
 on_this_page: Sur cette page
 breadcrumb: Fil d'Ariane
 updated: Mis à jour

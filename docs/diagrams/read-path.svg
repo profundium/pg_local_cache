@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1220 600" role="img" aria-labelledby="title desc">
+<title id="title">RESP MGET read path</title>
+<desc id="desc">MGET cache hits return directly. A miss reads a row in a short source transaction and fills the cache only when its fence remains current. With the kill switch off, reads go directly to PostgreSQL.</desc>
+<style>
+:root{color-scheme:light dark;--bg:#f8fafc;--panel:#fff;--ink:#17212b;--muted:#526170;--line:#526b80;--blue:#dceefe;--green:#e2f4e8;--amber:#fff0cf;--stroke:#52738e}
+*{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.bg{fill:var(--bg)}.box{fill:var(--panel);stroke:var(--stroke);stroke-width:2.5;rx:16}.app{fill:var(--blue)}.cache{fill:var(--green)}.bypass{fill:var(--amber)}
+.head{fill:var(--ink);font-size:25px;font-weight:700;text-anchor:middle}.body{fill:var(--muted);font-size:19px;text-anchor:middle}.label{fill:var(--ink);font-size:17px;font-weight:600;text-anchor:middle}
+.arrow{fill:none;stroke:var(--line);stroke-width:3;marker-end:url(#arrow)}
+@media(prefers-color-scheme:dark){:root{--bg:#101820;--panel:#17232d;--ink:#eef4f8;--muted:#c0ccd5;--line:#90a9bc;--blue:#18384e;--green:#1c4034;--amber:#4a3820;--stroke:#7899b1}}
+</style>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--line)"/></marker></defs>
+<rect class="bg" width="1220" height="600"/>
+<text class="head" x="600" y="52">RESP MGET paths</text>
+<rect class="box app" x="35" y="105" width="160" height="78"/><text class="head" x="115" y="153">MGET</text>
+<rect class="box" x="260" y="105" width="210" height="78"/><text class="head" x="365" y="153">Cache lookup</text><path class="arrow" d="M195 144H252"/>
+<rect class="box cache" x="535" y="80" width="205" height="86"/><text class="head" x="637" y="132">Cache hit</text>
+<rect class="box app" x="838" y="80" width="205" height="86"/><text class="head" x="940" y="132">RESP reply</text>
+<path class="arrow" d="M470 125C495 125 505 123 527 123"/><text class="label" x="498" y="105">hit</text><path class="arrow" d="M740 123H830"/>
+<rect class="box" x="535" y="225" width="205" height="90"/><text class="head" x="637" y="264">Short source</text><text class="body" x="637" y="292">transaction</text>
+<rect class="box cache" x="780" y="225" width="180" height="90"/><text class="head" x="870" y="264">Fenced fill</text><text class="body" x="870" y="292">if current</text>
+<rect class="box app" x="1030" y="225" width="150" height="90"/><text class="head" x="1105" y="264">RESP reply</text><text class="body" x="1105" y="292">JSON / nil</text>
+<path class="arrow" d="M405 183C405 260 470 270 527 270"/><text class="label" x="452" y="221">miss</text><path class="arrow" d="M740 270H772"/><path class="arrow" d="M960 270H1022"/>
+<rect class="box bypass" x="260" y="410" width="210" height="92"/><text class="head" x="365" y="450">Kill switch off</text><text class="body" x="365" y="480">cache bypass</text>
+<rect class="box" x="535" y="410" width="205" height="92"/><text class="head" x="637" y="450">Source read</text><text class="body" x="637" y="480">short transaction</text>
+<rect class="box app" x="838" y="410" width="205" height="92"/><text class="head" x="940" y="450">RESP reply</text><text class="body" x="940" y="480">JSON / nil</text>
+<path class="arrow" d="M115 183V370Q115 390 140 390H260V410"/><path class="arrow" d="M470 456H527"/><path class="arrow" d="M740 456H830"/>
+<text class="body" x="600" y="570">Key, deadline, and response bounds can return errors.</text>
+</svg>

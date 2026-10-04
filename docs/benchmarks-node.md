@@ -66,7 +66,7 @@ observations, too few for a useful p99 estimate.
 The historical SQL `mget` query is retained in the linked raw measurements for
 reproducibility. It is not available in 3.0.0. The current benchmark runner
 compares prepared SQL with RESP `MGET`; see the
-[Node.js example](node-postgres.md).
+[Node.js example](resp.md#nodejs).
 
 ## Reproduce {#reproduce}
 

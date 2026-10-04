@@ -3,87 +3,29 @@ layout: doc
 lang: fr
 translation_key: batch-primary-key-lookups
 title: Recherches PostgreSQL par clé primaire en lots
-seo_title: "Recherches PostgreSQL par clé primaire en lots avec ANY et RESP MGET"
-description: "Remplacez les lectures N+1 par clé primaire par une requête PostgreSQL paramétrée, préservez les positions d’entrée si nécessaire et comparez avec RESP MGET authentifié."
+seo_title: "Lecture de lignes PostgreSQL par lots avec RESP MGET"
+description: "Découvrez comment éviter les lectures N+1 par clé primaire et lire des lignes complètes par lots avec RESP MGET authentifié."
 section: Guides
 permalink: /fr/docs/batch-primary-key-lookups.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
-# Recherches PostgreSQL par clé primaire en lots {#batch-postgresql-primary-key-lookups}
+# Requêtes PostgreSQL par lots avec clé primaire {#batch-postgresql-primary-key-lookups}
 
-Si le code applicatif envoie une requête par ID, les allers-retours réseau et
-le coût des requêtes peuvent dominer une petite lecture de ligne. Commencez
-par essayer une instruction paramétrée :
+Ce guide explique comment les lots RESP `MGET` évitent un appel à la base par clé tout en conservant la position de chaque résultat demandé.
 
-```sql
-SELECT id, value, revision
-FROM public.items
-WHERE id = ANY($1::bigint[]);
-```
+## Éviter les lectures N+1 {#graphql-dataloader-and-n1-reads}
 
-Passez les ID comme paramètre de tableau. Gardez la table et les colonnes fixes
-dans l'instruction ; ne construisez pas le SQL à partir de chaînes d'ID.
-PostgreSQL évalue `ANY` en comparant l'expression de gauche aux éléments du
-tableau, comme l'expliquent ses [documents sur les comparaisons de lignes et de tableaux](https://www.postgresql.org/docs/18/functions-comparisons.html#FUNCTIONS-COMPARISONS-ANY-SOME).
+Si une application récupère une ligne par ID, elle effectue N lectures de la source après la requête initiale. Regroupez les clés primaires connues dans un seul `MGET` pour envoyer une requête par lots bornée. Cette méthode convient aux lectures répétées de lignes complètes ; elle ne met pas en cache le SQL arbitraire et ne remplace ni les jointures ni les projections.
 
-## Connaître le contrat de résultat {#know-the-result-contract}
+## Contrat du résultat {#know-the-result-contract}
 
-La requête ci-dessus renvoie un ensemble. Elle ne promet pas l'ordre d'entrée,
-et un ID dupliqué correspond normalement une seule fois à la ligne de la
-table. Les ID absents ne produisent aucune ligne. Une entrée `NULL` ne
-correspond pas à une clé primaire non nulle ; un tableau nul ou des éléments
-nuls suivent aussi les règles `ANY` à trois valeurs de PostgreSQL. Un tableau
-vide ne renvoie aucune ligne.
+`MGET key [key ...]` renvoie un élément de tableau par clé d’entrée, dans l’ordre demandé. Les doublons sont conservés. Une ligne absente produit un élément `nil`. Chaque clé suit le format `CRUD:<db>.<schema>.<table>:<json pk>` ; l’encodage et les exemples exécutables figurent dans [Clients RESP](resp.md#key-and-response-contract).
 
-Si l'appelant a besoin d'un résultat pour chaque position demandée, conservez
-explicitement les positions :
+## Quand utiliser MGET {#when-mget-is-the-right-alternative}
 
-```sql
-WITH requested AS (
-  SELECT key, position
-  FROM unnest($1::bigint[]) WITH ORDINALITY AS input(key, position)
-)
-SELECT requested.position,
-       requested.key,
-       CASE WHEN items.id IS NULL THEN NULL
-            ELSE row_to_json(items)::text END AS row
-FROM requested
-LEFT JOIN public.items AS items ON items.id = requested.key
-ORDER BY requested.position;
-```
+Une commande accepte jusqu’à 1 024 clés. La réponse encodée est limitée à 66 560 octets ; des lignes volumineuses peuvent donc imposer des lots plus petits, même avec peu de clés. Découpez les lots selon le nombre de clés et la taille de charge prévue. Une réponse trop volumineuse renvoie une erreur, pas un tableau partiel.
 
-`WITH ORDINALITY` conserve les doublons et les positions `NULL` ; la jointure
-externe gauche renvoie une ligne `row` nulle pour une clé absente. C'est une
-bonne référence pour un client qui a besoin d'un alignement explicite.
-Consultez [l'exemple node-postgres](node-postgres.md) pour restaurer le même
-contrat côté client.
+Le SQL ordinaire convient mieux aux filtres, jointures, verrous de lignes, projections et lectures qui doivent partager une transaction. Le [guide sur l’invalidation du cache](cache-invalidation.md) et la [référence technique](TECHNICAL.md#transaction-consistency) comparent le comportement de la lecture source et de RESP.
 
-## Quand RESP `MGET` convient {#when-mget-is-the-right-alternative}
-
-Pour lire des lignes complètes par clé primaire, `pg_local_cache` propose la commande RESP2 authentifiée `MGET`. Les clés utilisent la base, le schéma, la table et les valeurs de clé primaire de la table associée :
-
-```text
-MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
-```
-
-La réponse conserve l’ordre des clés et les doublons ; les lignes absentes renvoient null. Chaque requête accepte au plus 1 024 clés et renvoie des lignes JSON complètes. Les workers RESP utilisent le rôle de base de données configuré et ne partagent ni la transaction SQL ni le snapshot de l’appelant. Utilisez SQL `ANY` ou la requête avec ordinality pour les projections, jointures, filtres supplémentaires ou la sémantique transactionnelle SQL.
-
-## GraphQL, DataLoader et lectures N+1 {#graphql-dataloader-and-n1-reads}
-
-[DataLoader](https://github.com/graphql/dataloader#batching) regroupe les
-chargements individuels en un lot. Sa fonction de lot doit renvoyer une valeur
-par clé d'entrée dans le même ordre ; la restauration ci-dessus fournit cette
-forme même pour les lignes absentes.
-
-La [mémoïsation par requête de DataLoader](https://github.com/graphql/dataloader#caching-per-request)
-est séparée du cache de lignes partagé de PostgreSQL. Créez des loaders pour
-chaque requête et supprimez les entrées concernées après les mutations de cette
-requête. L'invalidation PostgreSQL ne peut pas vider les valeurs déjà stockées
-dans un loader JavaScript. Conservez les contrôles d'autorisation applicatifs ;
-`pg_local_cache` ne prend pas en charge les tables RLS.
-
-Lancez le [démarrage rapide](QUICKSTART.md), puis comparez les deux chemins de
-lecture dans les [benchmarks](BENCHMARKS.md). La [référence technique](TECHNICAL.md#optional-resp2-endpoint)
-définit l'API ; le [guide des transactions](cache-invalidation.md) couvre les
-écritures.
+La version 3.0.0 a supprimé la fonction SQL `local_cache.mget(regclass, anyarray)` de la version 2.x ; consultez le [guide de mise à niveau](UPGRADING.md).

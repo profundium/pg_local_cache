@@ -193,3 +193,5 @@ sudo dnf remove pg_local_cache_<major>
 ```
 
 Далее: см. [техническую справку](TECHNICAL.md) об SQL, размере памяти, мониторинге и безопасности RESP.
+
+Документация для 2.x: https://github.com/profundium/pg_local_cache/tree/v2.0.4/docs

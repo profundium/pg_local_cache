@@ -2,43 +2,91 @@
 layout: doc
 lang: en
 translation_key: resp
-title: Connect over RESP
-description: Read PostgreSQL rows over RESP2 with redis-cli or Node.js. Includes authentication, client settings, runnable examples and cleanup.
+title: RESP clients
+description: Connect Redis-compatible clients to pg_local_cache with RESP2 MGET, token authentication, and native TLS.
 section: RESP
 permalink: /docs/resp.html
+redirect_from:
+  - /docs/go.html
+  - /docs/node-postgres.html
 last_modified_at: "2026-10-04"
 ---
 
-# Connect over RESP {#connect-over-resp}
+# RESP clients {#resp-clients}
 
-Use `MGET` to read cached PostgreSQL rows with a RESP2 client.
-Start the [disposable demo](QUICKSTART.md) with its RESP configuration:
+Connect Redis-compatible clients to read complete PostgreSQL rows by primary key. This page covers key encoding, authentication, response behavior, errors, and TLS.
 
-```bash
-docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build --wait
+<a id="connect-over-resp"></a>
+
+## Key and response contract {#key-and-response-contract}
+
+RESP keys identify an attached table and a primary-key object:
+
+```text
+CRUD:<db>.<schema>.<table>:<json pk>
+CRUD:app.public.items:{"id":42}
+CRUD:app.public.orders:{"tenant_id":7,"id":42}
 ```
 
-This enables RESP on `127.0.0.1:56379`. Recreating the demo discards its data.
-The token below is public and only for this local demo.
+`MGET key [key ...]` returns a RESP2 array in request order. Duplicate keys keep their positions. Existing rows are JSON bulk strings; missing rows are nil elements.
 
-## TLS and mTLS clients {#tls-mtls-clients}
+| Limit | Behavior |
+|---|---|
+| 1,024 keys per command | Larger batches return `ERR MGET accepts at most 1024 keys`. |
+| 65,536 bytes per JSON row | A larger row cannot be returned over RESP. |
+| 66,560 bytes per encoded MGET reply | Larger aggregate replies return `ERR response exceeds limit`. |
 
-Prefer TLS for RESP access beyond loopback. Native RESP TLS uses settings
-dedicated to the extension and is independent of PostgreSQL `ssl_*` settings.
-These examples use RESP2 and mutual TLS: `cache.example` must match the server
-certificate, `./ca.crt` must trust that certificate, and the client certificate
-must chain to the CA configured in `pg_local_cache.tls_ca_file`. For
-server-authenticated TLS without mTLS, omit the client certificate and key
-options.
+Batch size is bounded by both key count and reply bytes. Split batches when a large row can approach the response limit.
 
-**redis-cli**
+## AUTH {#auth}
 
-```bash
+Send `AUTH <token>` before other commands. Clients may also send `AUTH <username> <token>`; username must match `pg_local_cache.role`. The token is shared across RESP clients and does not select PostgreSQL privileges per client. Store it in `pg_local_cache.auth_token_file` with mode `0400` or `0600`; reserve inline `auth_token` for development. Non-loopback listeners require a token of at least 32 bytes.
+
+## TLS {#tls}
+
+Native RESP TLS uses `pg_local_cache.tls_*` settings and is separate from PostgreSQL's SQL TLS. TLS requires an OpenSSL-enabled PostgreSQL build, a server certificate, and a private key. Setting `tls_ca_file` also requires and verifies client certificates (mTLS). Omit client certificate options for server-authenticated TLS. The default minimum is TLS 1.2.
+
+The listener binds to loopback by default. With TLS off, a non-loopback plaintext listener requires `pg_local_cache.allow_plaintext_network=on`. Use the [technical reference](TECHNICAL.md#optional-resp2-endpoint) for listener and security settings.
+
+## redis-cli {#redis-cli}
+
+Set `PGLC_RESP_TOKEN` to the configured token. The local quickstart also provides a demo token.
+
+```sh
 export REDISCLI_AUTH="$PGLC_RESP_TOKEN"
+redis-cli -2 -h 127.0.0.1 -p 56379 MGET 'CRUD:pglc_demo.public.items:{"id":42}'
 redis-cli -2 --tls --cacert ./ca.crt --cert ./client.crt --key ./client.key -h cache.example -p 6380 MGET 'CRUD:app.public.items:{"id":42}'
 ```
 
-**go-redis**
+## Go {#go}
+
+Install `github.com/redis/go-redis/v9`. Set `PGLC_RESP_TOKEN`; the TLS form uses CA and client certificate files.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/redis/go-redis/v9"
+)
+
+func main() {
+	client := redis.NewClient(&redis.Options{
+		Addr: "127.0.0.1:56379", Password: os.Getenv("PGLC_RESP_TOKEN"), Protocol: 2,
+	})
+	defer client.Close()
+	rows, err := client.MGet(context.Background(), `CRUD:pglc_demo.public.items:{"id":42}`).Result()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%v\n", rows)
+}
+```
+
+TLS variant:
 
 ```go
 package main
@@ -47,158 +95,125 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"log"
+	"fmt"
 	"os"
 
 	"github.com/redis/go-redis/v9"
 )
 
 func main() {
-	caPEM, err := os.ReadFile("./ca.crt")
-	if err != nil {
-		log.Fatal(err)
-	}
+	ca, err := os.ReadFile("./ca.crt")
+	if err != nil { panic(err) }
 	roots := x509.NewCertPool()
-	if ok := roots.AppendCertsFromPEM(caPEM); !ok {
-		log.Fatal("no CA certificates found")
-	}
-	clientCert, err := tls.LoadX509KeyPair("./client.crt", "./client.key")
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	if !roots.AppendCertsFromPEM(ca) { panic("invalid CA") }
+	cert, err := tls.LoadX509KeyPair("./client.crt", "./client.key")
+	if err != nil { panic(err) }
 	client := redis.NewClient(&redis.Options{
-		Addr:            "cache.example:6380",
-		Password:        os.Getenv("PGLC_RESP_TOKEN"),
-		Protocol:        2,
-		DisableIdentity: true,
-		TLSConfig: &tls.Config{
-			RootCAs:      roots,
-			MinVersion:   tls.VersionTLS12,
-			ServerName:   "cache.example",
-			Certificates: []tls.Certificate{clientCert},
-		},
+		Addr: "cache.example:6380", Password: os.Getenv("PGLC_RESP_TOKEN"), Protocol: 2,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "cache.example", RootCAs: roots, Certificates: []tls.Certificate{cert}},
 	})
 	defer client.Close()
-
 	rows, err := client.MGet(context.Background(), `CRUD:app.public.items:{"id":42}`).Result()
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("%v", rows)
+	if err != nil { panic(err) }
+	fmt.Printf("%v\n", rows)
 }
 ```
 
-**node-redis**
+## Node.js (redis v4) {#nodejs}
+
+Install with `npm install redis@^4`. Redis v4 uses RESP2 by default.
+
+```js
+import { createClient } from 'redis';
+
+const client = createClient({
+  socket: { host: '127.0.0.1', port: 56379 },
+  password: process.env.PGLC_RESP_TOKEN,
+});
+client.on('error', console.error);
+await client.connect();
+try {
+  console.log(await client.mGet(['CRUD:pglc_demo.public.items:{"id":42}']));
+} finally {
+  await client.quit();
+}
+```
+
+TLS variant:
 
 ```js
 import { readFileSync } from 'node:fs';
-import { createClient } from '@redis/client';
+import { createClient } from 'redis';
 
 const client = createClient({
   socket: {
-    host: 'cache.example',
-    port: 6380,
-    tls: true,
-    servername: 'cache.example',
-    ca: readFileSync('./ca.crt'),
-    cert: readFileSync('./client.crt'),
-    key: readFileSync('./client.key'),
+    host: 'cache.example', port: 6380, tls: true, servername: 'cache.example',
+    ca: [readFileSync('./ca.crt')],
+    cert: readFileSync('./client.crt'), key: readFileSync('./client.key'),
   },
   password: process.env.PGLC_RESP_TOKEN,
-  RESP: 2,
-  disableClientInfo: true,
 });
 client.on('error', console.error);
 await client.connect();
-
 try {
-  const values = await client.mGet(['CRUD:app.public.items:{"id":42}']);
-  const rows = values.map(value => value === null ? null : JSON.parse(value));
-  console.log(rows);
+  console.log(await client.mGet(['CRUD:app.public.items:{"id":42}']));
 } finally {
-  await client.close();
+  await client.quit();
 }
 ```
 
-## redis-cli {#redis-cli}
+## Python (redis-py) {#python}
 
-```bash
-export REDISCLI_AUTH=DemoRespToken_0123456789abcdef0123456789
-redis-cli -2 -p 56379 MGET 'CRUD:pglc_demo.public.items:{"id":42}'
+Install with `python -m pip install redis`.
+
+```python
+import os
+import redis
+
+client = redis.Redis(host="127.0.0.1", port=56379,
+                     password=os.environ["PGLC_RESP_TOKEN"],
+                     decode_responses=True, protocol=2)
+print(client.execute_command('MGET', 'CRUD:pglc_demo.public.items:{"id":42}'))
+client.close()
 ```
 
-The response contains row 42 as JSON. Missing rows return `nil`.
-[redis-cli](https://redis.io/docs/latest/develop/tools/cli/) reads the token
-from `REDISCLI_AUTH`.
+TLS variant:
 
-## Node.js {#nodejs}
+```python
+import os
+import redis
 
-```bash
-npm --prefix examples/node-postgres ci --ignore-scripts
-npm --prefix examples/node-postgres run resp
+client = redis.Redis(host="cache.example", port=6380,
+                     password=os.environ["PGLC_RESP_TOKEN"],
+                     decode_responses=True, protocol=2, ssl=True,
+                     ssl_ca_certs="./ca.crt", ssl_certfile="./client.crt",
+                     ssl_keyfile="./client.key", ssl_cert_reqs="required",
+                     ssl_check_hostname=True)
+print(client.execute_command('MGET', 'CRUD:app.public.items:{"id":42}'))
+client.close()
 ```
 
-The example uses the official `@redis/client` package and checks order,
-duplicates, null input positions and missing rows. Its helper omits null keys
-on the wire and restores their positions after decoding.
-To connect from your application:
+## Errors and boundaries {#errors}
 
-```js
-import { createClient } from '@redis/client';
+| Reply | Cause |
+|---|---|
+| `NOAUTH Authentication required` | Authenticate the connection first. |
+| `WRONGPASS invalid authentication token` | Token or optional username is incorrect. |
+| `ERR MGET accepts at most 1024 keys` | Split the batch. |
+| `ERR response exceeds limit` | Reduce batch size or row payload size. |
+| `ERR MGET deadline exceeded` | Source reads and same-key waits exceeded the command deadline. |
+| `ERR KVik key targets a different database` | Use the database configured for the RESP endpoint. |
+| `ERR unknown KVik table mapping` | Check that the key names an attached schema and table. |
+| `ERR key must use CRUD:database.schema.table:{primary-key-json}` | Use the complete CRUD key format. |
+| `ERR KVik key must end with a primary-key JSON object` | End the table scope with a primary-key JSON object. |
+| `ERR invalid CRUD cache scope` | `INVALIDATE` only: the supplied scope is not a supported CRUD scope. |
 
-const client = createClient({
-  url: 'redis://127.0.0.1:56379',
-  password: process.env.PGLC_RESP_TOKEN,
-  RESP: 2,
-  disableClientInfo: true,
-});
-client.on('error', console.error);
-await client.connect();
+RESP is independent of the caller's SQL connection, role, transaction, and snapshot. For SQL transactions, use PostgreSQL directly; see the [invalidation guide](cache-invalidation.md).
 
-try {
-  const values = await client.mGet(['CRUD:pglc_demo.public.items:{"id":42}']);
-  const rows = values.map(value => value === null ? null : JSON.parse(value));
-  console.log(rows);
-} finally {
-  await client.close();
-}
-```
+## Demo cleanup {#stop-the-demo}
 
-Set `PGLC_RESP_TOKEN` to your server's token. Keep this connection open across
-requests. These [client settings](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md)
-select RESP2 and skip Redis-specific client metadata commands.
-Use token-only authentication, without a username or Redis database number.
-
-RESP workers use one configured PostgreSQL role for all clients. For reads
-within a SQL transaction, use [Node.js SQL](node-postgres.md) or [Go SQL](go.md).
-See the [RESP reference](TECHNICAL.md#optional-resp2-endpoint) for commands and limits.
-
-The listener binds to loopback by default. Prefer TLS beyond loopback; RESP TLS
-uses extension-specific settings independent of PostgreSQL `ssl_*` settings.
-With TLS off, a non-loopback plaintext listener requires the explicit
-`pg_local_cache.allow_plaintext_network=on` opt-in, limited to trusted networks.
-The demo enables it only inside its container network. See [TLS and mTLS
-clients](#tls-mtls-clients). `pg_local_cache.enabled` is a SIGHUP kill switch.
-Each RESP worker applies a reload asynchronously at its next command boundary,
-after any command it is executing finishes. `local_cache.health()` reports
-`cache_enabled` as seen by the SQL session that calls it; it does not
-acknowledge that every worker has applied the setting. To disable cache reads
-without a restart, run `ALTER SYSTEM SET pg_local_cache.enabled = off;` and
-`SELECT pg_reload_conf();`. While disabled, each read goes directly to the
-source table.
-
-## Compare with SQL {#compare-with-sql}
-
-The [common benchmark](BENCHMARKS.md#run-the-same-comparison-on-every-client)
-runs RESP `MGET` and prepared SQL with the same keys and decoded results in both
-Node.js and Go. Published SQL `mget` measurements from 2.x are historical; that
-lane was removed in 3.0.0.
-For broader application caching, read the
-[PostgreSQL and Redis cache-aside guide](postgresql-redis-cache.md).
-
-## Stop the demo {#stop-the-demo}
-
-```bash
+```sh
 docker compose -f examples/compose.yaml -f examples/compose.resp.yaml down
 ```
+
+2.x SQL `local_cache.mget(regclass, anyarray)` was removed in 3.0.0; see the [upgrade guide](UPGRADING.md).

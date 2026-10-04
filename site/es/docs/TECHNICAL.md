@@ -3,150 +3,91 @@ layout: doc
 lang: es
 translation_key: TECHNICAL
 title: Referencia técnica de pg_local_cache
-seo_title: API SQL, coherencia, memoria y RESP2 de pg_local_cache
-description: "Referencia técnica de pg_local_cache: MGET por RESP, invalidación consciente de las transacciones, memoria compartida acotada de PostgreSQL y monitorización."
+seo_title: API RESP, coherencia, memoria y configuración de pg_local_cache
+description: Referencia sobre lecturas RESP, tablas admitidas, barreras transaccionales, TLS, memoria compartida, métricas y ajustes de PostgreSQL.
 section: Técnica
 permalink: /es/docs/TECHNICAL.html
 ---
 
 # Referencia técnica de pg_local_cache {#pg_local_cache-technical-reference}
 
-`pg_local_cache` almacena filas completas por clave primaria completa en la memoria compartida acotada de PostgreSQL y ofrece un endpoint RESP2 con `MGET`, `SET` y `DEL`.
+Referencia técnica del endpoint RESP2, la coherencia de caché, los límites de recursos y la seguridad. Consulte la [guía de inicio rápido](QUICKSTART.md) y la [instalación](INSTALL_EXISTING.md) para conocer los pasos de configuración.
 
-> **El SQL habitual sigue siendo habitual:** la extensión no instala hooks del planificador ni del ejecutor. Un `SELECT` normal siempre usa PostgreSQL y nunca lee esta caché.
+## Tablas y claves admitidas {#supported-tables-and-keys}
 
-## Tablas y claves compatibles {#supported-tables-and-keys}
+Adjunte tablas heap permanentes con una clave primaria válida. No se admiten tablas particionadas, heredadas, protegidas por seguridad a nivel de fila (RLS), temporales o foráneas, ni tablas propiedad de una extensión. Los tipos admitidos para las claves primarias son `smallint`, `integer`, `bigint`, `text`, `varchar`, `char` con collations deterministas y `uuid`; las claves compuestas pueden usar estos tipos y tener hasta 16 columnas.
 
-Las tablas de origen deben ser tablas heap permanentes con una clave primaria válida y sin RLS, particionamiento, herencia ni propiedad de una extensión.
+Los cambios DDL requieren reconciliar las asignaciones. Consulte [Instalación](INSTALL_EXISTING.md#attach-a-table).
 
-Tipos de clave compatibles:
+## Ruta de lectura y fallback seguro {#read-path-and-safe-fallback}
 
-- `smallint`, `integer` y `bigint`;
-- `text`, `varchar` y `char` con intercalaciones deterministas;
-- `uuid`;
-- claves primarias compuestas formadas únicamente por esos tipos.
+![Ruta de lectura RESP MGET: acierto de caché, carga de origen protegida y bypass mediante el interruptor de emergencia.](../../docs/diagrams/read-path.svg)
 
-Las relaciones no compatibles se rechazan al asociarlas en vez de producir un mapeo parcial inseguro.
+Cada clave de RESP `MGET` se valida y canoniza antes de buscarla. Un acierto apto devuelve la fila completa en JSON. Si no hay acierto, el worker lee la tabla de origen en una transacción breve y solo publica la carga si su barrera de lectura sigue vigente. Las filas inexistentes devuelven `nil`. Las filas cuya carga no cabe en la caché compartida aún pueden devolverse desde PostgreSQL si su JSON cabe en el límite de valores RESP.
 
-## Asocia, reconcilia y separa tablas {#attach-reconcile-and-detach-tables}
+## Coherencia transaccional {#transaction-consistency}
 
-`local_cache.attach_table(regclass)` ejecuta una secuencia de configuración protegida:
+![Invalidación de escrituras: las barreras previas al commit protegen las escrituras confirmadas; un rollback anterior a publicar la barrera conserva válidas las entradas anteriores.](../../docs/diagrams/write-invalidation.svg)
 
-1. bloquea y valida la relación;
-2. registra su espacio de nombres, OID de relación y columnas de clave primaria ordenadas;
-3. instala triggers de sentencia, fila y truncado propiedad de la extensión;
-4. recarga los mapeos de los workers.
+Los triggers de fila y de sentencia de las tablas asignadas recopilan las claves modificadas o una relación afectada en el estado local de la transacción. La función de callback pre-commit publica barreras de invalidación e incrementa las generaciones. Una carga que empezó antes de la barrera no puede publicar datos obsoletos. Un rollback antes de publicar la barrera descarta el estado modificado y conserva válidas las entradas anteriores. Si la transacción se aborta después de la publicación, la invalidación no se revierte y las entradas afectadas siguen siendo inválidas.
 
-Los triggers de eventos DDL invalidan los metadatos de mapeo almacenados en caché. Ejecuta `local_cache.reconcile_table(...)` o `local_cache.reconcile_all()` después de cambios intencionados del esquema. `local_cache.detach_table(...)` elimina el mapeo y sus triggers.
+Las lecturas RESP usan `pg_local_cache.role` en transacciones breves e independientes. No comparten el rol SQL, la transacción, las escrituras sin confirmar ni la instantánea del cliente.
 
-## Recorrido de lectura y fallback seguro {#read-path-and-safe-fallback}
+## Memoria y configuración {#shared-memory-and-configuration}
 
-Cada clave RESP `MGET` consulta primero la caché compartida cuando está habilitada.
-En cada fallo, el worker lee la fila de origen en su propia transacción breve.
-PostgreSQL sigue devolviendo las filas que superen el límite de carga de la caché,
-pero no se almacenan en ella.
+La extensión preasigna una caché compartida acotada y el estado de asignaciones, workers y clientes al iniciar PostgreSQL. `memory_budget_mb` limita la asignación determinista de memoria de la extensión. Los fallos de admisión y la expulsión no superan la capacidad configurada; las lecturas recurren a PostgreSQL.
 
-## Coherencia de las transacciones {#transaction-consistency}
+| Ajuste | Valor predeterminado | Rango | Recarga |
+|---|---:|---|---|
+| `pg_local_cache.enabled` | `on` | `on` / `off` | SIGHUP |
+| `pg_local_cache.allow_plaintext_network` | `off` | `on` / `off` | Reinicio |
+| `pg_local_cache.tls` | `off` | `on` / `off` | Reinicio |
+| `pg_local_cache.tls_cert_file` | vacío | Ruta a archivo PEM | Reinicio |
+| `pg_local_cache.tls_key_file` | vacío | Ruta a archivo PEM | Reinicio |
+| `pg_local_cache.tls_ca_file` | vacío | Ruta a archivo CA PEM | Reinicio |
+| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | `TLSv1.2` / `TLSv1.3` | Reinicio |
+| `pg_local_cache.port` | `6380` | `0`–`65535`; `0` desactiva RESP | Reinicio |
+| `pg_local_cache.workers` | `4` | `1`–`32` | Reinicio |
+| `pg_local_cache.cache_entries` | `16384` | `128`–`65536` | Reinicio |
+| `pg_local_cache.relation_states` | `1024` | `128`–`8192` | Reinicio |
+| `pg_local_cache.max_clients` | `256` | `1`–`4096`; como máximo, el número de slots de worker | Reinicio |
+| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`128` | Reinicio |
+| `pg_local_cache.memory_budget_mb` | `384` | `64`–`8192` MB | Reinicio |
+| `pg_local_cache.idle_timeout_ms` | `300000` | `1000`–`86400000` | Reinicio |
+| `pg_local_cache.statement_timeout_ms` | `2000` | `100`–`60000` | Reinicio |
+| `pg_local_cache.lock_timeout_ms` | `250` | `10`–`60000` | Reinicio |
+| `pg_local_cache.singleflight_wait_ms` | `25` | `0`–`1000` | Reinicio |
+| `pg_local_cache.max_pipeline_commands` | `256` | `1`–`4096` | Reinicio |
+| `pg_local_cache.max_dirty_keys` | `4096` | `128`–`16384` | Reinicio |
+| `pg_local_cache.bind_address` | `127.0.0.1` | Dirección IPv4 | Reinicio |
+| `pg_local_cache.database` | `postgres` | Nombre de base de datos | Reinicio |
+| `pg_local_cache.role` | `local_cache_worker` | Rol LOGIN de PostgreSQL | Reinicio |
+| `pg_local_cache.auth_token_file` | vacío | Archivo propiedad del usuario del sistema operativo de PostgreSQL, modo `0400` o `0600` | Reinicio |
+| `pg_local_cache.auth_token` | vacío | Token en línea; solo para desarrollo | Reinicio |
+| `pg_local_cache.allow_superuser` | `off` | `on` / `off`; solo para desarrollo | Reinicio |
 
-Los triggers de escritura en tablas mapeadas publican, en cualquier sesión de
-PostgreSQL, vallas dirty-writer por clave o relación y aumentan las generaciones
-antes de que el commit sea visible. Las lecturas omiten las entradas protegidas
-hasta que termina la escritura; las comprobaciones de generación impiden publicar
-lecturas obsoletas en curso, por lo que una escritura confirmada no puede ir
-seguida de un acierto obsoleto.
-
-Las lecturas RESP usan `pg_local_cache.role`, no el rol PostgreSQL del cliente, y
-se ejecutan en transacciones breves independientes. No ven cambios del cliente
-sin confirmar, no comparten su snapshot ni forman parte de su transacción.
-`pg_local_cache.enabled = off` omite la caché.
-
-## Memoria compartida y configuración {#shared-memory-and-configuration}
-
-Las entradas de caché, los estados de relaciones, los contadores, las generaciones de workers y los slots de clientes RESP se asignan al iniciar el postmaster. La capacidad está acotada. La expulsión muestrea un conjunto rotatorio acotado y prefiere las entradas obsoletas; si falla la admisión, vuelve a la tabla de origen en lugar de asignar memoria sin límite.
-
-| Configuración | Predeterminado | Significado |
-|---|---:|---|
-| `pg_local_cache.database` | `postgres` | base de datos servida por la extensión |
-| `pg_local_cache.cache_entries` | `16384` | capacidad de filas compartidas |
-| `pg_local_cache.relation_states` | `1024` | capacidad del estado de mapeo compartido |
-| `pg_local_cache.memory_budget_mb` | `384` | presupuesto de inicio de la extensión |
-| `pg_local_cache.port` | `6380` | puerto RESP; `0` solo para pruebas de regresión y diagnóstico, no sirve lecturas |
-| `pg_local_cache.bind_address` | `127.0.0.1` | dirección de enlace RESP |
-| `pg_local_cache.workers` | `4` | workers RESP |
-| `pg_local_cache.role` | `local_cache_worker` | rol PostgreSQL de RESP |
-| `pg_local_cache.max_clients` | `256` | límite global de clientes RESP |
-| `pg_local_cache.max_clients_per_worker` | `64` | slots por worker |
-| `pg_local_cache.idle_timeout_ms` | `300000` | plazo para clientes inactivos o lentos |
-| `pg_local_cache.statement_timeout_ms` | `2000` | plazo de sentencia del worker |
-| `pg_local_cache.lock_timeout_ms` | `250` | plazo de bloqueo del worker |
-| `pg_local_cache.singleflight_wait_ms` | `25` | espera del seguidor para la misma clave |
-| `pg_local_cache.max_pipeline_commands` | `256` | comandos por turno del bucle de eventos |
-| `pg_local_cache.max_dirty_keys` | `4096` | límite de vallas de claves de la transacción |
-| `pg_local_cache.auth_token_file` | vacío | credencial RESP preferida |
-| `pg_local_cache.auth_token` | vacío | token insertado solo para desarrollo |
-| `pg_local_cache.enabled` | `on` | interruptor de emergencia SIGHUP de la caché; con `off`, RESP lee directamente de la tabla de origen |
-| `pg_local_cache.tls` | `off` | activar TLS en el listener RESP; PostgreSQL debe incluir soporte de OpenSSL |
-| `pg_local_cache.tls_cert_file` | vacío | certificado/cadena de servidor PEM; obligatorio con TLS activo |
-| `pg_local_cache.tls_key_file` | vacío | clave privada de servidor PEM; obligatoria con TLS activo |
-| `pg_local_cache.tls_ca_file` | vacío | CA de cliente de confianza; al configurarla activa mTLS |
-| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | versión TLS mínima (`TLSv1.2` o `TLSv1.3`) |
-| `pg_local_cache.allow_plaintext_network` | `off` | opción de postmaster para listeners en claro fuera del loopback IPv4 |
-| `pg_local_cache.allow_superuser` | `off` | anulación de rol solo para desarrollo |
-
-Son ajustes del postmaster. Dimensiona antes de reiniciar. La [guía de instalación](INSTALL_EXISTING.md) describe los paquetes y los reinicios.
+Todos los ajustes salvo `enabled` son parámetros del postmaster y requieren reiniciar. Los slots de cliente requieren `max_clients <= workers × max_clients_per_worker`.
 
 ## Endpoint RESP2 {#optional-resp2-endpoint}
 
-RESP2 usa los mismos mapeos y la misma caché compartida. Las claves del cable tienen esta forma:
+El endpoint acepta RESP2. Las claves siguen el formato `CRUD:<db>.<schema>.<table>:<json pk>`. `MGET` conserva el orden y los duplicados de la solicitud; una fila inexistente se devuelve como elemento `nil`. Cada solicitud admite como máximo 1.024 claves, cada fila JSON puede ocupar hasta 65.536 bytes y la respuesta codificada hasta 66.560 bytes.
 
-```text
-CRUD:database.schema.table:{"pk_column":<json-scalar>,...}
-```
+Los comandos de datos admitidos son `MGET`, `SET` y `DEL`; `AUTH` es obligatorio. El endpoint también admite `PING`, `ECHO`, `INFO`, `STAT`/`STATS`, `INVALIDATE` con ámbito limitado, `HELLO 2`, `QUIT`, `CLIENT SETINFO`/`SETNAME`/`GETNAME`/`ID`, `COMMAND` y `SELECT 0`. Los comandos no admitidos devuelven un error. Los clientes RESP usan la base de datos 0; el ámbito de base de datos y tabla procede de cada clave de caché.
 
-TLS para RESP usa ajustes `pg_local_cache.tls_*` propios e independientes de los
-ajustes `ssl_*` de PostgreSQL. TLS de PostgreSQL en el puerto SQL no protege
-RESP, y TLS de RESP no cambia el listener SQL. Activa `pg_local_cache.tls` y
-proporciona un certificado y una clave de servidor. Al configurar
-`pg_local_cache.tls_ca_file`, se verifican los certificados de cliente y se
-activa mTLS. La versión mínima del protocolo es `TLSv1.2` de forma
-predeterminada y puede elevarse a `TLSv1.3`. Se usan los cifrados
-predeterminados del sistema OpenSSL. La clave privada debe cumplir la [regla de
-PostgreSQL para claves de
-servidor](https://www.postgresql.org/docs/current/ssl-tcp.html). Prioriza TLS
-fuera de loopback. Con TLS desactivado, un listener fuera de loopback requiere
-la opción explícita `pg_local_cache.allow_plaintext_network = on`, limitada a
-redes de confianza. Un listener no local sigue necesitando un token de al menos
-32 bytes; prefiere un archivo de token con permisos restringidos a un token
-insertado.
+## TLS y modelo de seguridad {#security-model}
 
-El parámetro operativo `pg_local_cache.enabled` es de tipo SIGHUP y funciona como interruptor de emergencia. Para desactivar el servicio de caché:
+De forma predeterminada, el listener se vincula a la interfaz de loopback IPv4. RESP TLS usa ajustes específicos de la extensión, no los `ssl_*` de PostgreSQL. Requiere una compilación de PostgreSQL con OpenSSL, un certificado y una clave de servidor PEM, y un reinicio. Al configurar `tls_ca_file`, también se exige y verifica el certificado del cliente (mTLS); la versión TLS mínima predeterminada es 1.2.
 
-```sql
-ALTER SYSTEM SET pg_local_cache.enabled = off;
-SELECT pg_reload_conf();
-```
+Con TLS desactivado, un listener de texto claro fuera de loopback requiere `allow_plaintext_network=on` y una red de confianza. Los listeners fuera de loopback requieren un token de al menos 32 bytes. Es preferible usar un archivo de token con permisos restringidos. Todos los clientes RESP comparten un único rol LOGIN de PostgreSQL configurado; PostgreSQL no evalúa por separado los permisos concedidos a cada cliente de red. Los workers superusuario están desactivados de forma predeterminada y solo se prevén para desarrollo.
 
-Cada worker RESP aplica la recarga de forma asíncrona en su siguiente límite entre comandos, después de que termine el comando que esté ejecutando. El campo `cache_enabled` de `local_cache.health()` muestra el valor que ve la sesión SQL que llama a la función; no confirma que todos los workers hayan aplicado el cambio. Para volver a habilitarlo, ejecuta también:
+## Interruptor de emergencia de la caché {#cache-kill-switch}
 
-```sql
-ALTER SYSTEM SET pg_local_cache.enabled = on;
-SELECT pg_reload_conf();
-```
+`pg_local_cache.enabled` es un interruptor de emergencia de caché que se recarga con SIGHUP. Cuando está desactivado, las lecturas RESP omiten la caché compartida y leen la tabla de origen; `SET` y `DEL` siguen escribiendo a través de PostgreSQL. Los workers aplican las recargas de forma asíncrona en los límites entre comandos. `local_cache.health()` informa del ajuste de la sesión SQL que realiza la llamada, no de la confirmación de cada worker. Al volver a activarlo, se incrementa la época de caché antes de que los workers reanuden las lecturas de caché.
 
-## Salud y monitorización {#health-and-monitoring}
+## Métricas y estado {#health-and-monitoring}
 
-`local_cache.health()` informa de la preparación y la convergencia del mapeo. `local_cache.stats()` devuelve contadores JSON. `local_cache.metrics()` expone la fila de métricas tipadas que usa el exportador.
+`local_cache.health()` informa de la disponibilidad, el estado de la caché y la convergencia de asignaciones. `local_cache.stats()` devuelve contadores JSON; `local_cache.metrics()` devuelve la fila tipada para el exporter.
 
-Los contadores RESP de `stats()` y `metrics()` incluyen:
+Las métricas incluyen aciertos, fallos y aciertos negativos de caché; lecturas y escrituras de origen; invalidaciones y expulsiones; líderes, esperas, reutilizaciones y tiempos de espera de singleflight; clientes activos y máximos; rechazos por límite de conexiones; errores de autenticación y protocolo; contrapresión de salida y desconexiones de clientes lentos; inicios de workers; fallbacks por claves modificadas; fallos y reintentos al recargar asignaciones; handshakes y fallos TLS. Los indicadores incluyen capacidades de entradas y relaciones, recuentos de clientes y workers, convergencia de asignaciones, memoria compartida, de workers y estimada, y el presupuesto configurado.
 
-- `sql_gets`
-- `sql_meta`
-- `sql_sets`
-- `sql_dels`
-- `sql_result_reuses`
-- `tls_handshakes_total`
-- `tls_handshake_failures_total`
-
-Las lecturas de la base de datos, las invalidaciones, el rechazo de admisión, el fallback por claves sucias, el singleflight y los contadores de workers y RESP permanecen separados.
-
-A continuación: usa la [guía de instalación](INSTALL_EXISTING.md) para verificar paquetes Debian y RPM, compilar con PGXS, configurar, reiniciar, actualizar y desinstalar.
+A continuación: [inicio rápido](QUICKSTART.md), [instalación](INSTALL_EXISTING.md) y [actualización](UPGRADING.md).

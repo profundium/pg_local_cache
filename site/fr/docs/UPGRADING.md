@@ -94,3 +94,5 @@ dans `module_pathname`. PostgreSQL le résout via `dynamic_library_path`
 (dont la valeur par défaut inclut `$libdir`). Si le serveur remplace ce
 paramètre, ajoutez avant le redémarrage le répertoire où le paquet a installé
 `pg_local_cache`.
+
+Documentation pour 2.x : https://github.com/profundium/pg_local_cache/tree/v2.0.4/docs

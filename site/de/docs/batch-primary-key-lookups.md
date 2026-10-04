@@ -3,89 +3,29 @@ layout: doc
 lang: de
 translation_key: batch-primary-key-lookups
 title: Batch-Abfragen von PostgreSQL per Primärschlüssel
-seo_title: "Batch-Abfragen von PostgreSQL-Primärschlüsseln mit ANY und RESP MGET"
-description: "Ersetzen Sie N+1-Primärschlüsselabfragen durch eine parametrisierte PostgreSQL-Abfrage, erhalten Sie bei Bedarf Eingabepositionen und vergleichen Sie mit authentifiziertem RESP MGET."
+seo_title: "PostgreSQL-Zeilen gebündelt mit RESP MGET lesen"
+description: "Erfahren Sie, wie Sie N+1-Lesezugriffe per Primärschlüssel vermeiden und vollständige Zeilen mit authentifiziertem RESP MGET gebündelt lesen."
 section: Leitfäden
 permalink: /de/docs/batch-primary-key-lookups.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
-# Batch-Abfragen von PostgreSQL per Primärschlüssel {#batch-postgresql-primary-key-lookups}
+# Gebündelte PostgreSQL-Abfragen per Primärschlüssel {#batch-postgresql-primary-key-lookups}
 
-Wenn Anwendungscode eine Abfrage pro ID sendet, können Netzwerk-Roundtrips und
-Abfrage-Overhead einen kleinen Lesevorgang dominieren. Probieren Sie zuerst eine
-parametrisierte Anweisung:
+Dieser Leitfaden zeigt, wie RESP-`MGET`-Batches einen Datenbankaufruf pro Schlüssel vermeiden und die Ergebnispositionen beibehalten.
 
-```sql
-SELECT id, value, revision
-FROM public.items
-WHERE id = ANY($1::bigint[]);
-```
+## N+1-Lesezugriffe vermeiden {#graphql-dataloader-and-n1-reads}
 
-Übergeben Sie die IDs als Array-Parameter. Halten Sie Tabelle und Spalten in der
-Anweisung fest; bauen Sie kein SQL aus ID-Strings. PostgreSQL wertet `ANY` durch
-Vergleich des linken Ausdrucks mit Array-Elementen aus, wie in der
-[Dokumentation zu Zeilen- und Array-Vergleichen](https://www.postgresql.org/docs/18/functions-comparisons.html#FUNCTIONS-COMPARISONS-ANY-SOME)
-beschrieben.
+Wenn eine Anwendung pro ID eine Zeile abruft, folgen auf die erste Abfrage N Lesezugriffe auf die Quelle. Fassen Sie die bekannten Primärschlüssel in einem `MGET` zusammen, um eine begrenzte Batch-Anfrage zu senden. Das eignet sich für wiederholte Abrufe vollständiger Zeilen; beliebige SQL-Abfragen werden dadurch nicht gecacht, und Joins oder Projektionen werden nicht ersetzt.
 
-## Ergebnisvertrag kennen {#know-the-result-contract}
+## Ergebnisvertrag {#know-the-result-contract}
 
-Die obige Abfrage gibt eine Menge zurück. Sie verspricht weder die
-Eingabereihenfolge, noch trifft eine doppelte ID normalerweise mehr als einmal
-auf dieselbe Tabellenzeile. Fehlende IDs erzeugen keine Zeile. Eine Eingabe
-`NULL` trifft keinen nicht-nullbaren Primärschlüssel; ein Null-Array oder
-Null-Elemente folgen außerdem PostgreSQLs dreiwertiger `ANY`-Logik. Ein leeres
-Array gibt keine Zeilen zurück.
+`MGET key [key ...]` liefert ein Array-Element je Eingabeschlüssel und erhält dabei die Reihenfolge. Duplikate bleiben erhalten. Für fehlende Zeilen liefert die Antwort `nil`. Ein Schlüssel hat das Format `CRUD:<db>.<schema>.<table>:<json pk>`; Kodierung und ausführbare Beispiele stehen unter [RESP-Clients](resp.md#key-and-response-contract).
 
-Wenn der Aufrufer für jede angeforderte Position ein Ergebnis benötigt, bewahren
-Sie die Positionen explizit:
+## Wann MGET passt {#when-mget-is-the-right-alternative}
 
-```sql
-WITH requested AS (
-  SELECT key, position
-  FROM unnest($1::bigint[]) WITH ORDINALITY AS input(key, position)
-)
-SELECT requested.position,
-       requested.key,
-       CASE WHEN items.id IS NULL THEN NULL
-            ELSE row_to_json(items)::text END AS row
-FROM requested
-LEFT JOIN public.items AS items ON items.id = requested.key
-ORDER BY requested.position;
-```
+Ein Befehl akzeptiert bis zu 1.024 Schlüssel. Die codierte Antwort ist auf 66.560 Byte begrenzt. Bei großen Zeilen kann daher auch ein Batch mit wenigen Schlüsseln zu groß sein. Teilen Sie Anfragen nach Schlüsselzahl und erwarteter Nutzlast auf. Eine zu große Antwort führt zu einem Fehler statt zu einem unvollständigen Array.
 
-`WITH ORDINALITY` erhält Duplikate und `NULL`-Positionen; der Left Join gibt für
-einen fehlenden Schlüssel eine Null-`row` zurück. Dies ist eine nützliche
-Baseline für einen Client, der eine explizite Ausrichtung benötigt. Siehe das
-[node-postgres-Beispiel](node-postgres.md) für die clientseitige Wiederherstellung
-des gleichen Vertrags.
+Für Filter, Joins, Zeilensperren, Projektionen und Lesezugriffe innerhalb derselben Transaktion eignet sich gewöhnliches SQL besser. Den Vergleich von Quellabfrage und RESP beschreibt der [Leitfaden zur Cache-Invalidierung](cache-invalidation.md) sowie die [technische Referenz](TECHNICAL.md#transaction-consistency).
 
-## Wann RESP `MGET` passt {#when-mget-is-the-right-alternative}
-
-Für vollständige Zeilen per Primärschlüssel bietet `pg_local_cache` den authentifizierten RESP2-Befehl `MGET`. Schlüssel verwenden Datenbank, Schema, Tabelle und Primärschlüsselwerte der zugeordneten Tabelle:
-
-```text
-MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
-```
-
-Die Antwort behält Schlüsselreihenfolge und Duplikate bei; fehlende Zeilen liefern null. Jede Anfrage akzeptiert höchstens 1.024 Schlüssel und liefert vollständige JSON-Zeilen. RESP-Worker verwenden die konfigurierte Datenbankrolle und teilen weder SQL-Transaktion noch Snapshot des Aufrufers. Verwenden Sie SQL `ANY` oder die Ordinality-Abfrage für Projektionen, Joins, zusätzliche Filter oder SQL-Transaktionssemantik.
-
-## GraphQL, DataLoader und N+1-Lesevorgänge {#graphql-dataloader-and-n1-reads}
-
-[DataLoader](https://github.com/graphql/dataloader#batching) kombiniert einzelne
-Ladevorgänge zu einem Batch. Seine Batch-Funktion muss einen Wert pro
-Eingabeschlüssel in derselben Reihenfolge zurückgeben; die obige Wiederherstellung
-liefert diese Form auch für fehlende Zeilen.
-
-DataLoaders [Memoization pro Anfrage](https://github.com/graphql/dataloader#caching-per-request)
-ist vom gemeinsamen Zeilen-Cache von PostgreSQL getrennt. Erstellen Sie Loader
-für jede Anfrage und löschen Sie betroffene Loader-Einträge nach Mutationen in
-dieser Anfrage. Die PostgreSQL-Invalidation kann Werte nicht löschen, die bereits
-in einem JavaScript-Loader gespeichert sind. Behalten Sie
-Autorisierungsprüfungen der Anwendung bei; `pg_local_cache` unterstützt keine
-RLS-Tabellen.
-
-Führen Sie den [Quickstart](QUICKSTART.md) aus und vergleichen Sie anschließend
-beide Lesepfade in den [Benchmarks](BENCHMARKS.md). Die [technische Referenz](TECHNICAL.md#optional-resp2-endpoint)
-definiert die API; der [Transaktionsleitfaden](cache-invalidation.md) behandelt
-Schreibvorgänge.
+Die SQL-Funktion `local_cache.mget(regclass, anyarray)` aus 2.x wurde in 3.0.0 entfernt; siehe den [Upgrade-Leitfaden](UPGRADING.md).

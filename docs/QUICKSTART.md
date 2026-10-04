@@ -88,12 +88,12 @@ committed updates. RESP workers use a configured PostgreSQL role and do not
 share an application's SQL transaction or snapshot.
 
 See the [cache invalidation guide](cache-invalidation.md) or the
-[Node.js query explanation](node-postgres.md).
+[Node.js query explanation](resp.md#nodejs).
 
 ## Connect your application {#connect-your-application}
 
-- [Node.js](node-postgres.md): use the RESP client for cached reads and `pg` for SQL writes.
-- [Go](go.md): use RESP for cached reads and `pgx` for SQL writes.
+- [Node.js](resp.md#nodejs): use the RESP client for cached reads and `pg` for SQL writes.
+- [Go](resp.md#go): use RESP for cached reads and `pgx` for SQL writes.
 - [RESP](resp.md): connect with a Redis client.
 
 Next, [compare the same SQL and RESP workload](BENCHMARKS.md#run-the-same-comparison-on-every-client).

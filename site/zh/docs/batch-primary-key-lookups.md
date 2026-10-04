@@ -3,61 +3,29 @@ layout: doc
 lang: zh
 translation_key: batch-primary-key-lookups
 title: 批量查找 PostgreSQL 主键
-seo_title: "使用 ANY 和 RESP MGET 批量查找 PostgreSQL 主键"
-description: "用一次参数化 PostgreSQL 查询替代 N+1 主键读取，按需保留输入位置，并与经过身份验证的 RESP MGET 比较。"
+seo_title: "使用 RESP MGET 批量读取 PostgreSQL 行"
+description: "了解如何避免主键读取中的 N+1 请求，并通过经过身份验证的 RESP MGET 批量读取完整行。"
 section: 指南
 permalink: /zh/docs/batch-primary-key-lookups.html
-last_modified_at: '2026-09-16'
+last_modified_at: '2026-10-04'
 ---
 
-# 批量查找 PostgreSQL 主键 {#batch-postgresql-primary-key-lookups}
+# PostgreSQL 主键批量查询 {#batch-postgresql-primary-key-lookups}
 
-如果应用为每个 ID 分别发送查询，网络往返和查询开销可能比读取小行本身更昂贵。先尝试一次参数化语句：
+本指南介绍如何通过 RESP `MGET` 批量读取，避免每个键单独请求数据库，同时保留结果对应的输入位置。
 
-```sql
-SELECT id, value, revision
-FROM public.items
-WHERE id = ANY($1::bigint[]);
-```
+## 避免 N+1 次读取 {#graphql-dataloader-and-n1-reads}
 
-将 ID 作为数组参数传入。在语句中固定表名和列名，不要从 ID 字符串拼接 SQL。PostgreSQL 通过将左侧表达式与数组元素比较来求值 `ANY`，详见[行与数组比较文档](https://www.postgresql.org/docs/18/functions-comparisons.html#FUNCTIONS-COMPARISONS-ANY-SOME)。
+如果应用按 ID 逐行读取，初始查询之后还会对数据源执行 N 次读取。将已知主键放入一次 `MGET`，发送有界批量请求。此方式适用于重复读取完整行；它不会缓存任意 SQL，也不能替代连接查询或投影。
 
-## 明确结果约定 {#know-the-result-contract}
+## 结果约定 {#know-the-result-contract}
 
-上面的查询返回集合，不保证输入顺序；重复 ID 通常只匹配一次表行。不存在的 ID 不产生行。输入 `NULL` 不匹配非空主键；值为 `NULL` 的数组或其中的 `NULL` 元素也遵循 PostgreSQL 的三值 `ANY` 规则。空数组返回零行。
+`MGET key [key ...]` 按输入顺序为每个键返回一个数组元素。重复键仍会保留。缺失行对应 `nil` 元素。键格式为 `CRUD:<db>.<schema>.<table>:<json pk>`；编码方式和可运行示例见 [RESP 客户端](resp.md#key-and-response-contract)。
 
-如果调用者需要每个请求位置都有结果，应显式保留位置：
+## 何时适合使用 MGET {#when-mget-is-the-right-alternative}
 
-```sql
-WITH requested AS (
-  SELECT key, position
-  FROM unnest($1::bigint[]) WITH ORDINALITY AS input(key, position)
-)
-SELECT requested.position,
-       requested.key,
-       CASE WHEN items.id IS NULL THEN NULL
-            ELSE row_to_json(items)::text END AS row
-FROM requested
-LEFT JOIN public.items AS items ON items.id = requested.key
-ORDER BY requested.position;
-```
+单条命令最多接受 1,024 个键。编码后的响应上限为 66,560 字节，因此即使键数不多，大行也可能要求拆分批次。拆分时同时考虑键数和预计载荷大小。响应超限会返回错误，不会返回不完整数组。
 
-`WITH ORDINALITY` 保留重复项和 `NULL` 位置；左连接为缺失键返回空的 `row`。对需要明确位置对齐的客户端而言，这是有用的基线。[node-postgres 示例](node-postgres.md)介绍如何在客户端恢复同样的约定。
+过滤条件、连接、行锁、投影，或需要共享同一事务的读取更适合普通 SQL。[缓存失效指南](cache-invalidation.md)和[技术参考](TECHNICAL.md#transaction-consistency)说明了源查询与 RESP 的行为差异。
 
-## 何时适合使用 RESP `MGET` {#when-mget-is-the-right-alternative}
-
-按主键读取完整行时，`pg_local_cache` 提供经过身份验证的 RESP2 `MGET` 命令。键由关联表的数据库、模式、表和主键值组成：
-
-```text
-MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
-```
-
-响应保留键顺序和重复项；缺失行返回 null。每个请求最多接受 1,024 个键，并返回完整 JSON 行。RESP worker 使用配置的数据库角色，不共享调用方的 SQL 事务或快照。需要投影、连接、主键以外的过滤条件或 SQL 事务语义时，请使用 SQL `ANY` 或 ordinality 查询。
-
-## GraphQL、DataLoader 与 N+1 读取 {#graphql-dataloader-and-n1-reads}
-
-[DataLoader](https://github.com/graphql/dataloader#batching) 将独立加载合并成批次。其批处理函数必须按相同顺序，为每个输入键返回一个值；上方的位置恢复方式即使遇到缺失行也能满足这一约定。
-
-DataLoader 的[请求内记忆化](https://github.com/graphql/dataloader#caching-per-request)与 PostgreSQL 共享行缓存不同。每个请求应创建自己的 loader，并在该请求中发生修改后清除受影响的条目。PostgreSQL 的失效机制无法清除已经存放在 JavaScript loader 中的值。保留应用授权检查；`pg_local_cache` 不支持 RLS 表。
-
-运行[快速开始](QUICKSTART.md)，然后在[基准测试](BENCHMARKS.md)中比较两种读取路径。[技术参考](TECHNICAL.md#optional-resp2-endpoint)定义 API；[事务指南](cache-invalidation.md)说明写入行为。
+3.0.0 移除了 2.x 中的 SQL 函数 `local_cache.mget(regclass, anyarray)`；参见[升级指南](UPGRADING.md)。

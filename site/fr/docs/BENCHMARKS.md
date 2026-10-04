@@ -26,7 +26,7 @@ serveur Docker ; les [mesures Go et RESP](benchmarks-go.md) placent les deux
 dans la VM Docker. Chaque page contient les répétitions brutes, les versions
 exactes et les coûts de ressources du serveur. Ces configurations séparées ne
 classent pas les langages. Pour des exemples de connexion, consultez
-[Node.js](node-postgres.md), [Go](go.md) ou [RESP](resp.md).
+[Node.js](resp.md#nodejs), [Go](resp.md#go) ou [RESP](resp.md).
 
 ## Lancer la même comparaison avec chaque client {#run-the-same-comparison-on-every-client}
 

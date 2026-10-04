@@ -69,12 +69,12 @@ npm --prefix examples/node-postgres run demo
 
 测试使用 RESP 读取、使用 PostgreSQL 写入。它检查热缓存命中、输入顺序、重复键与缺失键、缓存失效以及已提交更新的可见性。RESP worker 使用配置的 PostgreSQL 角色，不会共享应用的 SQL 事务或快照。
 
-参阅[缓存失效指南](cache-invalidation.md)或 [Node.js 查询说明](node-postgres.md)。
+参阅[缓存失效指南](cache-invalidation.md)或 [Node.js 查询说明](resp.md#nodejs)。
 
 ## 连接应用 {#connect-your-application}
 
-- [Node.js](node-postgres.md)：使用 RESP 读取缓存，使用 `pg` 执行 SQL 写入。
-- [Go](go.md)：使用 RESP 读取缓存，使用 `pgx` 执行 SQL 写入。
+- [Node.js](resp.md#nodejs)：使用 RESP 读取缓存，使用 `pg` 执行 SQL 写入。
+- [Go](resp.md#go)：使用 RESP 读取缓存，使用 `pgx` 执行 SQL 写入。
 - [RESP](resp.md)：使用 Redis 客户端连接。
 
 接下来，[比较相同的预备 SQL 与 RESP 工作负载](BENCHMARKS.md#run-the-same-comparison-on-every-client)。若要报告结果或配置问题，请提交[工作负载报告](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml)，附上环境信息、基准测试 JSON 或错误日志。
