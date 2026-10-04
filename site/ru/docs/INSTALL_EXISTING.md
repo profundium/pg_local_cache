@@ -79,23 +79,40 @@ make PG_CONFIG=/path/to/pg_config && \
 
 ### Настройте RESP listener {#enable-optional-resp2}
 
-Настройте listener RESP с выделенной ролью worker и защищённым файлом токена:
+Настройте RESP listener с отдельной ролью worker, защищённым файлом токена и
+встроенным TLS. Эта конфигурация включает mTLS, доверяя CA клиентов. Для
+встроенного TLS RESP требуется сборка PostgreSQL с поддержкой OpenSSL.
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
 pg_local_cache.database = 'app'
 pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
-pg_local_cache.bind_address = '127.0.0.1'
+pg_local_cache.bind_address = '10.0.0.10'
 pg_local_cache.auth_token_file = '/secure/path/token'
 pg_local_cache.cache_entries = 16384
 pg_local_cache.memory_budget_mb = 384
+pg_local_cache.tls = on
+pg_local_cache.tls_cert_file = '/secure/path/resp.crt'
+pg_local_cache.tls_key_file = '/secure/path/resp.key'
+pg_local_cache.tls_ca_file = '/secure/path/client-ca.crt'
+pg_local_cache.tls_min_protocol_version = 'TLSv1.2'
+pg_local_cache.allow_plaintext_network = off
 ```
 
-По умолчанию listener доступен только через loopback. Для удалённых клиентов
-используйте локальный прокси или sidecar либо явно разрешите незашифрованное
-соединение в доверенной сети с `pg_local_cache.allow_plaintext_network = on`;
-в 3.0.0 встроенного TLS нет.
+Замените `10.0.0.10` на адрес, доступный клиентам. По умолчанию TLS выключен;
+для включения нужны сертификат и ключ сервера. Эта конфигурация защищает TLS
+non-loopback RESP listener и проверяет сертификаты клиентов через заданный CA.
+Для TLS только с проверкой сервера оставьте `pg_local_cache.tls_ca_file` пустым
+и не задавайте сертификаты клиента. TLS RESP независим от параметров PostgreSQL
+`ssl_*`. Без TLS listener вне loopback требует
+`pg_local_cache.allow_plaintext_network = on`; используйте это явное разрешение
+только в доверенной сети.
+
+Для закрытого ключа действует [правило PostgreSQL для файлов ключей
+сервера](https://www.postgresql.org/docs/current/ssl-tcp.html): режим `0600`,
+если файл принадлежит системному пользователю PostgreSQL, либо владелец root,
+режим `0640` и чтение для группы сервера.
 
 Совместно рассчитывайте размер кэша, состояния отношений, число workers и
 клиентов, а также `memory_budget_mb`. Рекомендации по ёмкости и памяти см. в

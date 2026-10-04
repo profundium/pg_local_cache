@@ -81,24 +81,44 @@ la extensión.
 
 ### Configurar el listener RESP {#enable-optional-resp2}
 
-Configura el listener RESP con un rol worker dedicado y un archivo de token
-protegido:
+Configura el listener RESP con un rol worker dedicado, un archivo de token
+protegido y TLS nativo. La configuración siguiente activa mTLS al confiar en una
+CA de cliente. TLS nativo para RESP requiere PostgreSQL compilado con soporte de
+OpenSSL.
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
 pg_local_cache.database = 'app'
 pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
-pg_local_cache.bind_address = '127.0.0.1'
+pg_local_cache.bind_address = '10.0.0.10'
 pg_local_cache.auth_token_file = '/secure/path/token'
 pg_local_cache.cache_entries = 16384
 pg_local_cache.memory_budget_mb = 384
+pg_local_cache.tls = on
+pg_local_cache.tls_cert_file = '/secure/path/resp.crt'
+pg_local_cache.tls_key_file = '/secure/path/resp.key'
+pg_local_cache.tls_ca_file = '/secure/path/client-ca.crt'
+pg_local_cache.tls_min_protocol_version = 'TLSv1.2'
+pg_local_cache.allow_plaintext_network = off
 ```
 
-De forma predeterminada, el listener solo acepta conexiones por loopback. Para
-clientes remotos, usa un proxy o sidecar local, o habilita explícitamente el
-tráfico sin cifrar en una red de confianza con
-`pg_local_cache.allow_plaintext_network = on`; 3.0.0 no incluye TLS nativo.
+Sustituye `10.0.0.10` por una dirección accesible para los clientes. TLS está
+desactivado de forma predeterminada; para activarlo se necesitan el certificado
+y la clave del servidor. Esta configuración protege con TLS un listener RESP
+fuera de loopback y verifica certificados de cliente mediante la CA. Para usar
+TLS con autenticación solo del servidor, deja vacío `pg_local_cache.tls_ca_file`
+y omite los certificados de cliente. TLS para RESP es independiente de los
+ajustes `ssl_*` de PostgreSQL. Sin TLS, un listener fuera de loopback requiere
+`pg_local_cache.allow_plaintext_network = on`; limita esta opción explícita a
+una red de confianza.
+
+La clave privada debe seguir la [regla de PostgreSQL para claves de
+servidor](https://www.postgresql.org/docs/current/ssl-tcp.html): modo `0600` si
+pertenece al usuario del sistema operativo de PostgreSQL, o propiedad de root
+con modo `0640` y lectura para el grupo del servidor.
+
+La clave privada debe seguir la [regla de PostgreSQL para claves de servidor](https://www.postgresql.org/docs/current/ssl-tcp.html): modo `0600` si pertenece al usuario del sistema operativo de PostgreSQL, o propiedad de root con modo `0640` y lectura para el grupo del servidor.
 
 Dimensiona conjuntamente las entradas de caché, los estados de relación, los
 workers y los clientes, además de `memory_budget_mb`. Consulta las recomendaciones

@@ -1,6 +1,7 @@
 \set ECHO none
 create-extension=|t
 enabled-guc-context=|t
+tls-guc-contexts=|t
 update-paths=|t
 worker-role-and-grants=|t
 reject-no-primary-key=|t

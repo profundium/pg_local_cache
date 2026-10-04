@@ -10,6 +10,8 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 - Add the SIGHUP `pg_local_cache.enabled` operational kill switch.
 - Add an explicit opt-in for plaintext RESP listeners on non-loopback addresses.
+- Add native TLS and optional mutual TLS for the RESP listener, with
+  handshake metrics.
 - Add an upgrade path from 2.0.4 that preserves existing trigger function OIDs.
 
 - Debian and RPM package references and package-build CI for PGDG repositories.
@@ -24,6 +26,8 @@ All notable changes to pg_local_cache are documented here. This project follows
 - Advance the global cache epoch when the kill switch is re-enabled.
 - Require `pg_local_cache.allow_plaintext_network` for non-loopback plaintext
   listeners.
+- Require TLS or explicit trusted-network opt-in for non-loopback RESP
+  access.
 - Move the multilingual documentation site under `site/` and keep release
   archives focused on extension source, SQL, tests, and Markdown documentation.
 - Replace legacy release helpers with the tested `scripts/bump-version.sh`

@@ -81,6 +81,11 @@ RESP 读取使用 `pg_local_cache.role`，而不是客户端的 PostgreSQL 角�
 | `pg_local_cache.auth_token_file` | 空 | 首选 RESP 凭据文件 |
 | `pg_local_cache.auth_token` | 空 | 仅供开发使用的内联令牌 |
 | `pg_local_cache.enabled` | `on` | SIGHUP 缓存紧急开关；关闭时 RESP 直接读取源表 |
+| `pg_local_cache.tls` | `off` | 启用 RESP listener TLS；PostgreSQL 构建须支持 OpenSSL |
+| `pg_local_cache.tls_cert_file` | 空 | PEM 格式的服务器证书/链；启用 TLS 时必需 |
+| `pg_local_cache.tls_key_file` | 空 | PEM 格式的服务器私钥；启用 TLS 时必需 |
+| `pg_local_cache.tls_ca_file` | 空 | 受信任的客户端 CA；设置后启用双向 TLS (mTLS) |
+| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | 最低 TLS 版本（`TLSv1.2` 或 `TLSv1.3`） |
 | `pg_local_cache.allow_plaintext_network` | `off` | postmaster 设置，用于允许 IPv4 loopback 之外的明文监听 |
 | `pg_local_cache.allow_superuser` | `off` | 仅供开发使用的角色限制覆盖 |
 
@@ -94,7 +99,14 @@ RESP2 使用相同的映射和共享缓存。协议键格式如下：
 CRUD:database.schema.table:{"pk_column":<json-scalar>,...}
 ```
 
-该接口不提供 TLS。`pg_local_cache.allow_plaintext_network` 默认关闭。若要在 loopback 之外监听明文连接，必须显式启用；演示容器使用明文监听时也必须显式启用。请绑定到 loopback，或置于要求认证的 TLS 代理之后。优先使用权限受限的令牌文件，而不是内联令牌。
+RESP TLS 使用独立的 `pg_local_cache.tls_*` 配置，与 PostgreSQL 的 `ssl_*` 配置互不影响。SQL 端口上的
+PostgreSQL TLS 不会保护 RESP；RESP TLS 也不会更改 SQL listener。启用 `pg_local_cache.tls`
+并提供服务器证书和密钥；设置 `pg_local_cache.tls_ca_file` 后会验证客户端证书并启用双向 TLS (mTLS)。最低协议版本默认为
+`TLSv1.2`，可提高到 `TLSv1.3`。使用 OpenSSL 系统默认密码套件。私钥须遵循 [PostgreSQL
+服务器密钥文件规则](https://www.postgresql.org/docs/current/ssl-tcp.html)。loopback 之外建议使用
+TLS。TLS 关闭时，loopback 之外的明文 listener 必须显式设置
+`pg_local_cache.allow_plaintext_network = on`，且仅限可信网络。非 loopback listener 仍要求至少
+32 字节的令牌；应优先使用权限受限的令牌文件，而非内联令牌。
 
 运维参数 `pg_local_cache.enabled` 是 SIGHUP 参数，可用作缓存服务的紧急开关。要禁用缓存服务：
 
@@ -121,6 +133,8 @@ SELECT pg_reload_conf();
 - `sql_sets`
 - `sql_dels`
 - `sql_result_reuses`
+- `tls_handshakes_total`
+- `tls_handshake_failures_total`
 
 数据库读取、失效、接纳拒绝、脏键回退、singleflight、工作进程和 RESP 的计数器分别统计。
 

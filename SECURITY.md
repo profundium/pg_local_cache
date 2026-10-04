@@ -19,6 +19,13 @@ Reports are in scope when they expose or corrupt data, bypass authorization,
 compromise server availability, or enable code execution through the RESP
 listener, SQL functions, shared memory, or installation and upgrade tooling.
 
+Reports involving RESP TLS or mTLS are also in scope, including
+certificate-validation bypasses, unexpected plaintext access, or private-key
+permission checks that fail open. RESP TLS uses settings separate from
+PostgreSQL `ssl_*` settings. For non-loopback listeners, prefer TLS; enable
+`pg_local_cache.allow_plaintext_network` only for plaintext on a trusted
+network.
+
 We aim to acknowledge reports within 3 business days and provide an initial
 triage within 10 business days. Confirmed active exploitation receives priority.
 Response times are targets, not a service-level guarantee.

@@ -107,6 +107,8 @@ typedef struct PgLocalCacheSharedState
 	pg_atomic_uint64 active_clients;
 	pg_atomic_uint64 peak_active_clients;
 	pg_atomic_uint64 rejected_connections;
+	pg_atomic_uint64 tls_handshakes;
+	pg_atomic_uint64 tls_handshake_failures;
 	pg_atomic_uint64 client_limit_rejections;
 	pg_atomic_uint64 authentication_failures;
 	pg_atomic_uint64 protocol_errors;
@@ -200,6 +202,11 @@ extern char *pglc_auth_token_file;
 extern bool pglc_allow_superuser;
 extern bool pglc_enabled;
 extern bool pglc_allow_plaintext_network;
+extern bool pglc_tls;
+extern int pglc_tls_min_protocol_version;
+extern char *pglc_tls_cert_file;
+extern char *pglc_tls_key_file;
+extern char *pglc_tls_ca_file;
 
 extern PgLocalCacheSharedState *pglc_shared;
 extern HTAB *pglc_cache_hash;

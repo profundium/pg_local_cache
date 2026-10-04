@@ -87,24 +87,40 @@ Replace `app` with the database served by the extension.
 
 ### Configure the RESP listener {#enable-optional-resp2}
 
-Configure the RESP listener with a dedicated worker role and protected token
-file:
+Configure the RESP listener with a dedicated worker role, protected token file,
+and native TLS. The configuration below enables mutual TLS by trusting a client
+CA. Native RESP TLS requires PostgreSQL built with OpenSSL support.
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
 pg_local_cache.database = 'app'
 pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
-pg_local_cache.bind_address = '127.0.0.1'
+pg_local_cache.bind_address = '10.0.0.10'
 pg_local_cache.auth_token_file = '/secure/path/token'
 pg_local_cache.cache_entries = 16384
 pg_local_cache.memory_budget_mb = 384
+pg_local_cache.tls = on
+pg_local_cache.tls_cert_file = '/secure/path/resp.crt'
+pg_local_cache.tls_key_file = '/secure/path/resp.key'
+pg_local_cache.tls_ca_file = '/secure/path/client-ca.crt'
+pg_local_cache.tls_min_protocol_version = 'TLSv1.2'
+pg_local_cache.allow_plaintext_network = off
 ```
 
-The default listener is loopback-only. For remote clients, use a local proxy or
-sidecar, or explicitly enable plaintext on a trusted network with
-`pg_local_cache.allow_plaintext_network = on`; native TLS is not available in
-3.0.0.
+Replace `10.0.0.10` with an address reachable by clients. TLS is off by default;
+enabling it requires the server certificate and key. This configuration protects
+a non-loopback RESP listener with TLS, and the CA setting verifies client
+certificates. For server-authenticated TLS only, leave
+`pg_local_cache.tls_ca_file` empty and omit client certificates. RESP TLS is
+independent of PostgreSQL's `ssl_*` settings. Without TLS, a non-loopback
+listener requires `pg_local_cache.allow_plaintext_network = on`; use that
+explicit opt-in only on a trusted network.
+
+The private key must follow [PostgreSQL's server key file
+rule](https://www.postgresql.org/docs/current/ssl-tcp.html): mode `0600` when
+owned by the PostgreSQL OS user, or root-owned with mode `0640` and readable by
+the server's group.
 
 Size cache entries, relation states, workers, clients, and
 `memory_budget_mb` together. See the [technical reference](TECHNICAL.md#shared-memory-and-configuration)

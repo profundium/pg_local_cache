@@ -82,25 +82,42 @@ die die Erweiterung bedient.
 
 ### RESP-Listener konfigurieren {#enable-optional-resp2}
 
-Konfigurieren Sie den RESP-Listener mit einer eigenen Worker-Rolle und einer
-geschützten Token-Datei:
+Konfigurieren Sie den RESP-Listener mit einer eigenen Worker-Rolle, einer
+geschützten Token-Datei und nativem TLS. Die folgende Konfiguration aktiviert
+mTLS durch Vertrauen in eine Client-CA. Native RESP-TLS setzt PostgreSQL mit
+OpenSSL-Unterstützung voraus.
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
 pg_local_cache.database = 'app'
 pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
-pg_local_cache.bind_address = '127.0.0.1'
+pg_local_cache.bind_address = '10.0.0.10'
 pg_local_cache.auth_token_file = '/secure/path/token'
 pg_local_cache.cache_entries = 16384
 pg_local_cache.memory_budget_mb = 384
+pg_local_cache.tls = on
+pg_local_cache.tls_cert_file = '/secure/path/resp.crt'
+pg_local_cache.tls_key_file = '/secure/path/resp.key'
+pg_local_cache.tls_ca_file = '/secure/path/client-ca.crt'
+pg_local_cache.tls_min_protocol_version = 'TLSv1.2'
+pg_local_cache.allow_plaintext_network = off
 ```
 
-Standardmäßig ist der Listener nur über Loopback erreichbar. Verwenden Sie für
-entfernte Clients einen lokalen Proxy oder Sidecar, oder erlauben Sie Klartext
-in einem vertrauenswürdigen Netzwerk ausdrücklich mit
-`pg_local_cache.allow_plaintext_network = on`; native TLS-Unterstützung gibt es
-in 3.0.0 noch nicht.
+Ersetzen Sie `10.0.0.10` durch eine für Clients erreichbare Adresse. TLS ist
+standardmäßig deaktiviert; zum Aktivieren sind Serverzertifikat und Schlüssel
+erforderlich. Diese Konfiguration schützt einen Nicht-Loopback-RESP-Listener mit
+TLS und prüft Clientzertifikate über die CA-Einstellung. Für TLS nur mit
+Serverauthentifizierung lassen Sie `pg_local_cache.tls_ca_file` leer und
+Clientzertifikate weg. RESP-TLS ist unabhängig von
+PostgreSQL-`ssl_*`-Einstellungen. Ohne TLS benötigt ein Nicht-Loopback-Listener
+`pg_local_cache.allow_plaintext_network = on`; verwenden Sie dieses Opt-in nur
+in einem vertrauenswürdigen Netzwerk.
+
+Für den privaten Schlüssel gilt [PostgreSQLs Regel für
+Server-Schlüsseldateien](https://www.postgresql.org/docs/current/ssl-tcp.html):
+Modus `0600`, wenn die Datei dem PostgreSQL-Betriebssystembenutzer gehört, oder
+Root-Eigentümer mit Modus `0640` und Leserecht für die Servergruppe.
 
 Stimmen Sie Cache-Einträge, Relationszustände, Worker, Clients und
 `memory_budget_mb` gemeinsam ab. Hinweise zu Kapazität und Speicher finden Sie

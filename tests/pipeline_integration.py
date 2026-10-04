@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import socket
 import subprocess
 import time
@@ -25,6 +26,9 @@ PGDATABASE = os.environ.get("PGDATABASE", "postgres")
 RESP_HOST = os.environ.get("PG_LOCAL_CACHE_RESP_HOST", "127.0.0.1")
 RESP_PORT = int(os.environ.get("PG_LOCAL_CACHE_RESP_PORT", "6380"))
 AUTH_TOKEN = os.environ.get("PG_LOCAL_CACHE_AUTH_TOKEN", "")
+TLS_CA_FILE = os.environ.get("PG_LOCAL_CACHE_TLS_CA", "")
+TLS_CERT_FILE = os.environ.get("PG_LOCAL_CACHE_TLS_CERT", "")
+TLS_KEY_FILE = os.environ.get("PG_LOCAL_CACHE_TLS_KEY", "")
 WORKER_ROLE = os.environ.get("PG_LOCAL_CACHE_TEST_ROLE", "")
 WRITER_ROLE = os.environ.get("PG_LOCAL_CACHE_TEST_WRITER_ROLE", "")
 WRITER_PASSWORD = os.environ.get("PG_LOCAL_CACHE_TEST_WRITER_PASSWORD", "")
@@ -61,6 +65,15 @@ class RespConnection:
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer)
         self.socket.settimeout(5)
         self.socket.connect((RESP_HOST, RESP_PORT))
+        if TLS_CA_FILE:
+            if bool(TLS_CERT_FILE) != bool(TLS_KEY_FILE):
+                raise ValueError("TLS client certificate and key must be configured together")
+            context = ssl.create_default_context(cafile=TLS_CA_FILE)
+            if TLS_CERT_FILE:
+                context.load_cert_chain(TLS_CERT_FILE, TLS_KEY_FILE)
+            self.socket = context.wrap_socket(
+                self.socket, server_hostname="127.0.0.1"
+            )
         self.buffer = bytearray()
         self.position = 0
         if authenticate and AUTH_TOKEN:
@@ -571,7 +584,8 @@ def test_backpressure_preserves_every_response(table: str) -> None:
         batch = encoded_mget * count + tail
         assert len(batch) < MAX_PIPELINE_INPUT_BYTES
         client.socket.sendall(batch)
-        client.socket.shutdown(socket.SHUT_WR)
+        if not TLS_CA_FILE:
+            client.socket.shutdown(socket.SHUT_WR)
 
         # The response is much larger than the deliberately restricted receive
         # window.  Require an observed EAGAIN, then prove the same event loop
@@ -606,11 +620,16 @@ def test_backpressure_preserves_every_response(table: str) -> None:
         assert after["cache_misses"] - before["cache_misses"] == 1
         assert after["database_reads"] - before["database_reads"] == 1
         assert after["database_writes"] - before["database_writes"] == 1
-        try:
-            client.read_response()
-            raise AssertionError("backpressured half-close remained open after flush")
-        except (EOFError, ConnectionResetError):
-            pass
+        if TLS_CA_FILE:
+            assert client.command("PING") == "PONG"
+        else:
+            try:
+                client.read_response()
+                raise AssertionError(
+                    "backpressured half-close remained open after flush"
+                )
+            except (EOFError, ConnectionResetError):
+                pass
     finally:
         if peer is not None:
             peer.close()
@@ -963,15 +982,19 @@ def main() -> None:
         test_warm_pipeline_has_no_sql_reads(table)
         test_mget(table, composite_table, scoped_table)
         test_pipeline_budget_is_a_fairness_yield()
-        test_half_close_drains_final_pipeline(table)
+        if not TLS_CA_FILE:
+            test_half_close_drains_final_pipeline(table)
         test_backpressure_preserves_every_response(table)
         test_close_after_flush(table)
         test_transactional_commit_and_rollback(table)
         test_uncommitted_write_is_not_served_before_commit(table)
         test_enabled_kill_switch(table)
+        half_close_coverage = "half-close drain, " if not TLS_CA_FILE else ""
         print(
             "pipeline integration passed: fragmentation/order, warm-hit stats, "
-            "error recovery, fairness resume, half-close drain, backpressure, "
+            "error recovery, fairness resume, "
+            + half_close_coverage
+            + "backpressure, "
             "bounded MGET, close-after-flush, commit/rollback fence, "
             "database/table key scope, uncommitted-write visibility, "
             "SIGHUP cache kill switch, "

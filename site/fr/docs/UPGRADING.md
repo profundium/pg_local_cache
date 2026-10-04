@@ -32,12 +32,15 @@ configuration du client et l'encodage des clés.
    d'autorisation requis.
 2. Installez le paquet ou la bibliothèque 3.0.0 correspondant à la version
    majeure de PostgreSQL en cours d'exécution.
-3. Si le listener 2.x utilisait une adresse non loopback dans
-   `pg_local_cache.bind_address`, avant le redémarrage liez-le à loopback et
-   utilisez un proxy ou sidecar local pour les clients distants, ou définissez
-   explicitement `pg_local_cache.allow_plaintext_network = on` si le trafic en
-   clair est voulu sur ce réseau. TLS natif arrivera dans une version ultérieure.
-   Sinon, les workers RESP refuseront de démarrer.
+3. Si le listener 2.x utilisait une adresse de
+   `pg_local_cache.bind_address` hors loopback, configurez TLS natif pour RESP
+   et fournissez son certificat et sa clé avant le redémarrage. Réglez
+   `pg_local_cache.tls_ca_file` pour exiger des certificats clients (mTLS).
+   TLS RESP est indépendant des paramètres `ssl_*` de PostgreSQL. Si le trafic
+   en clair est nécessaire, définissez explicitement
+   `pg_local_cache.allow_plaintext_network = on`, uniquement sur un réseau de
+   confiance. Sans TLS ni cet opt-in explicite pour le trafic en clair, les
+   workers RESP refusent de démarrer.
 4. Redémarrez PostgreSQL pour qu'il charge la nouvelle bibliothèque partagée.
 5. Vérifiez le listener : `SELECT local_cache.health();` doit afficher
    `workers_running = workers_configured`. Envoyez RESP `PING` et attendez `PONG`.

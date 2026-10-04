@@ -97,6 +97,11 @@ RESP выделяются при запуске postmaster. Ёмкость ог�
 | `pg_local_cache.auth_token_file` | пусто | предпочтительный учётный секрет RESP |
 | `pg_local_cache.auth_token` | пусто | встроенный токен только для разработки |
 | `pg_local_cache.enabled` | `on` | аварийный выключатель кэша SIGHUP; при `off` RESP читает напрямую из исходной таблицы |
+| `pg_local_cache.tls` | `off` | включить TLS для RESP listener; PostgreSQL должен поддерживать OpenSSL |
+| `pg_local_cache.tls_cert_file` | пусто | сертификат/цепочка сервера PEM; обязателен при включённом TLS |
+| `pg_local_cache.tls_key_file` | пусто | закрытый ключ сервера PEM; обязателен при включённом TLS |
+| `pg_local_cache.tls_ca_file` | пусто | доверенный CA клиентов; настройка включает mTLS |
+| `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | минимальная версия TLS (`TLSv1.2` или `TLSv1.3`) |
 | `pg_local_cache.allow_plaintext_network` | `off` | разрешение postmaster для plaintext-слушателя вне IPv4-loopback |
 | `pg_local_cache.allow_superuser` | `off` | переопределение роли только для разработки |
 
@@ -115,7 +120,18 @@ CRUD:database.schema.table:{"pk_column":<json-scalar>,...}
 инвалидация в заданной области. Воркеры RESP используют одну настроенную роль
 PostgreSQL; они не наследуют ACL базы данных отдельных сетевых клиентов.
 
-У конечной точки нет TLS. По умолчанию `pg_local_cache.allow_plaintext_network` отключён. Для plaintext-listener вне loopback включите его явно; для plaintext-listener контейнера демонстрации его также нужно включить явно. Привязывайте конечную точку к loopback или размещайте за аутентифицированным TLS-прокси. Предпочитайте файл токена с ограниченными правами встроенному токену.
+Для RESP используются отдельные параметры `pg_local_cache.tls_*`, независимые от
+параметров PostgreSQL `ssl_*`. TLS PostgreSQL на SQL-порту не защищает RESP, а
+TLS RESP не меняет SQL listener. Включите `pg_local_cache.tls` и укажите
+сертификат и ключ сервера. Настройка `pg_local_cache.tls_ca_file` проверяет
+сертификаты клиентов и включает mTLS. Минимальная версия протокола по умолчанию
+— `TLSv1.2`; её можно повысить до `TLSv1.3`. Используются системные значения
+OpenSSL для шифров. Для закрытого ключа действует [правило PostgreSQL для файлов
+ключей сервера](https://www.postgresql.org/docs/current/ssl-tcp.html). Для
+подключений вне loopback используйте TLS. При отключённом TLS plaintext-listener
+вне loopback требует явного разрешения `pg_local_cache.allow_plaintext_network = on`; используйте его только в доверенной сети. Для listener вне loopback
+по-прежнему нужен токен длиной не менее 32 байт; предпочтителен файл токена с
+ограниченными правами, а не встроенный токен.
 
 Операционный параметр `pg_local_cache.enabled` — параметр SIGHUP и аварийный выключатель сервиса кэша. Чтобы отключить кэш:
 
@@ -144,6 +160,8 @@ SELECT pg_reload_conf();
 - `sql_sets`
 - `sql_dels`
 - `sql_result_reuses`
+- `tls_handshakes_total`
+- `tls_handshake_failures_total`
 
 Счётчики чтений базы данных, инвалидации, отклонения допуска, обхода из-за
 грязных ключей, singleflight, воркеров и RESP остаются отдельными.
