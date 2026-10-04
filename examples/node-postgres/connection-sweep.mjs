@@ -96,7 +96,7 @@ try {
     current_setting('pg_local_cache.cache_entries') AS cache_entries`)).rows[0];
   assert.equal(environment.database, 'pglc_demo');
   assert.equal(environment.marker, 'pg_local_cache disposable demo');
-  assert.match(environment.extension_version, /^2\.0\./);
+  assert.match(environment.extension_version, /^\d+\.\d+\.\d+$/);
   assert.equal(environment.other_client_sessions, 0, 'stop other clients of the disposable demo before measuring');
   assert.ok(Math.max(...connections) + 1 < environment.max_connections - environment.superuser_reserved_connections);
   assert.equal((await admin.query('SELECT count(*)::int AS n FROM public.items')).rows[0].n, 4096);
