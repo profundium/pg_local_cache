@@ -133,6 +133,26 @@ for integration in whole_row_integration pipeline_integration \
     echo "==> $integration"
     python3 "$repo/tests/$integration.py"
 done
+echo "==> stress_integration over plaintext RESP"
+python3 "$repo/tests/stress_integration.py"
+
+# Exercise worker fan-out with a bounded run, then restore the normal CI config.
+sed -i 's/pg_local_cache.workers = 1/pg_local_cache.workers = 2/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+pg_ctlcluster "$PG" ci restart
+echo "==> stress_integration with two workers"
+stress_status=0
+if PGLC_STRESS_SECONDS=10 python3 "$repo/tests/stress_integration.py"; then
+    stress_status=0
+else
+    stress_status=$?
+fi
+sed -i 's/pg_local_cache.workers = 2/pg_local_cache.workers = 1/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+pg_ctlcluster "$PG" ci restart
+if (( stress_status != 0 )); then
+    exit "$stress_status"
+fi
 
 # Keep TLS fixtures inside the cluster data directory so PostgreSQL can read
 # them with relative paths and tests never depend on a host certificate store.
@@ -204,6 +224,9 @@ PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
 echo "==> pipeline_integration over TLS"
 PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
     python3 "$repo/tests/pipeline_integration.py"
+echo "==> stress_integration over TLS"
+PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
+    PGLC_STRESS_SECONDS=10 python3 "$repo/tests/stress_integration.py"
 
 cat >>/etc/postgresql/"$PG"/ci/pglc.conf <<'CONF'
 pg_local_cache.tls_min_protocol_version = 'TLSv1.3'

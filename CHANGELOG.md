@@ -4,6 +4,14 @@ All notable changes to pg_local_cache are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Add continuous RESP parser fuzzing and deterministic seed-corpus replay.
+- Add concurrent stale-read stress coverage for committed writes, rollbacks,
+  invalidation, worker health, malformed input, and TLS.
+
 ## [3.0.0] - 2026-10-04
 
 ### Added

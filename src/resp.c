@@ -59,6 +59,9 @@ parse_decimal_line(const char *buffer, Size length, Size *position,
 	{
 		negative = true;
 		i++;
+		/* A sign alone is an incomplete line, not an error. */
+		if (i >= length)
+			return 0;
 	}
 
 	while (i < length && buffer[i] != '\r')
