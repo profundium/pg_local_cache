@@ -6,6 +6,13 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-10-04
+
+### Fixed
+
+- RESP workers no longer leak memory on cache misses and writes (could grow by
+  ~2 KB per miss until the OOM killer restarted PostgreSQL).
+
 ## [3.0.0] - 2026-10-04
 
 3.0.0 makes pg_local_cache RESP-only and ready for distribution packages. Read

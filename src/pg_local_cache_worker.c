@@ -146,6 +146,7 @@ static void worker_process_config_reload(void);
 static bool reload_mappings(uint64 target_generation);
 static void set_worker_mappings_incomplete(bool incomplete);
 static void set_worker_mapping_generation(uint64 generation);
+static void abort_spi_transaction(MemoryContext caller_context);
 static bool resolve_wire_key(const PgLocalCacheRespArg *wire_key,
 								 PgLocalCacheMapping **mapping, char **raw_key,
 								 char **error);
@@ -1591,9 +1592,10 @@ process_client(PgLocalCacheClient *client)
 				pg_atomic_fetch_add_u64(&pglc_shared->client_request_errors, 1);
 			queued = queue_response(client, response, response_length,
 								close_after);
-			MemoryContextSwitchTo(previous_context);
 			if (queued)
 				client->input_start += consumed;
+			Assert(CurrentMemoryContext == command_context);
+			MemoryContextSwitchTo(previous_context);
 			MemoryContextReset(command_context);
 
 			if (!queued)
@@ -1696,8 +1698,7 @@ execute_command(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int argc,
 			ReThrowError(error_data);
 		disable_all_timeouts(false);
 		QueryCancelPending = false;
-		if (IsTransactionState())
-			AbortCurrentTransaction();
+		abort_spi_transaction(error_context);
 		message = psprintf("ERR PostgreSQL: %s", error_data->message);
 		response = pglc_resp_error(message, response_length);
 		FreeErrorData(error_data);
@@ -2307,25 +2308,44 @@ source_row_json(TupleTableSlot *slot, TupleDesc descriptor, Datum row,
 }
 
 static void
+abort_spi_transaction(MemoryContext caller_context)
+{
+	if (IsTransactionState())
+		AbortCurrentTransaction();
+	MemoryContextSwitchTo(caller_context);
+}
+
+static MemoryContext
 begin_spi_transaction(int statement_timeout_ms)
 {
+	MemoryContext caller_context = CurrentMemoryContext;
 	char		timeout[32];
 
 	Assert(statement_timeout_ms > 0);
-	StartTransactionCommand();
-	if (SPI_connect() != SPI_OK_CONNECT)
-		elog(ERROR, "pg_local_cache could not connect to SPI");
-	PushActiveSnapshot(GetTransactionSnapshot());
+	PG_TRY();
+	{
+		StartTransactionCommand();
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "pg_local_cache could not connect to SPI");
+		PushActiveSnapshot(GetTransactionSnapshot());
 
-	snprintf(timeout, sizeof(timeout), "%d", statement_timeout_ms);
-	(void) set_config_option("statement_timeout", timeout,
+		snprintf(timeout, sizeof(timeout), "%d", statement_timeout_ms);
+		(void) set_config_option("statement_timeout", timeout,
 							 PGC_USERSET, PGC_S_SESSION,
 							 GUC_ACTION_LOCAL, true, ERROR, false);
-	snprintf(timeout, sizeof(timeout), "%d", pglc_lock_timeout_ms);
-	(void) set_config_option("lock_timeout", timeout,
+		snprintf(timeout, sizeof(timeout), "%d", pglc_lock_timeout_ms);
+		(void) set_config_option("lock_timeout", timeout,
 							 PGC_USERSET, PGC_S_SESSION,
 							 GUC_ACTION_LOCAL, true, ERROR, false);
-	enable_timeout_after(STATEMENT_TIMEOUT, statement_timeout_ms);
+		enable_timeout_after(STATEMENT_TIMEOUT, statement_timeout_ms);
+	}
+	PG_CATCH();
+	{
+		abort_spi_transaction(caller_context);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	return caller_context;
 }
 
 static void
@@ -2339,15 +2359,25 @@ ensure_mapping_current(const PgLocalCacheMapping *mapping)
 }
 
 static void
-commit_spi_transaction(void)
+commit_spi_transaction(MemoryContext caller_context)
 {
-	PopActiveSnapshot();
-	if (SPI_finish() != SPI_OK_FINISH)
-		elog(ERROR, "pg_local_cache could not finish SPI");
-	if (get_timeout_active(STATEMENT_TIMEOUT))
-		disable_timeout(STATEMENT_TIMEOUT, false);
-	(void) get_timeout_indicator(STATEMENT_TIMEOUT, true);
-	CommitTransactionCommand();
+	PG_TRY();
+	{
+		PopActiveSnapshot();
+		if (SPI_finish() != SPI_OK_FINISH)
+			elog(ERROR, "pg_local_cache could not finish SPI");
+		if (get_timeout_active(STATEMENT_TIMEOUT))
+			disable_timeout(STATEMENT_TIMEOUT, false);
+		(void) get_timeout_indicator(STATEMENT_TIMEOUT, true);
+		CommitTransactionCommand();
+	}
+	PG_CATCH();
+	{
+		abort_spi_transaction(caller_context);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	MemoryContextSwitchTo(caller_context);
 }
 
 static void
@@ -2384,6 +2414,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 	Size		database_payload_length = 0;
 	bool		database_payload_cacheable = false;
 	TransactionId database_xmin = InvalidTransactionId;
+	MemoryContext transaction_context;
 	MemoryContext result_context = CurrentMemoryContext;
 	int			statement_timeout_ms = pglc_statement_timeout_ms;
 
@@ -2509,7 +2540,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 
 	PG_TRY();
 	{
-		begin_spi_transaction(statement_timeout_ms);
+		transaction_context = begin_spi_transaction(statement_timeout_ms);
 		ensure_mapping_current(mapping);
 		pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
 		if (SPI_execute_plan(mapping->get_plan, key_values, NULL, true, 1) !=
@@ -2576,7 +2607,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 				elog(ERROR, "pg_local_cache row xmin unexpectedly became NULL");
 			database_xmin = (TransactionId) DatumGetUInt32(xmin_value);
 		}
-		commit_spi_transaction();
+		commit_spi_transaction(transaction_context);
 		pglc_note_database_read();
 
 		if (cache_enabled)
@@ -2678,6 +2709,7 @@ command_set(PgLocalCacheMapping *mapping, const char *raw_key,
 	char	   *canonical;
 	char	   *key_error = NULL;
 	char	   *value_text;
+	MemoryContext transaction_context;
 	int			i;
 
 	if (!mapping->writable)
@@ -2696,7 +2728,7 @@ command_set(PgLocalCacheMapping *mapping, const char *raw_key,
 		values[i] = key_values[i];
 	row = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
 										 CStringGetDatum(value_text)));
-	begin_spi_transaction(pglc_statement_timeout_ms);
+	transaction_context = begin_spi_transaction(pglc_statement_timeout_ms);
 	ensure_mapping_current(mapping);
 	if (!row_json_validate(mapping, row, key_values, &key_error))
 		ereport(ERROR,
@@ -2712,7 +2744,7 @@ command_set(PgLocalCacheMapping *mapping, const char *raw_key,
 		SPI_OK_INSERT)
 		elog(ERROR, "pg_local_cache SET plan failed");
 	ensure_mapping_current(mapping);
-	commit_spi_transaction();
+	commit_spi_transaction(transaction_context);
 	pglc_note_database_write();
 	return pglc_resp_simple("OK", response_length);
 }
@@ -2724,6 +2756,7 @@ command_delete(PgLocalCacheMapping *mapping, const char *raw_key,
 	Datum		values[PGLC_MAX_KEY_COLUMNS];
 	char	   *canonical;
 	char	   *key_error = NULL;
+	MemoryContext transaction_context;
 	uint64		deleted;
 
 	if (!mapping->writable)
@@ -2733,7 +2766,7 @@ command_delete(PgLocalCacheMapping *mapping, const char *raw_key,
 		return pglc_resp_error(key_error, response_length);
 	(void) canonical;
 
-	begin_spi_transaction(pglc_statement_timeout_ms);
+	transaction_context = begin_spi_transaction(pglc_statement_timeout_ms);
 	ensure_mapping_current(mapping);
 	pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
 	pg_atomic_fetch_add_u64(&pglc_shared->sql_dels, 1);
@@ -2742,7 +2775,7 @@ command_delete(PgLocalCacheMapping *mapping, const char *raw_key,
 		elog(ERROR, "pg_local_cache DEL plan failed");
 	ensure_mapping_current(mapping);
 	deleted = SPI_processed;
-	commit_spi_transaction();
+	commit_spi_transaction(transaction_context);
 	pglc_note_database_write();
 	return pglc_resp_integer((int64) deleted, response_length);
 }
@@ -2809,6 +2842,7 @@ static bool
 reload_mappings(uint64 target_generation)
 {
 	MemoryContext old_context = CurrentMemoryContext;
+	MemoryContext transaction_context;
 	bool		success = false;
 
 	MemoryContextReset(reload_context);
@@ -2827,7 +2861,7 @@ reload_mappings(uint64 target_generation)
 		bool		count_is_null;
 		const char *mapping_query;
 
-		begin_spi_transaction(pglc_statement_timeout_ms);
+		transaction_context = begin_spi_transaction(pglc_statement_timeout_ms);
 		free_mapping_plans();
 		worker_mappings = NULL;
 		worker_mapping_count = 0;
@@ -3269,7 +3303,7 @@ reload_mappings(uint64 target_generation)
 			MemoryContextSwitchTo(query_old_context);
 		}
 
-		commit_spi_transaction();
+		commit_spi_transaction(transaction_context);
 		worker_mapping_generation = target_generation;
 		if (mapping_count != configured_mapping_count)
 		{
@@ -3300,8 +3334,7 @@ reload_mappings(uint64 target_generation)
 			ReThrowError(error_data);
 		disable_all_timeouts(false);
 		QueryCancelPending = false;
-		if (IsTransactionState())
-			AbortCurrentTransaction();
+		abort_spi_transaction(old_context);
 		pg_atomic_fetch_add_u64(&pglc_shared->mapping_reload_failures, 1);
 		free_mapping_plans();
 		MemoryContextReset(mapping_context);

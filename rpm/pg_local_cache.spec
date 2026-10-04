@@ -2,7 +2,7 @@
 %global pginstdir /usr/pgsql-%{pgmajorversion}
 
 Name:           %{sname}_%{pgmajorversion}
-Version:        3.0.0
+Version:        3.0.1
 Release:        1%{?dist}
 Summary:        Transaction-aware PostgreSQL primary-key row cache
 License:        MIT
