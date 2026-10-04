@@ -2,15 +2,15 @@
 layout: doc
 lang: zh
 translation_key: UPGRADING
-title: 将 pg_local_cache 从 2.x 升级到 3.0.0
-seo_title: "将 pg_local_cache 从 2.x 升级到 3.0.0"
+title: 将 pg_local_cache 从 2.x 升级到 3.1.0
+seo_title: "将 pg_local_cache 从 2.x 升级到 3.1.0"
 description: 将应用从 SQL mget 迁移到 RESP MGET，安全升级扩展，了解依赖错误并掌握回滚到 2.0.4 的方法。
 section: 安装
 permalink: /zh/docs/UPGRADING.html
-last_modified_at: "2026-10-04"
+last_modified_at: "2026-10-05"
 ---
 
-# 将 pg_local_cache 从 2.x 升级到 3.0.0 {#upgrade-pg_local_cache-from-2x-to-300}
+# 将 pg_local_cache 从 2.x 升级到 3.1.0 {#upgrade-pg_local_cache-from-2x-to-310}
 
 3.0.0 版本移除了 SQL 函数 `local_cache.mget(regclass, anyarray)`。
 请使用经过身份验证的 RESP `MGET` 读取缓存的完整行：
@@ -27,7 +27,7 @@ RESP worker 使用配置的 PostgreSQL 角色，不会继承应用的 SQL 权限
 
 1. 修改应用，不再调用 SQL `mget`。确认 RESP `MGET` 使用专用 worker
    角色，并符合所需的授权模型。
-2. 为当前运行的 PostgreSQL 主版本安装 3.0.0 软件包或库。
+2. 为当前运行的 PostgreSQL 主版本安装 3.1.0 软件包或库。
 3. 如果 2.x listener 使用了 loopback 之外的
    `pg_local_cache.bind_address`，请在重启前配置原生 RESP TLS，并提供服务器
    证书和密钥。设置 `pg_local_cache.tls_ca_file` 可要求客户端证书
@@ -43,7 +43,7 @@ RESP worker 使用配置的 PostgreSQL 角色，不会继承应用的 SQL 权限
    SELECT current_setting('pg_local_cache.binary_version');
    ```
 
-   结果必须为 `3.0.0`。
+   结果必须为 `3.1.0`。
 7. 在每个安装了该扩展的数据库中，以数据库超级用户身份连接并运行：
 
    ```sql

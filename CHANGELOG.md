@@ -6,7 +6,7 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ## [Unreleased]
 
-## [3.0.1] - 2026-10-04
+## [3.1.0] - 2026-10-05
 
 ### Fixed
 

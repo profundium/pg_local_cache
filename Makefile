@@ -50,6 +50,9 @@ $(warning invalid PGLC_BUILD_ID; using default_version '$(PGLC_DEFAULT_VERSION)'
 PGLC_BUILD_ID_RESOLVED := $(PGLC_DEFAULT_VERSION)
 endif
 PG_CPPFLAGS += -DPGLC_BUILD_ID='"$(PGLC_BUILD_ID_RESOLVED)"'
+ifeq ($(PGLC_TEST_HOOKS),1)
+PG_CPPFLAGS += -DPGLC_TEST_HOOKS
+endif
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

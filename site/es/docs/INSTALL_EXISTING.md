@@ -7,7 +7,7 @@ seo_title: Instala pg_local_cache en PostgreSQL 14–18
 description: Instala un paquete Debian o RPM verificado, usa PGXN o PGXS, configura preload, reinicia PostgreSQL e inicializa, actualiza o desinstala pg_local_cache.
 section: Instalación
 permalink: /es/docs/INSTALL_EXISTING.html
-last_modified_at: "2026-10-04"
+last_modified_at: "2026-10-05"
 ---
 
 # Instala pg_local_cache en un servidor PostgreSQL existente {#install-pg_local_cache-on-an-existing-postgresql-server}
@@ -177,7 +177,7 @@ Confirma que la extensión está lista y que las asociaciones están actualizada
 
 Para actualizar de 2.x a 3.0, sigue primero la [guía de actualización](UPGRADING.md).
 Migra las aplicaciones de SQL `mget` a RESP `MGET`, instala el paquete
-3.0.0 correspondiente, reinicia PostgreSQL y actualiza la extensión en cada
+3.1.0 correspondiente, reinicia PostgreSQL y actualiza la extensión en cada
 base de datos donde esté instalada:
 
 ```sql

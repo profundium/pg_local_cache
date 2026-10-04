@@ -59,8 +59,10 @@ git -C "$repo" ls-files -z --cached --others --exclude-standard \
     | (cd "$repo" && while IFS= read -r -d '' path; do
         if [[ -e $path ]]; then printf '%s\0' "$path"; fi
     done | xargs -0 tar -cf - --) | tar -C "$temp/current" -xf -
-make -C "$temp/current" PG_CONFIG="$pg_config" COPT=-Werror
-make -C "$temp/current" PG_CONFIG="$pg_config" install
+make -C "$temp/current" PG_CONFIG="$pg_config" COPT=-Werror \
+    PGLC_TEST_HOOKS=1
+make -C "$temp/current" PG_CONFIG="$pg_config" install \
+    PGLC_TEST_HOOKS=1
 [[ ! -e "/etc/postgresql/$PG/ci" ]] || {
     echo "cluster $PG/ci already exists" >&2
     exit 1
@@ -117,6 +119,7 @@ pg_local_cache.memory_budget_mb = 64
 pg_local_cache.lock_timeout_ms = 3000
 pg_local_cache.statement_timeout_ms = 2000
 pg_local_cache.singleflight_wait_ms = 25
+max_prepared_transactions = 10
 CONF
 pg_ctlcluster "$PG" ci restart
 runuser -u postgres -- env PGPORT=5433 PGHOST=127.0.0.1 PGUSER=postgres \
@@ -131,6 +134,7 @@ export PG_LOCAL_CACHE_TEST_ROLE=local_cache_worker
 export PG_LOCAL_CACHE_TEST_APP_ROLE=local_cache_test_app
 export PG_LOCAL_CACHE_TEST_APP_PASSWORD=ci_test_password_123456
 export PG_LOCAL_CACHE_TEST_APP_HOST=127.0.0.1
+export PGLC_TEST_HOOKS_REQUIRED=1
 for integration in whole_row_integration pipeline_integration \
     memory_integration oom_monitoring_integration; do
     echo "==> $integration"

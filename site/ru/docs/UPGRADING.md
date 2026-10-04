@@ -2,15 +2,15 @@
 layout: doc
 lang: ru
 translation_key: UPGRADING
-title: Обновление pg_local_cache с 2.x до 3.0.0
-seo_title: "Обновление pg_local_cache с 2.x до 3.0.0"
+title: Обновление pg_local_cache с 2.x до 3.1.0
+seo_title: "Обновление pg_local_cache с 2.x до 3.1.0"
 description: Переведите приложения с SQL mget на RESP MGET, безопасно обновите расширение, разберите ошибки зависимостей и узнайте, как вернуться на 2.0.4.
 section: Установка
 permalink: /ru/docs/UPGRADING.html
-last_modified_at: "2026-10-04"
+last_modified_at: "2026-10-05"
 ---
 
-# Обновление pg_local_cache с 2.x до 3.0.0 {#upgrade-pg_local_cache-from-2x-to-300}
+# Обновление pg_local_cache с 2.x до 3.1.0 {#upgrade-pg_local_cache-from-2x-to-310}
 
 В версии 3.0.0 удалена SQL-функция `local_cache.mget(regclass, anyarray)`.
 Для чтения закэшированных целых строк используйте аутентифицированный RESP
@@ -31,7 +31,7 @@ MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
 1. Измените приложения так, чтобы они больше не вызывали SQL `mget`. Проверьте,
    что RESP `MGET` использует отдельную роль worker и соответствует нужной
    модели авторизации.
-2. Установите пакет или библиотеку 3.0.0 для используемой основной версии
+2. Установите пакет или библиотеку 3.1.0 для используемой основной версии
    PostgreSQL.
 3. Если listener 2.x использовал адрес
    `pg_local_cache.bind_address` вне loopback, до перезапуска настройте
@@ -50,7 +50,7 @@ MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
    SELECT current_setting('pg_local_cache.binary_version');
    ```
 
-   Результат должен быть `3.0.0`.
+   Результат должен быть `3.1.0`.
 7. Подключитесь как суперпользователь базы данных в каждой базе с установленным
    расширением и выполните:
 

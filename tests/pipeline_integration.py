@@ -18,6 +18,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 
 
 PSQL = os.environ.get("PG_LOCAL_CACHE_PSQL", "psql")
@@ -52,6 +53,10 @@ class RespError(RuntimeError):
 
 def sql_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
+
+
+def sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 class RespConnection:
@@ -613,23 +618,151 @@ def wait_for_stat_at_least(
     raise AssertionError(f"STAT {field} did not reach {target}: {last}")
 
 
-def wait_for_blocked_worker_pid(table: str, *, timeout: float = 6) -> int:
+def wait_for_blocked_relation_pid(
+    table: str,
+    *,
+    application_name: str | None = None,
+    timeout: float = 6,
+) -> int:
     relation = f"public.{sql_identifier(table)}"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        session_filter = (
+            f"AND activity.application_name = {sql_literal(application_name)} "
+            if application_name is not None
+            else "AND activity.backend_type = 'pg_local_cache RESP worker' "
+        )
         pid = sql(
             "SELECT lock.pid FROM pg_catalog.pg_locks AS lock "
             "JOIN pg_catalog.pg_stat_activity AS activity USING (pid) "
             f"WHERE lock.relation = '{relation}'::regclass "
             "AND lock.locktype = 'relation' "
             "AND lock.mode = 'AccessShareLock' AND NOT lock.granted "
-            "AND activity.backend_type = 'pg_local_cache RESP worker' "
+            f"{session_filter}"
             "LIMIT 1"
         )
         if pid:
             return int(pid)
         time.sleep(0.01)
     raise AssertionError(f"RESP worker did not block on {relation}")
+
+
+def wait_for_blocked_worker_pid(table: str, *, timeout: float = 6) -> int:
+    return wait_for_blocked_relation_pid(table, timeout=timeout)
+
+
+def set_test_pause(point: str | None, barrier_table: str | None = None) -> None:
+    if point is None:
+        sql_commands(
+            "ALTER SYSTEM RESET pg_local_cache.test_pause_point",
+            "ALTER SYSTEM RESET pg_local_cache.test_barrier_relation",
+            "SELECT pg_reload_conf()",
+        )
+        return
+    assert barrier_table is not None
+    relation_oid = sql(f"SELECT 'public.{sql_identifier(barrier_table)}'::regclass::oid")
+    sql_commands(
+        f"ALTER SYSTEM SET pg_local_cache.test_pause_point = {sql_literal(point)}",
+        "ALTER SYSTEM SET pg_local_cache.test_barrier_relation = "
+        f"{int(relation_oid)}",
+        "SELECT pg_reload_conf()",
+    )
+
+
+def test_collect_key_sql(table: str, namespace: str, key: str) -> str:
+    relation = f"public.{sql_identifier(table)}"
+    return (
+        "SELECT public.pglc_test_collect_key("
+        f"'{relation}'::regclass, {sql_literal(namespace)}, {sql_literal(key)})"
+    )
+
+
+def install_test_hook_functions(table: str, namespace: str) -> bool:
+    relation = f"public.{sql_identifier(table)}"
+    definitions = (
+        "CREATE OR REPLACE FUNCTION public.pglc_test_collect_key(regclass, text, text) "
+        "RETURNS void AS '$libdir/pg_local_cache', 'pg_local_cache_test_collect_key' "
+        "LANGUAGE C STRICT",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_relation_incarnation(regclass, text) "
+        "RETURNS bigint AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_relation_incarnation' LANGUAGE C STRICT",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_relation_identity_pins(regclass, text) "
+        "RETURNS bigint AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_relation_identity_pins' LANGUAGE C STRICT",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_recreate_relation_state(regclass, text) "
+        "RETURNS bigint AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_recreate_relation_state' LANGUAGE C STRICT",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_collect_global() "
+        "RETURNS void AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_collect_global' LANGUAGE C",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_abort_after_reservation() "
+        "RETURNS void AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_abort_after_reservation' LANGUAGE C",
+    )
+    try:
+        sql_commands(*definitions)
+        sql(
+            "SELECT public.pglc_test_relation_incarnation("
+            f"'{relation}'::regclass, {sql_literal(namespace)})"
+        )
+    except subprocess.CalledProcessError as error:
+        try:
+            drop_test_hook_functions()
+        except subprocess.CalledProcessError:
+            pass
+        if os.environ.get("PGLC_TEST_HOOKS_REQUIRED") == "1":
+            raise AssertionError(
+                "CI requires PGLC_TEST_HOOKS, but one or more test C functions are absent"
+            ) from error
+        return False
+    return True
+
+
+def drop_test_hook_functions() -> None:
+    sql_commands(
+        "DROP FUNCTION IF EXISTS public.pglc_test_collect_key(regclass, text, text)",
+        "DROP FUNCTION IF EXISTS public.pglc_test_relation_incarnation(regclass, text)",
+        "DROP FUNCTION IF EXISTS public.pglc_test_relation_identity_pins(regclass, text)",
+        "DROP FUNCTION IF EXISTS public.pglc_test_recreate_relation_state(regclass, text)",
+        "DROP FUNCTION IF EXISTS public.pglc_test_collect_global()",
+        "DROP FUNCTION IF EXISTS public.pglc_test_abort_after_reservation()",
+    )
+
+
+def start_publishing_key_writer(
+    table: str,
+    namespace: str,
+    key: str,
+    *,
+    application_name: str,
+) -> subprocess.Popen[str]:
+    environment = os.environ.copy()
+    environment["PGAPPNAME"] = application_name
+    process = subprocess.Popen(
+        psql_base_args(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+    )
+    assert process.stdin is not None
+    process.stdin.write(
+        "BEGIN;\n"
+        f"{test_collect_key_sql(table, namespace, key)};\n"
+        "COMMIT;\n"
+    )
+    process.stdin.flush()
+    return process
+
+
+def finish_publishing_key_writer(process: subprocess.Popen[str]) -> str:
+    assert process.stdin is not None
+    process.stdin.close()
+    process.stdin = None
+    output = process.communicate(timeout=10)[0]
+    assert process.returncode == 0, output
+    return output
 
 
 def run_mget_thread(
@@ -1220,6 +1353,588 @@ def test_uncommitted_write_is_not_served_before_commit(table: str) -> None:
         client.close()
 
 
+def run_fill_paused_before_store(
+    table: str,
+    barrier_table: str,
+    key: str,
+    during_pause: Callable[[], None],
+) -> tuple[RespConnection, object, dict[str, object], dict[str, object]]:
+    set_test_pause("before_store", barrier_table)
+    client = RespConnection(socket_timeout=45)
+    locker: subprocess.Popen[str] | None = None
+    thread: threading.Thread | None = None
+    results: dict[str, object] = {}
+    succeeded = False
+    try:
+        before = read_cache_stats()
+        locker = start_table_locker(
+            barrier_table,
+            application_name=f"pglc_fill_barrier_{os.getpid()}",
+        )
+        thread = threading.Thread(
+            target=run_mget_thread,
+            args=(client, [key], results, "fill"),
+            name="pglc-paused-fill",
+        )
+        thread.start()
+        wait_for_blocked_worker_pid(barrier_table, timeout=10)
+        during_pause()
+        finish_writer(locker, commit=True)
+        locker = None
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "paused fill did not finish"
+        after = read_cache_stats()
+        succeeded = True
+        return client, results["fill"], before, after
+    finally:
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=10)
+        set_test_pause(None)
+        if not succeeded:
+            client.close()
+
+
+def test_unrelated_key_fill_survives_keyed_write(
+    table: str, barrier_table: str
+) -> None:
+    row_id = 9_610_000_001
+    original = "unrelated-fill"
+    sql(
+        f"INSERT INTO public.{sql_identifier(table)} (id, value) "
+        f"VALUES ({row_id}, '{original}')"
+    )
+
+    def update_other_key() -> None:
+        sql(f"UPDATE public.{sql_identifier(table)} SET value = 'other-key-write' WHERE id = 2")
+
+    client, response, before, after = run_fill_paused_before_store(
+        table, barrier_table, crud_key(table, row_id), update_other_key
+    )
+    try:
+        assert response == [row_bytes(row_id, original)], response
+        assert after["database_reads"] == before["database_reads"] + 1
+        before_hit = read_cache_stats()
+        assert mget_one(client, crud_key(table, row_id)) == row_bytes(row_id, original)
+        after_hit = read_cache_stats()
+        assert after_hit["cache_hits"] == before_hit["cache_hits"] + 1
+        assert after_hit["database_reads"] == before_hit["database_reads"]
+    finally:
+        client.close()
+
+
+def test_same_key_relation_and_global_fences(
+    table: str, namespace: str, barrier_table: str
+) -> None:
+    cases: list[
+        tuple[str, Callable[[int], Callable[[], None]] | None, str]
+    ] = [
+        (
+            "same-key",
+            lambda row_id: lambda: sql(
+                f"UPDATE public.{sql_identifier(table)} "
+                f"SET value = 'same-key-new' WHERE id = {row_id}"
+            ),
+            "same-key-new",
+        ),
+        (
+            "relation",
+            lambda _row_id: lambda: sql(
+                f"SELECT local_cache.invalidate({sql_literal(namespace)})"
+            ),
+            "relation-fence",
+        ),
+        (
+            "global",
+            None,
+            "global-fence",
+        ),
+    ]
+    first_id = 9_620_000_001
+    for offset, (name, mutation_for, updated_value) in enumerate(cases):
+        row_id = first_id + offset
+        old_value = f"{name}-old"
+        sql(
+            f"INSERT INTO public.{sql_identifier(table)} (id, value) "
+            f"VALUES ({row_id}, '{old_value}')"
+        )
+        if mutation_for is None:
+            mutation = lambda: sql("SELECT public.pglc_test_collect_global()")
+        else:
+            mutation = mutation_for(row_id)
+
+        client, response, _before, _after = run_fill_paused_before_store(
+            table, barrier_table, crud_key(table, row_id), mutation
+        )
+        try:
+            assert response == [row_bytes(row_id, old_value)], (name, response)
+            before_refill = read_cache_stats()
+            expected_value = updated_value if name == "same-key" else old_value
+            assert mget_one(client, crud_key(table, row_id)) == row_bytes(
+                row_id, expected_value
+            )
+            after_refill = read_cache_stats()
+            assert after_refill["database_reads"] == before_refill["database_reads"] + 1, name
+            assert mget_one(client, crud_key(table, row_id)) == row_bytes(
+                row_id, expected_value
+            )
+            after_hit = read_cache_stats()
+            assert after_hit["database_reads"] == after_refill["database_reads"]
+            assert after_hit["cache_hits"] == after_refill["cache_hits"] + 1
+        finally:
+            client.close()
+
+
+def test_namespace_invalidation_preserves_other_scope(
+    table: str,
+    namespace: str,
+    scoped_table: str,
+    barrier_table: str,
+) -> None:
+    cached_key = crud_key(scoped_table, 1)
+    fill_id = 9_625_000_001
+    fill_key = crud_key(scoped_table, fill_id)
+    sql(
+        f"INSERT INTO public.{sql_identifier(scoped_table)} (id, value) "
+        f"VALUES ({fill_id}, 'namespace-fill')"
+    )
+    client = RespConnection(socket_timeout=45)
+    try:
+        assert mget_one(client, cached_key) == row_bytes(1, "scope-only")
+
+        def invalidate_other_namespace() -> None:
+            sql(f"SELECT local_cache.invalidate({sql_literal(namespace)})")
+
+        fill_client, response, _before, after_fill = run_fill_paused_before_store(
+            scoped_table, barrier_table, fill_key, invalidate_other_namespace
+        )
+        fill_client.close()
+        assert response == [row_bytes(fill_id, "namespace-fill")], response
+        before_refill = read_cache_stats()
+        assert before_refill["database_reads"] == after_fill["database_reads"]
+        assert mget_one(client, fill_key) == row_bytes(fill_id, "namespace-fill")
+        after_fill_hit = read_cache_stats()
+        assert after_fill_hit["database_reads"] == before_refill["database_reads"]
+
+        assert mget_one(client, cached_key) == row_bytes(1, "scope-only")
+        after_cached_hit = read_cache_stats()
+        assert after_cached_hit["database_reads"] == after_fill_hit["database_reads"]
+        assert after_cached_hit["cache_hits"] == after_fill_hit["cache_hits"] + 1
+    finally:
+        client.close()
+
+
+def test_overlapping_publishers_on_one_key(
+    table: str,
+    namespace: str,
+    barrier_table: str,
+    second_barrier_table: str,
+) -> None:
+    row_id = 9_630_000_001
+    value = "overlapping-publishers"
+    sql(
+        f"INSERT INTO public.{sql_identifier(table)} (id, value) "
+        f"VALUES ({row_id}, '{value}')"
+    )
+    key = crud_key(table, row_id)
+    client = RespConnection()
+    assert mget_one(client, key) == row_bytes(row_id, value)
+    dirty_key = json.dumps({"id": row_id}, separators=(",", ":"))
+    relation = f"public.{sql_identifier(table)}"
+    original_incarnation = int(
+        sql(
+            "SELECT public.pglc_test_relation_incarnation("
+            f"'{relation}'::regclass, {sql_literal(namespace)})"
+        )
+    )
+    first: subprocess.Popen[str] | None = None
+    second: subprocess.Popen[str] | None = None
+    first_locker: subprocess.Popen[str] | None = None
+    second_locker: subprocess.Popen[str] | None = None
+    try:
+        set_test_pause("after_publish", barrier_table)
+        first_locker = start_table_locker(
+            barrier_table,
+            application_name=f"pglc_publish_barrier_first_{os.getpid()}",
+        )
+        first_name = f"pglc_publish_first_{os.getpid()}"
+        first = start_publishing_key_writer(
+            table, namespace, dirty_key, application_name=first_name
+        )
+        wait_for_blocked_relation_pid(
+            barrier_table, application_name=first_name, timeout=10
+        )
+
+        set_test_pause("after_publish", second_barrier_table)
+        second_locker = start_table_locker(
+            second_barrier_table,
+            application_name=f"pglc_publish_barrier_second_{os.getpid()}",
+        )
+        second_name = f"pglc_publish_second_{os.getpid()}"
+        second = start_publishing_key_writer(
+            table, namespace, dirty_key, application_name=second_name
+        )
+        wait_for_blocked_relation_pid(
+            second_barrier_table, application_name=second_name, timeout=10
+        )
+        assert int(
+            sql(
+                "SELECT public.pglc_test_relation_identity_pins("
+                f"'{relation}'::regclass, {sql_literal(namespace)})"
+            )
+        ) == 2
+
+        finish_writer(first_locker, commit=True)
+        first_locker = None
+        finish_publishing_key_writer(first)
+        first = None
+        assert second.poll() is None, "second publisher escaped its own barrier"
+        assert int(
+            sql(
+                "SELECT public.pglc_test_relation_identity_pins("
+                f"'{relation}'::regclass, {sql_literal(namespace)})"
+            )
+        ) == 1
+
+        before_while_pinned = read_cache_stats()
+        assert mget_one(client, key) == row_bytes(row_id, value)
+        after_first_read = read_cache_stats()
+        assert after_first_read["database_reads"] == (
+            before_while_pinned["database_reads"] + 1
+        )
+        assert mget_one(client, key) == row_bytes(row_id, value)
+        after_second_read = read_cache_stats()
+        assert after_second_read["database_reads"] == (
+            after_first_read["database_reads"] + 1
+        ), "remaining publisher fence did not block cache publication"
+
+        sql(f"SELECT local_cache.detach_table('{relation}'::regclass)")
+        assert int(
+            sql(
+                "SELECT public.pglc_test_relation_identity_pins("
+                f"'{relation}'::regclass, {sql_literal(namespace)})"
+            )
+        ) == 1
+        assert read_cache_stats()["pending_forget"] >= 1
+        sql(
+            f"SELECT local_cache.attach_table('{relation}'::regclass, true, "
+            f"{sql_literal(namespace)})"
+        )
+        assert int(
+            sql(
+                "SELECT public.pglc_test_relation_incarnation("
+                f"'{relation}'::regclass, {sql_literal(namespace)})"
+            )
+        ) == 0, "remap reused relation identity while publisher still pinned it"
+
+        finish_writer(second_locker, commit=True)
+        second_locker = None
+        finish_publishing_key_writer(second)
+        second = None
+        assert read_cache_stats()["pending_forget"] == 0
+        new_incarnation = int(
+            sql(
+                "SELECT public.pglc_test_relation_incarnation("
+                f"'{relation}'::regclass, {sql_literal(namespace)})"
+            )
+        )
+        assert new_incarnation != original_incarnation
+        assert wait_for_mapping(client, key) == row_bytes(row_id, value)
+    finally:
+        for locker in (first_locker, second_locker):
+            if locker is not None:
+                finish_writer(locker, commit=True)
+        for process in (first, second):
+            if process is not None:
+                terminate_writer(process)
+        set_test_pause(None)
+        client.close()
+
+
+def test_abort_after_dirty_publication(
+    table: str, namespace: str, barrier_table: str
+) -> None:
+    row_id = 9_640_000_001
+    value = "abort-after-publication"
+    sql(
+        f"INSERT INTO public.{sql_identifier(table)} (id, value) "
+        f"VALUES ({row_id}, '{value}')"
+    )
+    client = RespConnection()
+    key = crud_key(table, row_id)
+    dirty_key = json.dumps({"id": row_id}, separators=(",", ":"))
+    try:
+        assert mget_one(client, key) == row_bytes(row_id, value)
+        before = read_cache_stats()
+        set_test_pause("after_publish_abort", barrier_table)
+        command = (
+            "BEGIN; "
+            f"{test_collect_key_sql(table, namespace, dirty_key)}; "
+            "COMMIT"
+        )
+        result = subprocess.run(
+            psql_base_args() + ["-c", command],
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert "test abort after dirty publication" in result.stderr
+        set_test_pause(None)
+        after_abort = read_cache_stats()
+        assert after_abort["invalidations"] > before["invalidations"]
+        assert after_abort["dirty_entries"] == 0
+        assert after_abort["global_dirty_writers"] == 0
+        before_refill = read_cache_stats()
+        assert mget_one(client, key) == row_bytes(row_id, value)
+        after_refill = read_cache_stats()
+        assert after_refill["database_reads"] == before_refill["database_reads"] + 1
+        assert mget_one(client, key) == row_bytes(row_id, value)
+        assert read_cache_stats()["database_reads"] == after_refill["database_reads"]
+    finally:
+        set_test_pause(None)
+        client.close()
+
+
+def test_partial_reservation_abort_releases_identity(
+    table: str, namespace: str
+) -> None:
+    relation = f"public.{sql_identifier(table)}"
+    old_incarnation = int(
+        sql(
+            "SELECT public.pglc_test_relation_incarnation("
+            f"'{relation}'::regclass, {sql_literal(namespace)})"
+        )
+    )
+    key_one = json.dumps({"id": 1}, separators=(",", ":"))
+    key_two = json.dumps({"id": 2}, separators=(",", ":"))
+    command = (
+        "BEGIN; SELECT public.pglc_test_abort_after_reservation(); "
+        f"{test_collect_key_sql(table, namespace, key_one)}; "
+        f"{test_collect_key_sql(table, namespace, key_two)}; COMMIT"
+    )
+    result = subprocess.run(
+        psql_base_args() + ["-c", command],
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "test abort after dirty reservation" in result.stderr
+    assert int(
+        sql(
+            "SELECT public.pglc_test_relation_identity_pins("
+            f"'{relation}'::regclass, {sql_literal(namespace)})"
+        )
+    ) == 0
+    assert read_cache_stats()["dirty_entries"] == 0
+
+    sql(f"SELECT local_cache.detach_table('{relation}'::regclass)")
+    sql(
+        f"SELECT local_cache.attach_table('{relation}'::regclass, true, "
+        f"{sql_literal(namespace)})"
+    )
+    new_incarnation = int(
+        sql(
+            "SELECT public.pglc_test_relation_incarnation("
+            f"'{relation}'::regclass, {sql_literal(namespace)})"
+        )
+    )
+    assert new_incarnation != old_incarnation
+
+
+def test_relation_incarnation_forget_recreate(
+    table: str,
+    namespace: str,
+    barrier_table: str,
+) -> None:
+    row_id = 9_650_000_001
+    old_fill_value = "old-incarnation-fill"
+    relation = f"public.{sql_identifier(table)}"
+    sql(
+        f"INSERT INTO {relation} (id, value) VALUES ({row_id}, '{old_fill_value}')"
+    )
+    relation_oid = int(sql(f"SELECT '{relation}'::regclass::oid"))
+    old_incarnation = int(
+        sql(
+            "SELECT public.pglc_test_relation_incarnation("
+            f"'{relation}'::regclass, {sql_literal(namespace)})"
+        )
+    )
+    key = crud_key(table, row_id)
+    recreated: list[int] = []
+
+    def recreate_during_fill() -> None:
+        recreated.append(
+            int(
+                sql(
+                    "SELECT public.pglc_test_recreate_relation_state("
+                    f"'{relation}'::regclass, {sql_literal(namespace)})"
+                )
+            )
+        )
+
+    client, response, _before, _after = run_fill_paused_before_store(
+        table, barrier_table, key, recreate_during_fill
+    )
+    try:
+        assert response == [row_bytes(row_id, old_fill_value)], response
+        assert len(recreated) == 1
+        assert recreated[0] != old_incarnation
+        assert int(sql(f"SELECT '{relation}'::regclass::oid")) == relation_oid
+
+        before_refill = read_cache_stats()
+        assert mget_one(client, key) == row_bytes(row_id, old_fill_value)
+        after_refill = read_cache_stats()
+        assert after_refill["database_reads"] == before_refill["database_reads"] + 1
+        assert mget_one(client, key) == row_bytes(row_id, old_fill_value)
+        assert read_cache_stats()["database_reads"] == after_refill["database_reads"]
+    finally:
+        client.close()
+
+    warmed_id = row_id + 1
+    warmed_key = crud_key(table, warmed_id)
+    warmed_value = "old-warm-entry"
+    sql(
+        f"INSERT INTO {relation} (id, value) VALUES ({warmed_id}, '{warmed_value}')"
+    )
+    seed_client = RespConnection()
+    try:
+        assert mget_one(seed_client, warmed_key) == row_bytes(
+            warmed_id, warmed_value
+        )
+    finally:
+        seed_client.close()
+    old_warm_incarnation = int(
+        sql(
+            "SELECT public.pglc_test_relation_incarnation("
+            f"'{relation}'::regclass, {sql_literal(namespace)})"
+        )
+    )
+    new_warm_incarnation = int(
+        sql(
+            "SELECT public.pglc_test_recreate_relation_state("
+            f"'{relation}'::regclass, {sql_literal(namespace)})"
+        )
+    )
+    assert new_warm_incarnation != old_warm_incarnation
+    warm_client = RespConnection()
+    try:
+        before_reject = read_cache_stats()
+        assert mget_one(warm_client, warmed_key) == row_bytes(
+            warmed_id, warmed_value
+        )
+        after_reject = read_cache_stats()
+        assert after_reject["database_reads"] == before_reject["database_reads"] + 1
+        assert after_reject["cache_hits"] == before_reject["cache_hits"]
+        assert mget_one(warm_client, warmed_key) == row_bytes(
+            warmed_id, warmed_value
+        )
+        assert read_cache_stats()["database_reads"] == after_reject["database_reads"]
+    finally:
+        warm_client.close()
+
+
+def test_key_fill_hit_ratio_under_update_load(table: str) -> None:
+    first_read_id = 9_660_000_001
+    read_ids = list(range(first_read_id, first_read_id + 8))
+    write_ids = list(range(first_read_id + 100, first_read_id + 108))
+    sql(
+        f"INSERT INTO public.{sql_identifier(table)} (id, value) VALUES "
+        + ", ".join(
+            f"({row_id}, 'fixed-{row_id}')" for row_id in read_ids
+        )
+        + ", "
+        + ", ".join(
+            f"({row_id}, 'writer-{row_id}')" for row_id in write_ids
+        )
+    )
+    keys = [crud_key(table, row_id) for row_id in read_ids]
+    expected = [row_bytes(row_id, f"fixed-{row_id}") for row_id in read_ids]
+    client = RespConnection(socket_timeout=45)
+    stop = threading.Event()
+    writer_errors: list[str] = []
+    writer_updates = [0]
+
+    def update_other_keys() -> None:
+        environment = os.environ.copy()
+        environment["PGAPPNAME"] = f"pglc_load_writer_{os.getpid()}"
+        process = subprocess.Popen(
+            psql_base_args(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=environment,
+        )
+        assert process.stdin is not None
+        try:
+            sequence = 0
+            while not stop.is_set() and process.poll() is None:
+                row_id = write_ids[sequence % len(write_ids)]
+                process.stdin.write(
+                    f"UPDATE public.{sql_identifier(table)} "
+                    f"SET value = 'write-{sequence}' WHERE id = {row_id};\n"
+                )
+                process.stdin.flush()
+                writer_updates[0] += 1
+                sequence += 1
+        except BaseException as error:
+            writer_errors.append(str(error))
+        finally:
+            process.stdin.close()
+            process.stdin = None
+            output = process.communicate(timeout=15)[0]
+            if process.returncode != 0:
+                writer_errors.append(output)
+
+    before = read_cache_stats()
+    writer = threading.Thread(target=update_other_keys, name="pglc-update-load")
+    try:
+        writer.start()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            assert client.command("MGET", *keys) == expected
+        stop.set()
+        writer.join(timeout=20)
+        assert not writer.is_alive(), "background UPDATE writer did not stop"
+        assert not writer_errors, writer_errors
+        assert writer_updates[0] > 0
+        after_load = read_cache_stats()
+        hits = int(after_load["cache_hits"]) - int(before["cache_hits"])
+        misses = int(after_load["cache_misses"]) - int(before["cache_misses"])
+        assert hits + misses > 0
+        assert hits / (hits + misses) > 0.9, (hits, misses)
+        before_final_hit = read_cache_stats()
+        assert client.command("MGET", *keys) == expected
+        after_final_hit = read_cache_stats()
+        assert after_final_hit["cache_hits"] - before_final_hit["cache_hits"] == len(keys)
+        assert after_final_hit["database_reads"] == before_final_hit["database_reads"]
+    finally:
+        stop.set()
+        if writer.is_alive():
+            writer.join(timeout=20)
+        client.close()
+
+
+def test_preprepare_still_rejected(table: str) -> None:
+    result = subprocess.run(
+        psql_base_args()
+        + [
+            "-c",
+            f"BEGIN; UPDATE public.{sql_identifier(table)} "
+            "SET value = value WHERE id = 1; PREPARE TRANSACTION 'pglc_test';",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "PREPARE TRANSACTION is not supported" in output, output
+
+
 def wait_for_cache_enabled(expected: bool) -> None:
     deadline = time.monotonic() + 10
     expected_text = "true" if expected else "false"
@@ -1329,14 +2044,19 @@ def main() -> None:
     table = f"p{suffix}"
     composite_table = f"c{suffix}"
     scoped_table = f"s{suffix}"
+    incarnation_table = f"i{suffix}"
+    barrier_table = f"b{suffix}"
+    second_barrier_table = f"q{suffix}"
     mapping_namespace = f"pipeline{suffix}"
     composite_namespace = f"pipelinec{suffix}"
     scoped_namespace = f"pipelines{suffix}"
+    incarnation_namespace = f"pipelinei{suffix}"
     granted_roles = list(dict.fromkeys(filter(None, (WORKER_ROLE, WRITER_ROLE))))
     grant = "".join(
         f"GRANT USAGE ON SCHEMA public TO {sql_identifier(role)};"
         f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
-        f"public.{table}, public.{composite_table}, public.{scoped_table} "
+        f"public.{table}, public.{composite_table}, public.{scoped_table}, "
+        f"public.{incarnation_table} "
         f"TO {sql_identifier(role)};"
         for role in granted_roles
     )
@@ -1356,6 +2076,13 @@ def main() -> None:
         f"CREATE TABLE public.{scoped_table} "
         "(id bigint PRIMARY KEY, value text NOT NULL);"
         f"INSERT INTO public.{scoped_table} VALUES (1, 'scope-only');"
+        f"CREATE TABLE public.{incarnation_table} "
+        "(id bigint PRIMARY KEY, value text NOT NULL);"
+        f"INSERT INTO public.{incarnation_table} VALUES (1, 'incarnation-base');"
+        f"CREATE TABLE public.{barrier_table} (id integer PRIMARY KEY);"
+        f"CREATE TABLE public.{second_barrier_table} (id integer PRIMARY KEY);"
+        f"INSERT INTO public.{barrier_table} VALUES (1);"
+        f"INSERT INTO public.{second_barrier_table} VALUES (1);"
         f"{grant}"
         f"SELECT local_cache.attach_table("
         f"'public.{table}'::regclass, true, '{mapping_namespace}');"
@@ -1363,7 +2090,12 @@ def main() -> None:
         f"'public.{composite_table}'::regclass, true, "
         f"'{composite_namespace}');"
         f"SELECT local_cache.attach_table("
-        f"'public.{scoped_table}'::regclass, true, '{scoped_namespace}')"
+        f"'public.{scoped_table}'::regclass, true, '{scoped_namespace}');"
+        f"SELECT local_cache.attach_table("
+        f"'public.{incarnation_table}'::regclass, true, '{incarnation_namespace}')"
+    )
+    hooks_available = install_test_hook_functions(
+        incarnation_table, incarnation_namespace
     )
     try:
         bootstrap = RespConnection()
@@ -1397,6 +2129,42 @@ def main() -> None:
             test_transactional_commit_and_rollback(table)
             test_uncommitted_write_is_not_served_before_commit(table)
             test_enabled_kill_switch(table)
+            test_key_fill_hit_ratio_under_update_load(table)
+            test_preprepare_still_rejected(table)
+            if hooks_available:
+                test_unrelated_key_fill_survives_keyed_write(table, barrier_table)
+                test_same_key_relation_and_global_fences(
+                    table, mapping_namespace, barrier_table
+                )
+                test_namespace_invalidation_preserves_other_scope(
+                    table, mapping_namespace, scoped_table, barrier_table
+                )
+                test_overlapping_publishers_on_one_key(
+                    table,
+                    mapping_namespace,
+                    barrier_table,
+                    second_barrier_table,
+                )
+                test_abort_after_dirty_publication(
+                    table, mapping_namespace, barrier_table
+                )
+                test_partial_reservation_abort_releases_identity(
+                    table, mapping_namespace
+                )
+                test_relation_incarnation_forget_recreate(
+                    incarnation_table, incarnation_namespace, barrier_table
+                )
+            else:
+                print(
+                    "SKIP hook-dependent cases (PGLC_TEST_HOOKS functions absent): "
+                    "test_unrelated_key_fill_survives_keyed_write, "
+                    "test_same_key_relation_and_global_fences, "
+                    "test_namespace_invalidation_preserves_other_scope, "
+                    "test_overlapping_publishers_on_one_key, "
+                    "test_abort_after_dirty_publication, "
+                    "test_partial_reservation_abort_releases_identity, "
+                    "test_relation_incarnation_forget_recreate"
+                )
             half_close_coverage = "half-close drain, " if not TLS_CA_FILE else ""
             print(
                 "pipeline integration passed: fragmentation/order, warm-hit stats, "
@@ -1404,19 +2172,30 @@ def main() -> None:
                 + half_close_coverage
                 + "backpressure, phased MGET, close-after-flush, "
                 "commit/rollback fence, database/table key scope, "
-                "uncommitted-write visibility, SIGHUP cache kill switch, "
+                "uncommitted-write visibility, relation-incarnation and stale-fill fences, "
+                "overlapping/aborted publishers, UPDATE-load hit ratio, "
+                "SIGHUP cache kill switch, "
                 "non-superuser writer"
             )
     finally:
+        if hooks_available:
+            set_test_pause(None)
+        drop_test_hook_functions()
         sql(
             f"SELECT local_cache.detach_table('public.{table}'::regclass);"
             f"SELECT local_cache.detach_table("
             f"'public.{composite_table}'::regclass);"
             f"SELECT local_cache.detach_table("
             f"'public.{scoped_table}'::regclass);"
+            f"SELECT local_cache.detach_table(to_regclass("
+            f"'public.{incarnation_table}')) "
+            f"WHERE to_regclass('public.{incarnation_table}') IS NOT NULL;"
             f"DROP TABLE IF EXISTS public.{table};"
             f"DROP TABLE IF EXISTS public.{composite_table};"
-            f"DROP TABLE IF EXISTS public.{scoped_table}"
+            f"DROP TABLE IF EXISTS public.{scoped_table};"
+            f"DROP TABLE IF EXISTS public.{incarnation_table};"
+            f"DROP TABLE IF EXISTS public.{barrier_table};"
+            f"DROP TABLE IF EXISTS public.{second_barrier_table}"
         )
 
 
