@@ -129,7 +129,7 @@ export PG_LOCAL_CACHE_TEST_APP_ROLE=local_cache_test_app
 export PG_LOCAL_CACHE_TEST_APP_PASSWORD=ci_test_password_123456
 export PG_LOCAL_CACHE_TEST_APP_HOST=127.0.0.1
 for integration in whole_row_integration pipeline_integration \
-    oom_monitoring_integration; do
+    memory_integration oom_monitoring_integration; do
     echo "==> $integration"
     python3 "$repo/tests/$integration.py"
 done
