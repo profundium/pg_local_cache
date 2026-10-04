@@ -114,6 +114,9 @@ pg_local_cache.cache_entries = 512
 pg_local_cache.max_clients = 16
 pg_local_cache.max_clients_per_worker = 16
 pg_local_cache.memory_budget_mb = 64
+pg_local_cache.lock_timeout_ms = 3000
+pg_local_cache.statement_timeout_ms = 2000
+pg_local_cache.singleflight_wait_ms = 25
 CONF
 pg_ctlcluster "$PG" ci restart
 runuser -u postgres -- env PGPORT=5433 PGHOST=127.0.0.1 PGUSER=postgres \
@@ -136,8 +139,29 @@ done
 echo "==> stress_integration over plaintext RESP"
 python3 "$repo/tests/stress_integration.py"
 
-# Exercise worker fan-out with a bounded run, then restore the normal CI config.
-sed -i 's/pg_local_cache.workers = 1/pg_local_cache.workers = 2/' \
+# Exercise concurrent MGET claim ownership, then bounded worker fan-out.
+sed -i 's/pg_local_cache.memory_budget_mb = 64/pg_local_cache.memory_budget_mb = 128/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.workers = 1/pg_local_cache.workers = 4/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.statement_timeout_ms = 2000/pg_local_cache.statement_timeout_ms = 30000/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.lock_timeout_ms = 3000/pg_local_cache.lock_timeout_ms = 30000/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.singleflight_wait_ms = 25/pg_local_cache.singleflight_wait_ms = 1000/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+pg_ctlcluster "$PG" ci restart
+echo "==> pipeline MGET claims with four workers"
+PGLC_MGET_CONCURRENCY_ONLY=1 python3 "$repo/tests/pipeline_integration.py"
+sed -i 's/pg_local_cache.memory_budget_mb = 128/pg_local_cache.memory_budget_mb = 64/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.workers = 4/pg_local_cache.workers = 2/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.statement_timeout_ms = 30000/pg_local_cache.statement_timeout_ms = 2000/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.lock_timeout_ms = 30000/pg_local_cache.lock_timeout_ms = 3000/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.singleflight_wait_ms = 1000/pg_local_cache.singleflight_wait_ms = 25/' \
     /etc/postgresql/"$PG"/ci/pglc.conf
 pg_ctlcluster "$PG" ci restart
 echo "==> stress_integration with two workers"
@@ -207,6 +231,7 @@ pg_local_cache.max_clients = 16
 pg_local_cache.max_clients_per_worker = 16
 pg_local_cache.memory_budget_mb = 64
 pg_local_cache.idle_timeout_ms = 1000
+pg_local_cache.lock_timeout_ms = 3000
 pg_local_cache.tls = on
 pg_local_cache.tls_cert_file = 'tls/server.crt'
 pg_local_cache.tls_key_file = 'tls/server.key'
