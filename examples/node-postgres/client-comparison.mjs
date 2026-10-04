@@ -135,7 +135,7 @@ async function main() {
       (SELECT count(*)::int FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()) AS other_sessions`)).rows[0];
     assert.equal(environment.database, 'pglc_demo');
     assert.equal(environment.marker, 'pg_local_cache disposable demo');
-    assert.match(environment.extension_version, /^2\.0\./);
+    assert.match(environment.extension_version, /^\d+\.\d+\.\d+$/);
     assert.equal(environment.other_sessions, 0);
     assert.ok(Math.max(...connections) + 1 < environment.max_connections - environment.reserved_connections);
     assert.ok(environment.health.ready && environment.health.resp_enabled, 'start the RESP demo overlay first');

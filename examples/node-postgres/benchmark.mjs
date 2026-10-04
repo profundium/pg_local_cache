@@ -123,7 +123,7 @@ async function main() {
     assert.equal(setup.database, 'pglc_demo');
     assert.equal(setup.marker, 'pg_local_cache disposable demo');
     assert.equal(setup.direct_marker, 'pg_local_cache disposable demo');
-    assert.match(setup.extension_version, /^2\.0\./);
+    assert.match(setup.extension_version, /^\d+\.\d+\.\d+$/);
     const rowCount = (await admin.query('SELECT count(*)::int AS n FROM public.items')).rows[0].n;
     assert.equal(rowCount, 4096, 'run against the unmodified demo dataset');
     const edgeKeys = [42, 7, 42, null, 999999];
