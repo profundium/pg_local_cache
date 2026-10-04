@@ -19,7 +19,9 @@ Node.js 24.18.0，node-postgres 8.16.3。[机器配置与测量方法](BENCHMARK
 
 **每请求 64 个键**时，三个 10 秒样本的 requests/s 中位数：
 
-| 连接数 | 预备 SQL | SQL mget |
+SQL `mget` 路径及以下所有结果均为 2.x 历史测量。SQL `mget` 已在 3.0.0 中移除；当前支持的缓存读取接口是 RESP `MGET`。
+
+| 连接数 | 预备 SQL | SQL mget （2.x；3.0.0 已移除）|
 |---:|---:|---:|
 | 4 | 7,023 | 7,528 |
 | 64 | 15,577 | 16,616 |
@@ -35,7 +37,7 @@ Node.js 24.18.0，node-postgres 8.16.3。[机器配置与测量方法](BENCHMARK
 
 Node.js 应用测试程序使用 **64 个连接**、**每样本 50,000 个请求**，重复三次。读取循环访问 128 行热数据；混合负载中 5% 的操作更新行。
 
-| 工作负载 | 键/请求 | 预备 SQL requests/s | mget JSON requests/s |
+| 工作负载 | 键/请求 | 预备 SQL requests/s | mget JSON requests/s （2.x；3.0.0 已移除）|
 |---|---:|---:|---:|
 | 热读取 | 1 | 56,104 (52,246–56,364) | 52,842 (52,494–53,399) |
 | 热读取 | 16 | 37,391 (36,996–37,938) | 38,425 (38,340–38,617) |
@@ -46,13 +48,9 @@ Node.js 应用测试程序使用 **64 个连接**、**每样本 50,000 个请求
 
 数值为 requests/s 中位数，括号内为最小值–最大值。混合样本合并统计读写操作。JSON 中的 `application_run` 包含冷填充与写入开销场景。批次为 64 的冷填充只有 64 个延迟观测值，不足以得到有意义的 p99 估计。
 
-## 查询配置 {#query-setup}
+## 历史 SQL 基准查询 {#query-setup}
 
-```sql
-SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows;
-```
-
-复用连接和具名预备语句。请求时间包含 JSON 解码与输入位置恢复。参阅 [Node.js 示例](node-postgres.md)。
+为便于复现，历史 SQL `mget` 查询仍保留在链接的原始测量数据中。3.0.0 已不提供该查询。当前基准比较预备 SQL 与 RESP `MGET`；参阅 [Node.js 示例](node-postgres.md)。
 
 ## 复现 {#reproduce}
 
@@ -65,7 +63,7 @@ SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) A
 ./examples/benchmark.sh node > node.json
 ```
 
-当前默认值：4/64/256 个连接、1/16/64 个键，每种情况采集三个五秒样本。Node.js 现在在 Docker VM 内运行三种路径：预备 SQL、SQL `mget` 和 RESP `MGET`。脚本创建一次性服务器与独立客户端容器，记录资源后移除两者。可覆盖 `CONNECTIONS`、`BATCHES`、`REPEATS` 和 `DURATION_SECONDS`。使用 `all` 可在[相同矩阵](BENCHMARKS.md#run-the-same-comparison-on-every-client)中加入 Go。要复现记录中的宿主机客户端配置，请使用测量 JSON 中的版本。
+当前默认值：4/64/256 个连接、1/16/64 个键，每个案例进行三次 5 秒采样。Node.js 在 Docker 虚拟机中运行预备 SQL 和 RESP `MGET`。脚本创建一次性服务器和客户端容器、记录资源数据，然后移除两者。
 
 运行读写混合测试：
 

@@ -19,10 +19,13 @@ Node.js 24.18.0 with node-postgres 8.16.3.
 
 Measured on 14 September 2026 with extension build `67e5754`, a 384 MiB cache
 budget and clients on macOS through Docker's published SQL port.
+The SQL `mget` lane and all results below are historical 2.x measurements;
+SQL `mget` was removed in 3.0.0 and RESP `MGET` is the supported cached-read
+interface.
 
 At **64 keys per request**, median requests/s from three 10-second samples:
 
-| Connections | Prepared SQL | SQL mget |
+| Connections | Prepared SQL | 2.x SQL mget (removed in 3.0.0) |
 |---:|---:|---:|
 | 4 | 7,023 | 7,528 |
 | 64 | 15,577 | 16,616 |
@@ -44,7 +47,7 @@ The Node.js application runner uses **64 connections**, **50,000 requests
 per sample** and three repetitions. Reads cycle through 128 hot rows;
 5% of operations in the mixed workload update rows.
 
-| Workload | Keys/request | Prepared SQL requests/s | mget JSON requests/s |
+| Workload | Keys/request | Prepared SQL requests/s | 2.x SQL mget JSON requests/s (removed in 3.0.0) |
 |---|---:|---:|---:|
 | Warm reads | 1 | 56,104 (52,246–56,364) | 52,842 (52,494–53,399) |
 | Warm reads | 16 | 37,391 (36,996–37,938) | 38,425 (38,340–38,617) |
@@ -58,14 +61,11 @@ samples count reads and writes together. The JSON's `application_run` includes
 cold-fill and write-overhead cases. Cold fill at batch 64 has only 64 latency
 observations, too few for a useful p99 estimate.
 
-## Query setup {#query-setup}
+## Historical SQL benchmark setup {#query-setup}
 
-```sql
-SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows;
-```
-
-Connections and named prepared statements are reused. JSON decoding and
-restoring input positions are included in request time. See the
+The historical SQL `mget` query is retained in the linked raw measurements for
+reproducibility. It is not available in 3.0.0. The current benchmark runner
+compares prepared SQL with RESP `MGET`; see the
 [Node.js example](node-postgres.md).
 
 ## Reproduce {#reproduce}
@@ -80,8 +80,8 @@ From the repository root, with Docker and Node.js 20+:
 ```
 
 Current defaults: 4/64/256 connections, 1/16/64 keys, three five-second samples
-per case. Node.js now runs all three paths: prepared SQL, SQL `mget`, and RESP
-`MGET`, inside the Docker VM. The script creates a disposable server and
+per case. Node.js runs prepared SQL and RESP `MGET` inside the Docker VM. The
+script creates a disposable server and
 separate client container, records resources, then removes both.
 Optional overrides: `CONNECTIONS`, `BATCHES`, `REPEATS`, `DURATION_SECONDS`.
 Use `all` to include Go in the [same matrix](BENCHMARKS.md#run-the-same-comparison-on-every-client).

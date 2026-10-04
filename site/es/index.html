@@ -4,7 +4,7 @@ lang: es
 translation_key: home
 title: "Extensión de caché de filas para PostgreSQL | pg_local_cache"
 seo_title: "Extensión de caché de filas de PostgreSQL | pg_local_cache"
-description: Almacena filas de PostgreSQL por clave primaria en memoria compartida con mget SQL explícito e invalidación consciente de las transacciones. Prueba la demo local y compárala con SQL por lotes.
+description: Almacena filas de PostgreSQL por clave primaria en memoria compartida y léelas con RESP MGET autenticado. El SQL habitual sigue usando PostgreSQL y las escrituras invalidan las entradas afectadas.
 image: /assets/social-card.png
 last_modified_at: "2026-09-22"
 home: true
@@ -17,12 +17,12 @@ permalink: /es/
   <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
     <div class="hero-copy">
       <h1 id="hero-title">Una caché de filas<br>dentro de <span>PostgreSQL.</span></h1>
-      <p>Lee filas por clave primaria con <code>mget</code> SQL o RESP. Las escrituras de PostgreSQL invalidan automáticamente las entradas de caché afectadas.</p>
+      <p>Lee filas por clave primaria con RESP MGET autenticado. Las escrituras de PostgreSQL invalidan automáticamente las entradas de caché afectadas.</p>
       <div class="hero-actions">
         <a class="button primary" href="{{ '/docs/QUICKSTART.html' | prepend: locale.prefix | relative_url }}">Probar localmente <span aria-hidden="true">→</span></a>
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Comparar con SQL <span aria-hidden="true">→</span></a>
       </div>
-      <p class="hero-note">API SQL explícita · PostgreSQL 14–18 · Código abierto</p>
+      <p class="hero-note">API RESP autenticada · PostgreSQL 14–18 · Código abierto</p>
     </div>
     <figure class="hero-benchmark" aria-label="Benchmark local de una sola clave: comparación de RESP con SQL">
       <p class="benchmark-label">Medido localmente · 15 sep 2026</p>
@@ -30,9 +30,9 @@ permalink: /es/
       <p class="benchmark-gain"><strong>3.31×</strong> el rendimiento de SQL preparado<br>en esta comparación de una sola clave</p>
       <dl class="benchmark-baselines">
         <div><dt>SQL preparado</dt><dd>253,790 <span>solicitudes/s</span></dd></div>
-        <div><dt>SQL mget</dt><dd>186,296 <span>solicitudes/s</span></dd></div>
+        <div><dt>SQL mget de 2.x (eliminado en 3.0.0)</dt><dd>186,296 <span>solicitudes/s</span></dd></div>
       </dl>
-      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 conexiones.<br>Caché caliente, 1 clave/solicitud. Mediana de 3 × 5 segundos.<br>SQL mget fue más lento aquí; los resultados por lotes difieren.</figcaption>
+      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 conexiones.<br>Esta medición histórica de SQL mget de 2.x se eliminó en 3.0.0; los resultados por lotes difieren.</figcaption>
       <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">Resultados, datos brutos y condiciones <span aria-hidden="true">→</span></a>
     </figure>
   </section>
@@ -43,15 +43,13 @@ permalink: /es/
       <p>Un acierto elegible devuelve la fila almacenada. Un fallo o una omisión lee la tabla de origen. Tus consultas <code>SELECT</code> habituales conservan su recorrido existente.</p>
     </div>
     <div class="read-path-grid">
-    <div class="terminal" aria-label="Ejemplo de mget de PostgreSQL">
-      <div class="terminal-bar"><strong>psql</strong> │ lecturas por clave primaria</div>
+    <div class="terminal" aria-label="RESP MGET example">
+      <div class="terminal-bar"><strong>RESP2</strong> │ lecturas por clave primaria</div>
       <pre><code><span class="comment">-- Attach your table once.</span>
 <span class="sql">SELECT</span> local_cache.attach_table('public.items');
 
 <span class="comment">-- Read rows by primary key.</span>
-<span class="sql">SELECT</span> local_cache.mget(
-  'public.items', ARRAY[42, 7]::bigint[]
-);</code></pre>
+MGET CRUD:pglc_demo.public.items:{"id":42} CRUD:pglc_demo.public.items:{"id":7}</code></pre>
       <p class="terminal-links"><a href="{{ '/docs/node-postgres.html' | prepend: locale.prefix | relative_url }}">Ejemplo de Node.js</a><a href="{{ '/docs/go.html' | prepend: locale.prefix | relative_url }}">Ejemplo de Go</a><a href="{{ '/docs/resp.html' | prepend: locale.prefix | relative_url }}">Ejemplo de RESP</a></p>
     </div>
     {% include diagrams/read-path.html id="home-read" %}
@@ -60,7 +58,7 @@ permalink: /es/
   </section>
 
   <section class="proof-rail" aria-label="Requisitos y comportamiento">
-    <div class="proof-item"><strong>SQL mget</strong><p>Hasta 1.024 claves por llamada. Se conservan el orden, los duplicados y las posiciones NULL.</p></div>
+    <div class="proof-item"><strong>RESP MGET</strong><p>Autenticado y limitado a 1.024 claves por solicitud. Las filas ausentes devuelven null.</p></div>
     <div class="proof-item"><strong>Escrituras habituales</strong><p>INSERT, UPDATE y DELETE invalidan las entradas afectadas.</p></div>
     <div class="proof-item"><strong>Capacidad fija</strong><p>Asigna la caché de filas compartida al iniciar PostgreSQL.</p></div>
     <div class="proof-item"><strong>Comprobaciones de snapshot</strong><p>Las lecturas no elegibles usan la tabla de origen conforme a las reglas de visibilidad de PostgreSQL.</p></div>
@@ -70,7 +68,7 @@ permalink: /es/
     <div class="page-section section-grid">
       <div class="section-intro">
         <h2 id="benchmark-title">Ejecuta la misma prueba.<br>En cada cliente.</h2>
-        <p>Node.js y Go. SQL preparado, SQL mget y RESP MGET.</p>
+        <p>Node.js y Go. SQL preparado y RESP MGET.</p>
       </div>
       <div>
         <p>Un mismo ejecutor usa las mismas claves, tamaños de lote, cantidades de conexiones, duración y comprobaciones de resultados. Compara rendimiento, latencia y CPU y memoria de PostgreSQL en tu máquina.</p>
@@ -101,7 +99,7 @@ permalink: /es/
       <button class="copy-button" type="button" data-copy="demo-command" aria-live="polite">Copiar</button>
       <pre id="demo-command"><code>git clone https://github.com/profundium/pg_local_cache.git
 cd pg_local_cache
-docker compose -f examples/compose.yaml up --build --wait</code></pre>
+docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build --wait</code></pre>
     </div>
     <p class="quick-start-more"><a href="{{ '/docs/QUICKSTART.html#read-as-an-application-role' | prepend: locale.prefix | relative_url }}">Lee filas de ejemplo y comprueba los aciertos de caché</a>. ¿Ya has clonado el repositorio? Ejecuta el último comando desde su raíz. Para un servidor existente, usa la <a href="{{ '/docs/INSTALL_EXISTING.html' | prepend: locale.prefix | relative_url }}">guía de instalación</a>.</p>
     <p class="quick-start-more">La instalación en un servidor existente requiere reiniciar PostgreSQL.</p>
@@ -124,9 +122,9 @@ docker compose -f examples/compose.yaml up --build --wait</code></pre>
     <h2 id="faq-title">Antes de probarlo</h2>
     <div class="faq-list">
       <details><summary>¿Esto reemplaza shared_buffers?</summary><p>No. PostgreSQL almacena en caché las páginas de la base de datos. Esta extensión almacena por separado filas completas serializadas por clave primaria. Consulta la <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">comparación de recorridos de lectura</a>.</p></details>
-      <details><summary>¿Almacena en caché las consultas SELECT habituales?</summary><p>No. Solo las llamadas explícitas a <code>local_cache.mget</code> usan la caché SQL. Tus consultas existentes conservan el recorrido de ejecución normal de PostgreSQL.</p></details>
-      <details><summary>¿Reemplaza a Redis?</summary><p>No. El endpoint RESP2 opcional es limitado. No ofrece un conjunto general de comandos de Redis, TTL, pub/sub ni coordinación distribuida. Compara los <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">recorridos de caché aparte de PostgreSQL y Redis</a>.</p></details>
-      <details><summary>¿Cómo compruebo las actualizaciones y el rollback?</summary><p>La <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">guía de invalidación</a> incluye una prueba con dos sesiones. El ejemplo ejecutable comprueba escrituras no confirmadas, lectura de los propios cambios, rollback y actualizaciones confirmadas.</p></details>
+      <details><summary>¿Almacena en caché las consultas SELECT habituales?</summary><p>No. Solo RESP MGET autenticado usa la caché de filas compartida. Las consultas existentes mantienen el recorrido normal de PostgreSQL.</p></details>
+      <details><summary>¿Reemplaza a Redis?</summary><p>No. El endpoint RESP2 es limitado. No ofrece un conjunto general de comandos de Redis, TTL, pub/sub ni coordinación distribuida. Compara los <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">recorridos de caché aparte de PostgreSQL y Redis</a>.</p></details>
+      <details><summary>¿Cómo compruebo las actualizaciones y el rollback?</summary><p>La <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">guía de invalidación</a> explica el comportamiento de las escrituras. La <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">guía de actualización</a> cubre el paso de 2.x a 3.0.0.</p></details>
     </div>
   </section>
 </main>

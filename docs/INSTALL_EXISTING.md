@@ -83,21 +83,12 @@ make PG_CONFIG=/path/to/pg_config && \
 ## 3. Configure `postgresql.conf` {#configure-before-restart}
 
 Keep existing entries in `shared_preload_libraries` and add `pg_local_cache`.
-Replace `app` with the database served by the extension. Minimal SQL-only setup:
+Replace `app` with the database served by the extension.
 
-```conf
-shared_preload_libraries = 'pg_local_cache'
-pg_local_cache.database = 'app'
-pg_local_cache.role = 'local_cache_worker'
-pg_local_cache.cache_entries = 16384
-pg_local_cache.memory_budget_mb = 384
-pg_local_cache.port = 0
-```
+### Configure the RESP listener {#enable-optional-resp2}
 
-For RESP2, keep the listener on loopback or behind an authenticated TLS proxy
-and use a protected token file:
-
-### RESP2 settings {#enable-optional-resp2}
+Configure the RESP listener with a dedicated worker role and protected token
+file:
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
@@ -106,7 +97,14 @@ pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
 pg_local_cache.bind_address = '127.0.0.1'
 pg_local_cache.auth_token_file = '/secure/path/token'
+pg_local_cache.cache_entries = 16384
+pg_local_cache.memory_budget_mb = 384
 ```
+
+The default listener is loopback-only. For remote clients, use a local proxy or
+sidecar, or explicitly enable plaintext on a trusted network with
+`pg_local_cache.allow_plaintext_network = on`; native TLS is not available in
+3.0.0.
 
 Size cache entries, relation states, workers, clients, and
 `memory_budget_mb` together. See the [technical reference](TECHNICAL.md#shared-memory-and-configuration)
@@ -148,9 +146,8 @@ GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
 GRANT SELECT ON TABLE local_cache.mapping TO local_cache_worker;
 ```
 
-The worker role is required even when `pg_local_cache.port = 0`. Keep it
-separate from application table owners. Attach each permanent table that has a
-supported primary key:
+Keep the worker role separate from application table owners. Attach each
+permanent table that has a supported primary key:
 
 ### Attach a table {#attach-a-table}
 
@@ -168,8 +165,10 @@ SELECT local_cache.health();
 
 ## 6. Upgrade {#recover-a-failed-binary-install}
 
-Install the new package, restart PostgreSQL through the correct service or
-operator, then update the extension as a database superuser:
+For a 2.x to 3.0 upgrade, follow the [upgrade guide](UPGRADING.md) first. In
+short, migrate applications from SQL `mget` to RESP `MGET`, install the new
+package, restart PostgreSQL through the correct service or operator, verify the
+loaded library version, then update the extension in every database that has it:
 
 ```sql
 ALTER EXTENSION pg_local_cache UPDATE;

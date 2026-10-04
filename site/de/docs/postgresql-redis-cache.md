@@ -7,7 +7,7 @@ seo_title: "Cache-aside mit PostgreSQL und Redis: Invalidation und Race Conditio
 description: Verwenden Sie PostgreSQL als Quelle der Wahrheit mit einem Redis-Cache-aside-Pfad, verstehen Sie Race Conditions bei veralteten Lesevorgängen und sehen Sie, wo pg_local_cache passt.
 section: Leitfäden
 permalink: /de/docs/postgresql-redis-cache.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
 # Cache-aside mit PostgreSQL und Redis {#postgresql-and-redis-cache-aside}
@@ -54,7 +54,7 @@ Befüllung innerhalb von PostgreSQL.
 ## Wo pg_local_cache passt {#where-pg_local_cache-fits}
 
 `pg_local_cache` ist eine engere PostgreSQL-lokale Option für vollständige Zeilen
-per Primärschlüssel. `local_cache.mget` ist explizit; eine gewöhnliche `SELECT`
+per Primärschlüssel. Authentifiziertes RESP `MGET` ist explizit; eine gewöhnliche `SELECT`
 und eine beliebige Abfrageform lesen den Cache nie. Trigger angehängter Tabellen
 setzen auf dem Datenbank-Schreibpfad Sperren für betroffene Schlüssel oder
 Relationen, und geeignete Lesevorgänge können auf PostgreSQL zurückfallen, wenn
@@ -63,9 +63,9 @@ mit dem [Leitfaden zu Batch-Abfragen](batch-primary-key-lookups.md) und dem
 [technischen Vertrag](TECHNICAL.md).
 
 Diese Erweiterung bietet keine allgemeine Redis-Kompatibilität, keine Redis-
-TTLs und kein verteiltes Anwendungs-Cache-Protokoll. Ihr optionaler RESP2-
-Endpunkt stellt einen begrenzten authentifizierten Befehlssatz über dieselben
-Zuordnungen bereit und hat ein eigenes Sicherheitsmodell; TLS gibt es nicht.
+TTLs und kein verteiltes Anwendungs-Cache-Protokoll. Ihr RESP2-Endpunkt stellt
+einen begrenzten authentifizierten Befehlssatz über dieselben Zuordnungen bereit
+und hat ein eigenes Sicherheitsmodell; native TLS-Unterstützung ist separat geplant.
 Verwenden Sie ihn, wenn transaktionsbewusste vollständige Zeilen-Lesevorgänge
 innerhalb von PostgreSQL das Problem sind. Verwenden Sie Redis, wenn mehrere
 Anwendungsinstanzen gemeinsame Objekte, TTL-basierte Aktualität oder Redis-
@@ -74,5 +74,5 @@ Schlüssel, Invalidation und Metriken für jede Schicht.
 
 Starten Sie den [Quickstart](QUICKSTART.md), vergleichen Sie ihn mit der
 gewöhnlichen Client-Abfrage im [node-postgres-Beispiel](node-postgres.md) und
-prüfen Sie die getrennten SQL- und RESP-Zähler. Der [Leitfaden zur Caching-Entscheidung](postgresql-caching.md) listet die anderen PostgreSQL-
+prüfen Sie Cache- und RESP-Zähler. Der [Leitfaden zur Caching-Entscheidung](postgresql-caching.md) listet die anderen PostgreSQL-
 Optionen auf.

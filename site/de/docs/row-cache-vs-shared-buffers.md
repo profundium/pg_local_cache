@@ -4,10 +4,10 @@ lang: de
 translation_key: row-cache-vs-shared-buffers
 title: PostgreSQL-Zeilen-Cache im Vergleich zu shared_buffers
 seo_title: "PostgreSQL-Zeilen-Cache im Vergleich zu shared_buffers | pg_local_cache"
-description: Vergleichen Sie das PostgreSQL-Seiten-Caching mit dem Caching vollständiger Zeilen durch pg_local_cache 2.0. Sehen Sie, welche Arbeit ein Treffer im Zeilen-Cache vermeidet, welche Kosten bleiben und wann kein weiterer Cache nötig ist.
+description: Vergleichen Sie das PostgreSQL-Seiten-Caching mit dem Caching vollständiger Zeilen durch pg_local_cache 3.0. Sehen Sie, welche Arbeit ein Treffer im Zeilen-Cache vermeidet, welche Kosten bleiben und wann kein weiterer Cache nötig ist.
 section: Lesepfade
 permalink: /de/docs/row-cache-vs-shared-buffers.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
 # PostgreSQL-Zeilen-Cache im Vergleich zu shared_buffers {#postgresql-row-cache-vs-shared_buffers}
@@ -27,27 +27,17 @@ Datenbank als Baseline.
 
 ## Cached PostgreSQL SELECT-Ergebnisse? {#does-postgresql-cache-select-results}
 
-`shared_buffers` cached die von einer Abfrage verwendeten Seiten statt ihres
-endgültigen Ergebnissatzes. Ein [vorbereitetes Statement](https://www.postgresql.org/docs/18/sql-prepare.html) verwendet
-Parse-Arbeit wieder und kann einen Plan wiederverwenden, aber PostgreSQL führt
-es weiterhin aus. pg_local_cache fügt über explizite `mget`-Aufrufe das Caching
-vollständiger Zeilen hinzu; beliebige SELECT-Ergebnisse werden nicht gecached
-und bestehende Abfragen nicht umgeschrieben. Das [Node.js-Beispiel](node-postgres.md)
-zeigt beide Lese-APIs nebeneinander.
+`shared_buffers` cached die von einer Abfrage verwendeten Seiten statt ihres endgültigen Ergebnissatzes. Ein vorbereitetes Statement verwendet Parse-Arbeit wieder und kann einen Plan wiederverwenden, aber PostgreSQL führt es weiterhin aus. pg_local_cache ergänzt das Caching vollständiger Zeilen über authentifiziertes RESP `MGET`; beliebige SELECT-Ergebnisse werden nicht gecached und bestehende Abfragen nicht umgeschrieben. Das Node.js-Beispiel zeigt getrennte RESP- und SQL-Pfade.
 
 ## Arbeit vergleichen, nicht nur das Speichermedium {#compare-the-work-not-just-the-storage-medium}
 
 | Lesen | Verbleibende Arbeit |
 |---|---|
 | Vorbereitetes Primärschlüssel-SQL über aufgewärmte Seiten | Protokollverarbeitung, Planausführung, Prüfung der Zeilensichtbarkeit und Ergebnisumwandlung |
-| Geeigneter SQL-mget-Cache-Treffer | Protokollverarbeitung, Ausführung der SQL-Funktion, Schlüsselumwandlung, Cache-Synchronisierung, Snapshot-Prüfungen und Rückgabe der gespeicherten Payload |
-| SQL-mget-Fehltreffer oder Bypass | Prüfungen der Funktion plus Quelltabellenabfrage; ein erfolgreicher geeigneter Fill kann den Cache füllen |
+| Geeigneter RESP-MGET-Cache-Treffer | Protokollverarbeitung, Schlüsselumwandlung, Cache-Synchronisierung, Snapshot-Prüfungen und Rückgabe der gespeicherten Payload |
+| RESP-MGET-Fehltreffer oder Bypass | Cache-Prüfungen plus Quelltabellenabfrage; ein erfolgreicher geeigneter Fill kann den Cache füllen |
 
-Ein Treffer im Zeilen-Cache vermeidet die wiederholte Ausführung der Quelltabelle
-und die Serialisierung der vollständigen Zeile. Cache-Prüfungen und
-Synchronisierung verbrauchen ebenfalls CPU, und ein Treffer verwendet weiterhin
-eine PostgreSQL-Verbindung und ein Backend. Diese SQL-API beseitigt weder
-Verbindungsgrenzen noch Warteschlangen im Verbindungspool.
+Ein Treffer im Zeilen-Cache vermeidet die wiederholte Ausführung der Quelltabelle und die Serialisierung der vollständigen Zeile. Cache-Prüfungen und Synchronisierung verbrauchen ebenfalls CPU. Der RESP-Worker verwendet die konfigurierte Datenbankrolle; RESP teilt weder SQL-Transaktion noch Snapshot des aufrufenden Clients.
 
 ## Einzubeziehende Kosten {#costs-to-include}
 
@@ -72,16 +62,14 @@ zuerst eine gewöhnliche Batch-Abfrage mit den aktuellen Aufrufen pro Schlüssel
 der Anwendung. Ein Gewinn durch Batching ist kein Beleg für einen Gewinn durch
 Caching.
 
-pg_local_cache 2.0 erfordert explizite `mget`-Aufrufe, die Installation der
-Erweiterung und ein Preload beim Start. RLS-, partitionierte und vererbte
-Tabellen werden abgelehnt.
+pg_local_cache 3.0 erfordert explizite RESP `MGET`-Aufrufe, die Installation der Erweiterung und ein Preload beim Start. RLS-, partitionierte und vererbte Tabellen werden abgelehnt.
 
 ## Zeilen-Cache oder externer Cache? {#row-cache-or-an-external-cache}
 
 Für Daten, die in PostgreSQL maßgeblich bleiben, hält dieses Design die
 Invalidation im Datenbank-Schreibpfad und vermeidet ein eigenes
 Cache-aside-Protokoll der Anwendung. Es bietet keine allgemeine Redis-Semantik.
-Der optionale RESP2-Endpunkt hat einen begrenzten Befehlssatz und ein eigenes
+Der RESP2-Endpunkt hat einen begrenzten Befehlssatz und ein eigenes
 Sicherheitsmodell.
 
 Ein PostgreSQL-Zeilen-Cache kann anwendungsseitigen Zustand mit TTL, Pub/Sub oder

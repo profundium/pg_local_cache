@@ -51,7 +51,7 @@ late-fill problem inside PostgreSQL.
 ## Where pg_local_cache fits {#where-pg_local_cache-fits}
 
 `pg_local_cache` is a narrower PostgreSQL-local option for complete rows keyed
-by primary key. `local_cache.mget` is explicit; a normal `SELECT` and an
+by primary key. Authenticated RESP `MGET` is explicit; a normal `SELECT` and an
 arbitrary query shape never read the cache. Attached-table triggers fence
 affected keys or relations on the database write path, and eligible reads can
 fall back to PostgreSQL when transaction or snapshot rules disallow a cache
@@ -59,14 +59,15 @@ hit. Start with the [batch lookup guide](batch-primary-key-lookups.md) and
 [technical contract](TECHNICAL.md).
 
 This extension does not provide general Redis compatibility, Redis TTLs, or a
-distributed application-cache protocol. Its optional RESP2 endpoint exposes a
-limited authenticated command set over the same mappings and has its own
-security model; it has no TLS. Use it when PostgreSQL-local transaction-aware
+distributed application-cache protocol. Its RESP2 endpoint exposes a limited
+authenticated command set over the same mappings and has its own security
+model; native TLS is planned separately. Use it when PostgreSQL-local
+transaction-aware
 whole-row reads are the problem. Use Redis when several application instances
 need shared objects, TTL-based freshness, or Redis data structures. Combining
 both requires separate keys, invalidation, and metrics for each layer.
 
 Run the [quickstart](QUICKSTART.md), compare against the ordinary client query
-in the [node-postgres example](node-postgres.md), and inspect the separate
-SQL and RESP counters. The [caching decision guide](postgresql-caching.md)
+in the [node-postgres example](node-postgres.md), and inspect the cache and RESP
+counters. The [caching decision guide](postgresql-caching.md)
 lists the other PostgreSQL options.

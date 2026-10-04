@@ -18,6 +18,8 @@ Go 1.27.1 with pgx 5.11.0 and a standard-library RESP2 client; `GOMAXPROCS=8`.
 
 
 Measured on 15 September 2026 with extension build `f03ed22`.
+SQL `mget` values in the tables below are historical 2.x results. That SQL
+lane was removed in 3.0.0; RESP `MGET` is the supported cached-read interface.
 The Go client runs inside the Linux VM, in a separate container sharing
 PostgreSQL's network namespace. Client CPU and memory are excluded from
 server resource counters. RESP uses eight workers, a 1 GiB cache/buffer
@@ -25,7 +27,7 @@ budget and a 512-client limit.
 
 Median **requests/s**, three five-second samples per case:
 
-| Keys/request | Connections | Prepared SQL | SQL mget | RESP MGET |
+| Keys/request | Connections | Prepared SQL | 2.x SQL mget (removed in 3.0.0) | RESP MGET |
 |---:|---:|---:|---:|---:|
 | 1 | 64 | 277,088 | 211,251 | 722,133 |
 | 1 | 256 | 253,790 | 186,296 | 839,678 |
@@ -47,7 +49,7 @@ SQL `mget` gained 6% over eight threads.
 
 At **256 connections**, medians across the same samples:
 
-| Keys/request | Path | Client CPU cores | Server CPU cores (% of VM) | Server µs/request | Sampled peak MiB |
+| Keys/request | Path (SQL mget removed in 3.0.0) | Client CPU cores | Server CPU cores (% of VM) | Server µs/request | Sampled peak MiB |
 |---:|---|---:|---:|---:|---:|
 | 1 | SQL | 3.97 | 8.94 (63.9%) | 36.3 | 679.8 |
 | 1 | SQL mget | 3.36 | 9.93 (70.9%) | 54.4 | 684.2 |
@@ -61,7 +63,7 @@ At **256 connections**, medians across the same samples:
 Through Docker's published ports, at **64 connections**; medians of three
 five-second samples, in requests/s:
 
-| Keys/request, 64 connections | Prepared SQL | SQL mget | RESP MGET |
+| Keys/request, 64 connections | Prepared SQL | 2.x SQL mget (removed in 3.0.0) | RESP MGET |
 |---:|---:|---:|---:|
 | 1 | 49,194 | 48,010 | 52,426 |
 | 64 | 14,324 | 15,751 | 16,240 |

@@ -22,23 +22,19 @@ Sie verwendet `127.0.0.1:55432`, die Datenbank `pglc_demo` und die Zugangsdaten
 `demo` / `demo-only`. Setzen Sie `PGLC_DEMO_PORT`, wenn der Quickstart einen
 anderen Port verwendet.
 
-Die Demo sendet Schlüssel als Query-Parameter:
+Die Demo zeigt eine gewöhnliche vorbereitete SQL-Fallback-Abfrage:
 
 ```sql
-SELECT local_cache.mget('public.items'::regclass, $1::bigint[]);
+SELECT id::text AS key, row_to_json(items)::text AS row
+FROM public.items
+WHERE id = ANY($1::bigint[]);
 ```
 
-`mget` gibt `text[]` zurück; jedes Element ungleich null ist eine JSON-Zeile.
-Das Beispiel fordert `42, 7, 42, NULL, 999999` an und gibt die Zeilen in der
-Eingabereihenfolge aus. Das doppelte `42` bleibt an beiden Positionen; die
-Null-Eingabe und das fehlende `999999` erzeugen Null-Elemente.
+Das Beispiel fordert `42, 7, 42, NULL, 999999` an, stellt in Go die Eingabereihenfolge wieder her und gibt für den NULL-Eingabewert sowie den fehlenden Schlüssel null aus. Für gecachte Lesevorgänge verwenden Sie RESP `MGET`; der Endpunkt nutzt die konfigurierte Worker-Rolle und gehört nicht zur SQL-Transaktion der Anwendung.
 
 ## Zeilen vergleichen, nicht nur Roundtrips {#compare-rows-not-just-round-trips}
 
-Eine gewöhnliche Abfrage mit `WHERE id = ANY($1::bigint[])` erhält die
-angeforderten Positionen nicht. Stellen Sie Reihenfolge, Duplikate und fehlende
-Zeilen wieder her, bevor Sie mit `mget` vergleichen; der [Leitfaden zu Batch-Abfragen](batch-primary-key-lookups.md) zeigt sowohl clientseitige als
-auch SQL-Ansätze.
+Eine gewöhnliche `WHERE id = ANY($1::bigint[])`-Abfrage erhält die angeforderte Reihenfolge nicht. Stellen Sie Reihenfolge, Duplikate und fehlende Zeilen für normale SQL-Ergebnisse wieder her. Für gecachte vollständige Zeilen verwenden Sie RESP `MGET`; der [Batch-Leitfaden](batch-primary-key-lookups.md) vergleicht die Verträge.
 
 Der Benchmark verwendet persistente Verbindungen und vorbereitete Statements.
 Die Vorbereitung von SQL cached keine Ergebniszeilen: siehe den

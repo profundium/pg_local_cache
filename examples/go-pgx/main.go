@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -22,17 +21,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const (
-	mgetStatement = "pglc-go-mget"
-	anyStatement  = "pglc-go-any"
-)
+const anyStatement = "pglc-go-any"
 
 type inputConfig struct {
 	Clients   int    `json:"clients"`
 	Batch     int    `json:"batch"`
 	Seconds   int    `json:"seconds"`
 	Mode      string `json:"mode"`
-	MgetSQL   string `json:"mget_sql"`
 	AnySQL    string `json:"any_sql"`
 	Port      int    `json:"port"`
 	RespPort  int    `json:"resp_port"`
@@ -80,8 +75,8 @@ func validateConfig(cfg inputConfig) error {
 	if cfg.Seconds < 1 || cfg.Seconds > 120 {
 		return fmt.Errorf("seconds must be between 1 and 120")
 	}
-	if cfg.Mode != "mget" && cfg.Mode != "postgres-any" && cfg.Mode != "resp-mget" {
-		return fmt.Errorf("mode must be mget, postgres-any, or resp-mget")
+	if cfg.Mode != "postgres-any" && cfg.Mode != "resp-mget" {
+		return fmt.Errorf("mode must be postgres-any or resp-mget")
 	}
 	if cfg.Mode == "resp-mget" && (cfg.RespPort < 1 || cfg.RespPort > 65535 || len(cfg.RespToken) < 32) {
 		return fmt.Errorf("RESP requires a valid port and demo authentication token")
@@ -89,16 +84,14 @@ func validateConfig(cfg inputConfig) error {
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
 	}
-	for name, query := range map[string]string{"mget_sql": cfg.MgetSQL, "any_sql": cfg.AnySQL} {
-		if strings.TrimSpace(query) == "" {
-			return fmt.Errorf("%s must be non-empty", name)
-		}
-		if strings.IndexByte(query, 0) >= 0 {
-			return fmt.Errorf("%s contains NUL", name)
-		}
-		if !strings.Contains(query, "$1") {
-			return fmt.Errorf("%s must contain $1", name)
-		}
+	if strings.TrimSpace(cfg.AnySQL) == "" {
+		return fmt.Errorf("any_sql must be non-empty")
+	}
+	if strings.IndexByte(cfg.AnySQL, 0) >= 0 {
+		return fmt.Errorf("any_sql contains NUL")
+	}
+	if !strings.Contains(cfg.AnySQL, "$1") {
+		return fmt.Errorf("any_sql must contain $1")
 	}
 	return nil
 }
@@ -149,9 +142,6 @@ func closeConnections(connections []*pgx.Conn) {
 
 func prepareAll(ctx context.Context, connections []*pgx.Conn, cfg inputConfig) error {
 	for _, conn := range connections {
-		if _, err := conn.Prepare(ctx, mgetStatement, cfg.MgetSQL); err != nil {
-			return fmt.Errorf("prepare mget: %w", err)
-		}
 		if _, err := conn.Prepare(ctx, anyStatement, cfg.AnySQL); err != nil {
 			return fmt.Errorf("prepare postgres-any: %w", err)
 		}
@@ -187,34 +177,6 @@ func decodeJSONRows(raw []*string) ([]map[string]any, error) {
 		rows[i] = row
 	}
 	return rows, nil
-}
-
-func queryMget(ctx context.Context, conn *pgx.Conn, keys []*int64) ([]map[string]any, []string, error) {
-	rows, err := conn.Query(ctx, mgetStatement, keys)
-	if err != nil {
-		return nil, nil, err
-	}
-	formats := formatNames(rows.FieldDescriptions())
-	defer rows.Close()
-
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return nil, formats, err
-		}
-		return nil, formats, fmt.Errorf("mget returned no row")
-	}
-	var raw []*string
-	if err := rows.Scan(&raw); err != nil {
-		return nil, formats, err
-	}
-	if rows.Next() {
-		return nil, formats, fmt.Errorf("mget returned multiple rows")
-	}
-	if err := rows.Err(); err != nil {
-		return nil, formats, err
-	}
-	decoded, err := decodeJSONRows(raw)
-	return decoded, formats, err
 }
 
 func queryAny(ctx context.Context, conn *pgx.Conn, keys []*int64) ([]map[string]any, []string, error) {
@@ -270,56 +232,26 @@ func edgeKeys() []*int64 {
 	return []*int64{&values[0], &values[1], &values[2], nil, &values[3]}
 }
 
-func verifyParity(ctx context.Context, conn *pgx.Conn) (map[string][]string, error) {
-	formats := make(map[string][]string, 2)
-	mgetRows, mgetFormats, err := queryMget(ctx, conn, edgeKeys())
-	if err != nil {
-		return nil, fmt.Errorf("mget edge query: %w", err)
+func verifyAny(ctx context.Context, conn *pgx.Conn) (map[string][]string, error) {
+	var formats []string
+	for _, keys := range [][]*int64{edgeKeys(), {}, {nil, nil}} {
+		rows, resultFormats, err := queryAny(ctx, conn, keys)
+		if err != nil {
+			return nil, fmt.Errorf("postgres-any query: %w", err)
+		}
+		if len(rows) != len(keys) {
+			return nil, fmt.Errorf("postgres-any returned %d rows for %d keys", len(rows), len(keys))
+		}
+		if formats == nil {
+			formats = resultFormats
+		}
 	}
-	anyRows, anyFormats, err := queryAny(ctx, conn, edgeKeys())
-	if err != nil {
-		return nil, fmt.Errorf("postgres-any edge query: %w", err)
-	}
-	if !reflect.DeepEqual(mgetRows, anyRows) {
-		return nil, fmt.Errorf("edge result mismatch")
-	}
-	empty := []*int64{}
-	mgetRows, _, err = queryMget(ctx, conn, empty)
-	if err != nil {
-		return nil, fmt.Errorf("mget empty query: %w", err)
-	}
-	anyRows, _, err = queryAny(ctx, conn, empty)
-	if err != nil {
-		return nil, fmt.Errorf("postgres-any empty query: %w", err)
-	}
-	if !reflect.DeepEqual(mgetRows, anyRows) {
-		return nil, fmt.Errorf("empty result mismatch")
-	}
-	allNull := []*int64{nil, nil}
-	mgetRows, _, err = queryMget(ctx, conn, allNull)
-	if err != nil {
-		return nil, fmt.Errorf("mget all-null query: %w", err)
-	}
-	anyRows, _, err = queryAny(ctx, conn, allNull)
-	if err != nil {
-		return nil, fmt.Errorf("postgres-any all-null query: %w", err)
-	}
-	if !reflect.DeepEqual(mgetRows, anyRows) {
-		return nil, fmt.Errorf("all-null result mismatch")
-	}
-	formats["mget"] = mgetFormats
-	formats["postgres-any"] = anyFormats
-	return formats, nil
+	return map[string][]string{"postgres-any": formats}, nil
 }
 
 func warm(ctx context.Context, connections []*pgx.Conn, cfg inputConfig, keys []*int64) error {
 	for _, conn := range connections {
-		var err error
-		if cfg.Mode == "mget" {
-			_, _, err = queryMget(ctx, conn, keys)
-		} else {
-			_, _, err = queryAny(ctx, conn, keys)
-		}
+		_, _, err := queryAny(ctx, conn, keys)
 		if err != nil {
 			return fmt.Errorf("warm %s: %w", cfg.Mode, err)
 		}
@@ -327,11 +259,7 @@ func warm(ctx context.Context, connections []*pgx.Conn, cfg inputConfig, keys []
 	return nil
 }
 
-func timedRequest(ctx context.Context, conn *pgx.Conn, cfg inputConfig, keys []*int64) error {
-	if cfg.Mode == "mget" {
-		_, _, err := queryMget(ctx, conn, keys)
-		return err
-	}
+func timedRequest(ctx context.Context, conn *pgx.Conn, keys []*int64) error {
 	_, _, err := queryAny(ctx, conn, keys)
 	return err
 }
@@ -495,7 +423,7 @@ func run(reader *bufio.Reader, writer *bufio.Writer) error {
 	if err := prepareAll(setupCtx, connections, cfg); err != nil {
 		return err
 	}
-	formats, err := verifyParity(setupCtx, connections[0])
+	formats, err := verifyAny(setupCtx, connections[0])
 	if err != nil {
 		return err
 	}
@@ -520,7 +448,7 @@ func run(reader *bufio.Reader, writer *bufio.Writer) error {
 	keys := fixedKeys(cfg.Batch)
 	requests := make([]func(context.Context) error, len(connections))
 	for i, conn := range connections {
-		requests[i] = func(ctx context.Context) error { return timedRequest(ctx, conn, cfg, keys) }
+		requests[i] = func(ctx context.Context) error { return timedRequest(ctx, conn, keys) }
 	}
 	result, err := runTimed(cfg, requests)
 	if err != nil {

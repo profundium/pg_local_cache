@@ -10,6 +10,8 @@ last_modified_at: "2026-09-22"
 topic: application
 ---
 
+> **Hinweis vom 04.10.2026:** SQL-`mget` wurde in 3.0.0 entfernt; RESP-`MGET` ersetzt es.
+
 # Batch-Lesevorgänge brauchen einen Ergebnisvertrag {#batch-reads-need-a-result-contract}
 
 Eine Schleife von Primärschlüssel-Abfragen durch eine einzelne `ANY`-Abfrage zu

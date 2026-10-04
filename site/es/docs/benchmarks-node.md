@@ -21,7 +21,9 @@ Medido el 14 de septiembre de 2026 con la compilación de la extensión `67e5754
 
 Con **64 claves por solicitud**, mediana de solicitudes/s de tres muestras de 10 segundos:
 
-| Conexiones | SQL preparado | SQL mget |
+La ruta SQL `mget` y todos los resultados siguientes son mediciones históricas de 2.x. SQL `mget` se eliminó en 3.0.0; la interfaz compatible para lecturas en caché es RESP `MGET`.
+
+| Conexiones | SQL preparado | SQL mget (2.x; eliminado en 3.0.0)|
 |---:|---:|---:|
 | 4 | 7,023 | 7,528 |
 | 64 | 15,577 | 16,616 |
@@ -37,7 +39,7 @@ Para **una clave** con 64 conexiones, SQL fue más rápido: 55,409 frente a 53,6
 
 El ejecutor de aplicaciones de Node.js usa **64 conexiones**, **50.000 solicitudes por muestra** y tres repeticiones. Las lecturas recorren 128 filas activas; el 5% de las operaciones de la carga mixta actualiza filas.
 
-| Carga de trabajo | Claves/solicitud | Solicitudes/s de SQL preparado | Solicitudes/s de mget JSON |
+| Carga de trabajo | Claves/solicitud | Solicitudes/s de SQL preparado | Solicitudes/s de mget JSON (2.x; eliminado en 3.0.0)|
 |---|---:|---:|---:|
 | Lecturas calientes | 1 | 56,104 (52,246–56,364) | 52,842 (52,494–53,399) |
 | Lecturas calientes | 16 | 37,391 (36,996–37,938) | 38,425 (38,340–38,617) |
@@ -48,13 +50,9 @@ El ejecutor de aplicaciones de Node.js usa **64 conexiones**, **50.000 solicitud
 
 Los valores son solicitudes/s medianas con mínimo–máximo entre paréntesis. Las muestras mixtas cuentan juntas las lecturas y escrituras. `application_run` del JSON incluye casos de llenado en frío y sobrecarga de escritura. El llenado en frío con lote 64 solo tiene 64 observaciones de latencia, demasiado pocas para una estimación p99 útil.
 
-## Configuración de la consulta {#query-setup}
+## Configuración histórica del benchmark SQL {#query-setup}
 
-```sql
-SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows;
-```
-
-Se reutilizan las conexiones y las sentencias preparadas con nombre. La descodificación JSON y la restauración de las posiciones de entrada se incluyen en el tiempo de la solicitud. Consulta el [ejemplo de Node.js](node-postgres.md).
+La consulta SQL `mget` histórica se conserva en los datos brutos enlazados para reproducibilidad. No está disponible en 3.0.0. El benchmark actual compara SQL preparado con RESP `MGET`; consulta el [ejemplo de Node.js](node-postgres.md).
 
 ## Reproduce {#reproduce}
 
@@ -67,8 +65,7 @@ Desde la raíz del repositorio, con Docker y Node.js 20+:
 ./examples/benchmark.sh node > node.json
 ```
 
-Valores predeterminados actuales: 4/64/256 conexiones, 1/16/64 claves y tres muestras de cinco segundos por caso. Node.js ejecuta ahora los tres recorridos: SQL preparado, SQL `mget` y RESP `MGET`, dentro de la VM de Docker. El script crea un servidor desechable y un contenedor de cliente separado, registra los recursos y después elimina ambos.
-Anulaciones opcionales: `CONNECTIONS`, `BATCHES`, `REPEATS`, `DURATION_SECONDS`. Usa `all` para incluir Go en la [misma matriz](BENCHMARKS.md#run-the-same-comparison-on-every-client). Para la configuración registrada basada en el host, usa las revisiones de los JSON de mediciones.
+Valores predeterminados actuales: 4/64/256 conexiones, 1/16/64 claves y tres muestras de cinco segundos por caso. Node.js ejecuta SQL preparado y RESP `MGET` dentro de la máquina virtual de Docker. El script crea un servidor y un contenedor cliente desechables, registra recursos y elimina ambos.
 
 Para lecturas mezcladas con escrituras:
 

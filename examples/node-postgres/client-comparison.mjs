@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { integer, latency } from './benchmark.mjs';
-import { demoConnection, getRows, MGET_SQL, MGET_TEXT_SQL, ANY_SQL } from './queries.mjs';
+import { demoConnection, getRows, ANY_SQL } from './queries.mjs';
 import { startResources } from './server-resources.mjs';
 import { respClient, getRespRows } from './resp.mjs';
 
@@ -20,19 +20,19 @@ async function nodeWorker() {
   assert.ok(Number.isInteger(config.clients) && config.clients >= 1 && config.clients <= 256);
   assert.ok([1, 16, 64].includes(config.batch));
   assert.ok(Number.isInteger(config.seconds) && config.seconds >= 1 && config.seconds <= 120);
-  assert.ok(['mget', 'postgres-any', 'resp-mget'].includes(config.mode));
+  assert.ok(['postgres-any', 'resp-mget'].includes(config.mode));
   assert.equal(config.driver, 'node-json');
   const resp = config.mode === 'resp-mget';
   const connection = { ...demoConnection(), port: config.port, application_name: 'pglc-node-benchmark' };
   const clients = Array.from({ length: config.clients }, () => resp ? respClient(config.resp_port) : new pg.Client(connection));
-  const read = (client, keys) => resp ? getRespRows(client, keys) : getRows(client, keys, config.mode === 'mget');
+  const read = (client, keys) => resp ? getRespRows(client, keys) : getRows(client, keys);
   try {
     await Promise.all(clients.map(client => client.connect()));
     const check = new pg.Client(connection);
     try {
       await check.connect();
       for (const keys of [[42, 7, 42, null, 999999], [], [null, null]]) {
-        assert.deepEqual(await read(clients[0], keys), await getRows(check, keys, false));
+        assert.deepEqual(await read(clients[0], keys), await getRows(check, keys));
       }
     } finally { await check.end(); }
     const keys = Array.from({ length: config.batch }, (_, i) => i + 1);
@@ -82,27 +82,23 @@ async function runClient(admin, config) {
   const watchdog = setTimeout(() => child.kill(), (config.seconds + 60) * 1000);
   let finish;
   try {
-    child.stdin.write(JSON.stringify({ ...config, port: clientContainer ? 5432 : demoConnection().port, mget_sql: MGET_TEXT_SQL, any_sql: ANY_SQL,
+    child.stdin.write(JSON.stringify({ ...config, port: clientContainer ? 5432 : demoConnection().port, any_sql: ANY_SQL,
       resp_port: clientContainer ? 6380 : integer('PGLC_DEMO_RESP_PORT', 56379, 65535),
       resp_token: 'DemoRespToken_0123456789abcdef0123456789' }) + '\n');
     const ready = await message(); assert.equal(ready.ready, true);
-    const before = (await admin.query('SELECT local_cache.stats() AS s')).rows[0].s;
+    const before = config.mode === 'resp-mget' ? (await admin.query('SELECT local_cache.stats() AS s')).rows[0].s : null;
     finish = await startResources(admin);
     child.stdin.write('go\n');
     const { result } = await message();
     assert.ok(result.requests > 0 && Number.isFinite(result.requests_s));
     const stop = finish; finish = null;
     const server = await stop(result.requests);
-    const after = (await admin.query('SELECT local_cache.stats() AS s')).rows[0].s;
-    const counters = Object.fromEntries(['sql_cache_hits', 'sql_cache_misses', 'sql_cache_fills', 'sql_cache_bypasses',
-      'cache_hit', 'cache_miss', 'client_mget_keys', 'client_request_errors', 'client_limit_rejections', 'database_reads']
-      .map(key => [key, Number(after[key]) - Number(before[key])]));
-    for (const value of Object.values(counters)) assert.ok(Number.isFinite(value) && value >= 0);
-    if (config.mode === 'mget') {
-      assert.equal(counters.sql_cache_hits, result.requests * config.batch);
-      assert.equal(counters.sql_cache_misses + counters.sql_cache_fills + counters.sql_cache_bypasses, 0);
-    }
+    let counters = null;
     if (config.mode === 'resp-mget') {
+      const after = (await admin.query('SELECT local_cache.stats() AS s')).rows[0].s;
+      counters = Object.fromEntries(['cache_hit', 'cache_miss', 'client_mget_keys', 'client_request_errors', 'client_limit_rejections', 'database_reads']
+        .map(key => [key, Number(after[key]) - Number(before[key])]));
+      for (const value of Object.values(counters)) assert.ok(Number.isFinite(value) && value >= 0);
       assert.equal(counters.cache_hit, result.requests * config.batch);
       assert.equal(counters.client_mget_keys, result.requests * config.batch);
       assert.equal(counters.cache_miss + counters.database_reads + counters.client_request_errors + counters.client_limit_rejections, 0);
@@ -149,7 +145,7 @@ async function main() {
     await admin.query('SELECT sum(octet_length(value)) FROM public.items');
     await getRows(admin, Array.from({ length: 128 }, (_, i) => i + 1));
     const drivers = benchmarkClient === 'all' ? ['node-json', 'go-pgx'] : [benchmarkClient === 'go' ? 'go-pgx' : 'node-json'];
-    const variants = drivers.flatMap(driver => ['postgres-any', 'mget', 'resp-mget'].map(mode => [driver, mode]));
+    const variants = drivers.flatMap(driver => ['postgres-any', 'resp-mget'].map(mode => [driver, mode]));
     for (let repeat = 1; repeat <= repeats; repeat++) {
       // Rotate the first client and reverse connection/batch order between repetitions.
       const first = (repeat - 1) % variants.length;
@@ -174,7 +170,7 @@ async function main() {
       client_placement: process.env.PGLC_CLIENT_CONTAINER ? 'Linux VM, same separate client container, server network namespace' : 'host through Docker published ports' },
     workload: { seconds, repeats, connections, batches, fixed_keys: true, persistent_connections: true,
       protocol: 'prepared SQL and RESP2 MGET, no pipelining', all_clients_decode_json_and_restore_positions: true, server_sample_interval_ms: 500 },
-    queries: { mget_text: MGET_TEXT_SQL, mget_json: MGET_SQL, postgres_any: ANY_SQL,
+    queries: { postgres_any: ANY_SQL,
       resp_mget: 'MGET CRUD:pglc_demo.public.items:{"id":1} ...' },
     results, ...(failure ? { error: { message: failure.message } } : {}) }, null, 2));
   if (failure) throw failure;

@@ -76,20 +76,14 @@ make PG_CONFIG=/path/to/pg_config && \
 
 ## 3. <code>postgresql.conf</code> konfigurieren {#configure-before-restart}
 
-Behalten Sie vorhandene Einträge in <code>shared_preload_libraries</code> bei und ergänzen Sie <code>pg_local_cache</code>. Ersetzen Sie <code>app</code> durch den Namen der Datenbank, die die Erweiterung bedient. Minimale SQL-only-Konfiguration:
+Behalten Sie vorhandene Einträge in `shared_preload_libraries` bei und
+ergänzen Sie `pg_local_cache`. Ersetzen Sie `app` durch den Namen der Datenbank,
+die die Erweiterung bedient.
 
-```conf
-shared_preload_libraries = 'pg_local_cache'
-pg_local_cache.database = 'app'
-pg_local_cache.role = 'local_cache_worker'
-pg_local_cache.cache_entries = 16384
-pg_local_cache.memory_budget_mb = 384
-pg_local_cache.port = 0
-```
+### RESP-Listener konfigurieren {#enable-optional-resp2}
 
-Für RESP2 sollte der Listener nur auf Loopback oder hinter einem authentifizierten TLS-Proxy erreichbar sein. Verwenden Sie eine geschützte Token-Datei:
-
-### RESP2-Einstellungen {#enable-optional-resp2}
+Konfigurieren Sie den RESP-Listener mit einer eigenen Worker-Rolle und einer
+geschützten Token-Datei:
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
@@ -98,9 +92,19 @@ pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
 pg_local_cache.bind_address = '127.0.0.1'
 pg_local_cache.auth_token_file = '/secure/path/token'
+pg_local_cache.cache_entries = 16384
+pg_local_cache.memory_budget_mb = 384
 ```
 
-Stimmen Sie Cache-Einträge, Relationszustände, Worker, Clients und <code>memory_budget_mb</code> gemeinsam ab. Hinweise zu Kapazität und Speicher finden Sie in der [technischen Referenz](TECHNICAL.md#shared-memory-and-configuration).
+Standardmäßig ist der Listener nur über Loopback erreichbar. Verwenden Sie für
+entfernte Clients einen lokalen Proxy oder Sidecar, oder erlauben Sie Klartext
+in einem vertrauenswürdigen Netzwerk ausdrücklich mit
+`pg_local_cache.allow_plaintext_network = on`; native TLS-Unterstützung gibt es
+in 3.0.0 noch nicht.
+
+Stimmen Sie Cache-Einträge, Relationszustände, Worker, Clients und
+`memory_budget_mb` gemeinsam ab. Hinweise zu Kapazität und Speicher finden Sie
+in der [technischen Referenz](TECHNICAL.md#shared-memory-and-configuration).
 
 ## 4. PostgreSQL neu starten
 
@@ -135,7 +139,7 @@ GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
 GRANT SELECT ON TABLE local_cache.mapping TO local_cache_worker;
 ```
 
-Die Worker-Rolle wird auch bei <code>pg_local_cache.port = 0</code> benötigt. Verwenden Sie nicht die Rolle, der Anwendungstabellen gehören. Binden Sie jede permanente Tabelle mit einem unterstützten Primärschlüssel an:
+Verwenden Sie für die Worker-Rolle keine Rollen, denen Anwendungstabellen gehören. Binden Sie jede permanente Tabelle mit unterstütztem Primärschlüssel an:
 
 ### Tabelle anbinden {#attach-a-table}
 
@@ -153,7 +157,11 @@ Prüfen Sie, ob die Erweiterung bereit ist und die Zuordnungen aktuell sind.
 
 ## 6. Aktualisieren {#recover-a-failed-binary-install}
 
-Installieren Sie das neue Paket und starten Sie PostgreSQL über den zuständigen Dienst oder Operator neu. Aktualisieren Sie danach die Erweiterung als Datenbank-Superuser:
+Für ein Upgrade von 2.x auf 3.0 folgen Sie zuerst dem
+[Upgrade-Leitfaden](UPGRADING.md). Stellen Sie Anwendungen von SQL `mget` auf
+RESP `MGET` um, installieren Sie das passende 3.0.0-Paket, starten Sie
+PostgreSQL neu und aktualisieren Sie die Erweiterung in jeder Datenbank, in
+der sie installiert ist:
 
 ```sql
 ALTER EXTENSION pg_local_cache UPDATE;

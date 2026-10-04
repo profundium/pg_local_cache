@@ -4,7 +4,7 @@ lang: en
 translation_key: node-postgres
 title: Batch row lookups with node-postgres
 seo_title: "Batch PostgreSQL Row Lookups with node-postgres"
-description: Use pg_local_cache 2.0 from Node.js with a parameterized bigint array and JSON transport. Preserve order and nulls, and compare with a prepared ANY query.
+description: Use authenticated RESP MGET from Node.js for cached row reads and node-postgres for SQL writes and ordinary queries.
 section: Node.js
 permalink: /docs/node-postgres.html
 last_modified_at: "2026-09-16"
@@ -22,34 +22,35 @@ npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
 
-## Send one parameterized query {#send-one-parameterized-query}
+## Read through RESP {#send-one-parameterized-query}
 
-Given a connected node-postgres client or pool:
+Given a connected RESP client from `@redis/client`:
 
 ```js
-const result = await client.query({
-  name: 'items-mget',
-  text: "SELECT array_to_json(local_cache.mget('public.items'::regclass, $1::bigint[])) AS rows",
-  values: [[42, 7, 42, null, 999999]],
-});
-const rows = result.rows[0].rows.map(row =>
-  row === null ? null : JSON.parse(row)
+const ids = [42, 7, 42, null, 999999];
+const wireKeys = ids.filter(id => id !== null).map(id =>
+  `CRUD:app.public.items:${JSON.stringify({ id })}`
 );
+const values = await client.mGet(wireKeys);
+let position = 0;
+const rows = ids.map(id => {
+  if (id === null) return null;
+  const value = values[position++];
+  return value === null ? null : JSON.parse(value);
+});
 ```
 
-`mget` returns `text[]`. `array_to_json` sends the outer array as JSON, so
-node-postgres applies its JSON decoder. Each non-null element is a serialized
-row and needs `JSON.parse`; positions match the input positions, and missing
-keys or null inputs produce `null`.
+RESP `MGET` returns JSON-encoded rows in key order. The helper omits null input
+keys and restores their positions; missing keys return null.
 
 Keep the table name fixed in application code. Pass IDs as query parameters,
 not SQL assembled from strings. See node-postgres documentation
 for [parameters and named prepared statements](https://node-postgres.com/features/queries).
 
-The runnable helper rejects batches over 1,024 keys and returns `[]` without a
-query for an empty batch. It uses safe integer demo IDs. PostgreSQL `bigint` and
-numeric fields in JSON can exceed JavaScript's exact numeric range; use a
-lossless JSON parser or an explicit serialization contract for such values.
+The RESP command accepts at most 1,024 keys. The runnable helper returns `[]`
+without a request when all inputs are null. PostgreSQL `bigint` and numeric
+fields in JSON can exceed JavaScript's exact numeric range; use a lossless JSON
+parser or an explicit serialization contract for such values.
 
 ## Compare with the existing batch query {#compare-with-the-existing-batch-query}
 
@@ -79,13 +80,12 @@ separate reader and writer connections; see
 ## Prepared statements and result caching {#prepared-statements-and-result-caching}
 
 A named node-postgres query reuses a prepared statement on each connection.
-It does not cache returned rows. `local_cache.mget` adds a separate shared
-whole-row cache inside PostgreSQL; the client still sends a query and decodes
-its result. See the [caching decision guide](postgresql-caching.md) to compare
-the layers and the [batch lookup guide](batch-primary-key-lookups.md) for a
-SQL-only alternative that preserves requested positions.
+It does not cache returned rows. RESP `MGET` uses the extension's shared
+whole-row cache, but its worker role and session state are separate from the
+application's SQL connection. See the [caching decision guide](postgresql-caching.md)
+and [batch lookup guide](batch-primary-key-lookups.md).
 
 For RESP2, use the [Node.js RESP example](resp.md#nodejs).
 [Recorded Node.js results](benchmarks-node.md) include batch reads and concurrent updates.
 The [common benchmark](BENCHMARKS.md#run-the-same-comparison-on-every-client)
-runs Node.js and Go through the same SQL and RESP scenarios.
+runs Node.js and Go through the same prepared SQL and RESP scenarios.

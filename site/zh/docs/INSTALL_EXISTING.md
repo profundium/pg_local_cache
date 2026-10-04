@@ -73,20 +73,12 @@ make PG_CONFIG=/path/to/pg_config && \
 
 ## 3. 配置 <code>postgresql.conf</code> {#configure-before-restart}
 
-保留 <code>shared_preload_libraries</code> 中已有的条目，并添加 <code>pg_local_cache</code>。将 <code>app</code> 替换为扩展服务的数据库名称。最小 SQL-only 配置：
+保留 `shared_preload_libraries` 中已有的条目，并添加 `pg_local_cache`。将
+`app` 替换为扩展服务的数据库名称。
 
-```conf
-shared_preload_libraries = 'pg_local_cache'
-pg_local_cache.database = 'app'
-pg_local_cache.role = 'local_cache_worker'
-pg_local_cache.cache_entries = 16384
-pg_local_cache.memory_budget_mb = 384
-pg_local_cache.port = 0
-```
+### 配置 RESP 监听器 {#enable-optional-resp2}
 
-启用 RESP2 时，请将监听地址限制在 loopback 或经过身份验证的 TLS 代理后，并使用受保护的令牌文件：
-
-### RESP2 设置 {#enable-optional-resp2}
+使用专用 worker 角色和受保护的令牌文件配置 RESP 监听器：
 
 ```conf
 shared_preload_libraries = 'pg_local_cache'
@@ -95,9 +87,16 @@ pg_local_cache.role = 'local_cache_worker'
 pg_local_cache.port = 6380
 pg_local_cache.bind_address = '127.0.0.1'
 pg_local_cache.auth_token_file = '/secure/path/token'
+pg_local_cache.cache_entries = 16384
+pg_local_cache.memory_budget_mb = 384
 ```
 
-应共同规划缓存条目数、关系状态、worker、客户端和 <code>memory_budget_mb</code>。容量和内存建议见[技术参考](TECHNICAL.md#shared-memory-and-configuration)。
+默认情况下，监听器仅接受 loopback 连接。远程客户端请使用本地代理或
+sidecar；如果确实需要在可信网络上使用明文连接，请显式设置
+`pg_local_cache.allow_plaintext_network = on`。3.0.0 尚不支持原生 TLS。
+
+请共同规划缓存条目数、关系状态、worker 和客户端数量，以及
+`memory_budget_mb`。容量和内存建议见[技术参考](TECHNICAL.md#shared-memory-and-configuration)。
 
 ## 4. 重启 PostgreSQL
 
@@ -132,7 +131,7 @@ GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
 GRANT SELECT ON TABLE local_cache.mapping TO local_cache_worker;
 ```
 
-即使 <code>pg_local_cache.port = 0</code>，worker 角色仍是必需的。请勿使用应用表的所有者角色。为每个具有受支持主键的永久表启用缓存：
+请将 worker 角色与应用表所有者角色分开。为每个具有受支持主键的永久表启用缓存：
 
 ### 关联表 {#attach-a-table}
 
@@ -150,7 +149,9 @@ SELECT local_cache.health();
 
 ## 6. 升级 {#recover-a-failed-binary-install}
 
-安装新软件包，通过对应服务或 operator 重启 PostgreSQL，然后以数据库超级用户身份更新扩展：
+从 2.x 升级到 3.0 时，请先遵循[升级指南](UPGRADING.md)。将应用从 SQL
+`mget` 迁移到 RESP `MGET`，安装对应的 3.0.0 软件包，重启 PostgreSQL，
+然后在每个安装了该扩展的数据库中更新扩展：
 
 ```sql
 ALTER EXTENSION pg_local_cache UPDATE;

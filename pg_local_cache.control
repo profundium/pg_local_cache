@@ -1,6 +1,6 @@
-comment = 'Transaction-aware cache for ordinary PostgreSQL primary-key reads'
-default_version = '2.0.4'
-module_pathname = '$libdir/pg_local_cache'
+comment = 'Transaction-aware whole-row cache for PostgreSQL primary keys over RESP'
+default_version = '3.0.0'
+module_pathname = 'pg_local_cache'
 relocatable = false
 schema = local_cache
 superuser = true

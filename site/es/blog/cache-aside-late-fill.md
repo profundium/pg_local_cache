@@ -6,9 +6,11 @@ title: "Invalidación de caché de PostgreSQL: la carrera del llenado tardío"
 description: Recorre una carrera de caché aparte en la que una lectura antigua vuelve a llenar una clave eliminada después del commit. Entiende las vallas de publicación, los snapshots, el rollback y las cachés locales de las solicitudes.
 permalink: /es/blog/cache-aside-late-fill/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: correctness
 ---
+
+> **Nota del 2026-10-04:** SQL `mget` se eliminó en 3.0.0; RESP `MGET` lo sustituye.
 
 # Invalidación de caché y la carrera del llenado tardío {#cache-invalidation-and-the-late-fill-race}
 
@@ -32,7 +34,7 @@ Un TTL puede limitar cuánto tiempo ese valor sigue siendo elegible. No hace cor
 
 Un llenado de caché necesita pruebas de que su resultado sigue siendo elegible cuando se publica. En `pg_local_cache` 2.0, las escrituras ponen vallas a las claves o relaciones afectadas; los llenados llevan información de generación y las entradas positivas almacenadas llevan información de visibilidad de la tupla. Una generación cambiada puede rechazar un llenado antiguo. Una lectura que no pueda usar una entrada de forma segura vuelve a PostgreSQL.
 
-Estas comprobaciones forman parte de un recorrido de lectura específico de PostgreSQL. No convierten el endpoint RESP opcional en un servidor Redis de propósito general ni invalidan valores que la aplicación ya haya copiado en otro lugar.
+Estas comprobaciones forman parte de un recorrido de lectura específico de PostgreSQL. No convierten el endpoint RESP en un servidor Redis de propósito general ni invalidan valores que la aplicación ya haya copiado en otro lugar.
 
 ## Prueba rollback y commit {#test-transactions}
 

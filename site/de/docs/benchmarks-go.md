@@ -11,6 +11,9 @@ last_modified_at: "2026-09-16"
 
 # Go-Benchmarks: SQL und RESP {#go-benchmarks-sql-and-resp}
 
+Die SQL-mget-Werte in den folgenden Tabellen sind historische Ergebnisse aus 2.x. Diese SQL-Schnittstelle wurde in 3.0.0 entfernt; unterstützte gecachte Lesevorgänge verwenden RESP MGET.
+
+
 [Übersicht](BENCHMARKS.md) · [Node.js](benchmarks-node.md) · [Go und RESP](benchmarks-go.md)
 
 Go 1.27.1 mit pgx 5.11.0 und einem RESP2-Client aus der Standardbibliothek;
@@ -25,7 +28,7 @@ Cache-/Buffer-Budget von 1 GiB und ein Limit von 512 Clients.
 
 Median **Anfragen/s**, drei Stichproben von fünf Sekunden pro Fall:
 
-| Schlüssel/Anfrage | Verbindungen | Vorbereitetes SQL | SQL mget | RESP MGET |
+| Schlüssel/Anfrage | Verbindungen | Vorbereitetes SQL | 2.x SQL mget (in 3.0.0 entfernt) | RESP MGET |
 |---:|---:|---:|---:|---:|
 | 1 | 64 | 277,088 | 211,251 | 722,133 |
 | 1 | 256 | 253,790 | 186,296 | 839,678 |
@@ -48,7 +51,7 @@ Threads 6 %.
 
 Bei **256 Verbindungen**, Mediane aus denselben Stichproben:
 
-| Schlüssel/Anfrage | Pfad | Client-CPU-Kerne | Server-CPU-Kerne (% der VM) | Server-µs/Anfrage | Abgetasteter Spitzenwert MiB |
+| Schlüssel/Anfrage | Pfad (SQL mget aus 2.x; in 3.0.0 entfernt) | Client-CPU-Kerne | Server-CPU-Kerne (% der VM) | Server-µs/Anfrage | Abgetasteter Spitzenwert MiB |
 |---:|---|---:|---:|---:|---:|
 | 1 | SQL | 3.97 | 8.94 (63.9%) | 36.3 | 679.8 |
 | 1 | SQL mget | 3.36 | 9.93 (70.9%) | 54.4 | 684.2 |
@@ -62,7 +65,7 @@ Bei **256 Verbindungen**, Mediane aus denselben Stichproben:
 Über Dockers veröffentlichte Ports, bei **64 Verbindungen**; Mediane aus drei
 Stichproben von fünf Sekunden, in Anfragen/s:
 
-| Schlüssel/Anfrage, 64 Verbindungen | Vorbereitetes SQL | SQL mget | RESP MGET |
+| Schlüssel/Anfrage, 64 Verbindungen | Vorbereitetes SQL | 2.x SQL mget (in 3.0.0 entfernt) | RESP MGET |
 |---:|---:|---:|---:|
 | 1 | 49,194 | 48,010 | 52,426 |
 | 64 | 14,324 | 15,751 | 16,240 |

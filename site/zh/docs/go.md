@@ -20,18 +20,20 @@ go -C examples/go-pgx run ./demo
 
 示例使用 `127.0.0.1:55432`、数据库 `pglc_demo`，以及 `demo` / `demo-only` 凭据。如果快速开始使用其他端口，请设置 `PGLC_DEMO_PORT`。
 
-演示将键作为查询参数发送：
+演示展示了普通的预备 SQL 回退查询：
 
 ```sql
-SELECT local_cache.mget('public.items'::regclass, $1::bigint[]);
+SELECT id::text AS key, row_to_json(items)::text AS row
+FROM public.items
+WHERE id = ANY($1::bigint[]);
 ```
 
-`mget` 返回 `text[]`；每个非空元素都是 JSON 行。示例请求 `42, 7, 42, NULL, 999999`，并按输入顺序输出结果。重复的 `42` 保留在两个位置；空输入与不存在的 `999999` 产生空元素。
+示例请求 `42, 7, 42, NULL, 999999`，在 Go 中恢复输入顺序，并为 null 输入和缺失键输出 null。缓存读取请使用 RESP `MGET`；该接口使用配置的 worker 角色，不属于应用的 SQL 事务。
 
 ## 比较行结果，而不仅是往返次数 {#compare-rows-not-just-round-trips}
 
-普通 `WHERE id = ANY($1::bigint[])` 查询不保留请求位置。与 `mget` 比较前，应恢复输入顺序、重复项和缺失行；[批量查找指南](batch-primary-key-lookups.md)介绍了客户端和 SQL 两种方案。
+普通的 `WHERE id = ANY($1::bigint[])` 查询不会保留请求位置。普通 SQL 结果需要自行恢复顺序、重复项和缺失行。读取缓存的完整行请使用 RESP `MGET`；[批量查找指南](batch-primary-key-lookups.md)比较两种契约。
 
-基准测试使用持久连接与预备语句。预备 SQL 不会缓存结果行：参阅 [PostgreSQL 缓存指南](postgresql-caching.md)。[统一基准测试](BENCHMARKS.md#run-the-same-comparison-on-every-client)通过 SQL 与 RESP，以相同键、批次大小、连接数和时长测试 Go 与 Node.js。RESP 不共享调用者的 SQL 事务。
+基准测试使用持久连接和预备语句。预备 SQL 不会缓存结果行：参阅 [PostgreSQL 缓存指南](postgresql-caching.md)。[统一基准测试](BENCHMARKS.md#run-the-same-comparison-on-every-client)使用相同的键、批次大小、连接数和时长，通过预备 SQL 与 RESP `MGET` 测试 Go 和 Node.js。RESP 不共享调用方的 SQL 事务。
 
 修改读取路径前，请阅读[快速开始](QUICKSTART.md)中的配置流程，并完成[事务检查](cache-invalidation.md)。

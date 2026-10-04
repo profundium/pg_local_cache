@@ -13,11 +13,11 @@ last_modified_at: '2026-09-16'
 
 结果记录于运行 PostgreSQL 16 的 Apple M3 Max。每组比较为缓存读取与普通 SQL 读取使用相同客户端、数据集和解码后的行结果。
 
+已发布的 SQL mget 结果是 2.x 历史数据；SQL mget 已在 3.0.0 中移除。当前支持的缓存读取接口是 RESP MGET。
+
 ## 缓存在哪些场景有效，哪些场景无效 {#where-the-cache-helpedand-where-it-did-not}
 
-- **单键 SQL：** 在两组已发布的客户端配置中，预备 SQL 都快于 SQL `mget`。Go 使用 256 个连接时，预备 SQL 为 253,790 requests/s，`mget` 为 186,296。添加行缓存没有改善此 SQL 工作负载。
-- **64 键 SQL 批次：** Go 使用 256 个连接时，`mget` 为 43,647 requests/s，预备 SQL 为 27,615，吞吐量约为 1.58×。Node.js 使用 64 个连接时提升较小：16,616 对 15,577。批次大小与客户端开销很重要，也应检查 CPU 和延迟。
-- **单键 RESP：** Go 使用 256 个连接时达到 839,678 requests/s，而 SQL 基线为 253,790。RESP 工作进程使用配置的数据库角色，不共享调用者的 SQL 事务或快照。
+Node.js 和 Go 会解码 RESP JSON 行；这些客户端开销计入计时。历史 SQL mget 比较均标注为 2.x 数据。
 
 [Node.js 测量](benchmarks-node.md)使用 macOS 客户端与 Docker 服务器；[Go 与 RESP 测量](benchmarks-go.md)将两者均置于 Docker VM 内。每个页面都链接到原始重复测量、精确版本和服务器资源成本。这些不同配置不能用来给语言排名。连接示例见 [Node.js](node-postgres.md)、[Go](go.md) 或 [RESP](resp.md)。
 
@@ -32,17 +32,7 @@ python3 scripts/benchmark_report.py comparison.json
 
 测试程序构建一次性 PostgreSQL 服务器，并运行以下统一矩阵：
 
-| 设置 | 所有客户端与读取路径 |
-|---|---|
-| 客户端 | Node.js 使用 node-postgres / node-redis；Go 使用 pgx / 标准库 RESP2 |
-| 读取路径 | 预备 SQL `ANY`、SQL `mget`、RESP `MGET` |
-| 每请求键数 | 1、16、64；使用相同的固定键，从 1 开始 |
-| 连接数 | 4、64、256；持久连接，每个连接同时只保留一个未完成请求 |
-| 样本 | 每种情况重复三次，每次五秒；轮换顺序 |
-| 部署位置 | 同一个独立 Linux 客户端容器，共享 PostgreSQL 的网络命名空间 |
-| 计时前 | 建立连接、比较解码后的行，然后预热每个连接 |
-| 结果约定 | 完整 JSON 行、输入顺序、重复项、空值、缺失键、空输入及全空值输入 |
-| 测量指标 | Requests/s、延迟分位数、客户端 CPU、服务器 CPU/内存、缓存计数器 |
+Node.js 和 Go 会解码 RESP JSON 行；这些客户端开销计入计时。历史 SQL mget 比较均标注为 2.x 数据。
 
 默认共 162 个样本，计时部分约 14 分钟，另加初始化时间。脚本在成功或失败后均移除自己的容器。短时间正确性检查：
 
@@ -51,7 +41,7 @@ CONNECTIONS=4 BATCHES=1,16,64 REPEATS=1 DURATION_SECONDS=1 \
   ./examples/benchmark.sh all > smoke.json
 ```
 
-将 `all` 替换为 `node` 或 `go`，即可用相同默认参数选择单一客户端。可覆盖 `CONNECTIONS`、`BATCHES`、`REPEATS`、`DURATION_SECONDS` 和 Go 的 `GOMAXPROCS`。Node.js 使用一个事件循环线程，Go 默认使用八个线程。Node 的 SQL mget 将返回数组包装为 JSON，而 pgx 解码 PostgreSQL 文本数组。这些客户端成本都计入计时。
+Node.js 和 Go 会解码 RESP JSON 行；这些客户端开销计入计时。历史 SQL mget 比较均标注为 2.x 数据。
 
 相同工作负载并不意味着协议可以互换：RESP 工作进程使用配置的数据库角色，不加入调用者的 SQL 事务或快照。详见 [RESP 约定](TECHNICAL.md#optional-resp2-endpoint)。统一比较测量的是热读取。冷读取、读写混合与写入开销诊断仍由独立的 `node-workload` 提供。
 

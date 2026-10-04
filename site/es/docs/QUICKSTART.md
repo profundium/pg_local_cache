@@ -4,7 +4,7 @@ lang: es
 translation_key: QUICKSTART
 title: Prueba pg_local_cache localmente
 seo_title: "Prueba localmente una caché de filas de PostgreSQL | pg_local_cache"
-description: Ejecuta pg_local_cache 2.0 en PostgreSQL desechable, lee filas de ejemplo, inspecciona los aciertos de caché, prueba actualizaciones y elimina la demo sin cambiar una base de datos existente.
+description: "Ejecuta pg_local_cache 3.0 en PostgreSQL desechable, lee filas de ejemplo por RESP, revisa aciertos de caché, prueba actualizaciones y elimina la demo sin modificar una base existente."
 section: Inicio rápido
 permalink: /es/docs/QUICKSTART.html
 last_modified_at: "2026-09-16"
@@ -12,7 +12,7 @@ last_modified_at: "2026-09-16"
 
 # Prueba pg_local_cache localmente {#try-pg_local_cache-locally}
 
-Esta demo compila pg_local_cache desde tu copia de trabajo en un servidor PostgreSQL 16 separado. No lo instala en un servidor PostgreSQL existente.
+Esta demo construye pg_local_cache desde tu copia en un servidor PostgreSQL 16 independiente. No lo instala en un servidor PostgreSQL existente. El ejemplo de lectura usa el listener RESP configurado mediante la capa de Compose.
 
 Necesitas Git, Docker y Docker Compose con compatibilidad con `up --wait`. La imagen se compila desde el código fuente.
 
@@ -21,10 +21,10 @@ Necesitas Git, Docker y Docker Compose con compatibilidad con `up --wait`. La im
 ```bash
 git clone https://github.com/profundium/pg_local_cache.git
 cd pg_local_cache
-docker compose -f examples/compose.yaml up --build --wait
+docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build --wait
 ```
 
-La demo enlaza PostgreSQL en `127.0.0.1:55432`, no tiene listener RESP ni volumen persistente y almacena los datos en tmpfs local del contenedor. Detener el contenedor descarta sus datos. `demo-only` es para esta demo de loopback; usa tus propias credenciales en producción.
+La demo enlaza PostgreSQL y RESP a los puertos de loopback `55432` y `56379`, no tiene un volumen persistente y almacena los datos en tmpfs local del contenedor. La capa RESP enlaza dentro de la red del contenedor y habilita explícitamente su listener de demostración en claro. Al detener el contenedor se descartan los datos. `demo-only` y el token RESP público son solo para esta demo de loopback; usa tus propias credenciales en producción.
 
 Si el puerto 55432 está ocupado, define `PGLC_DEMO_PORT` antes de iniciar Compose y mantenlo definido al ejecutar el ejemplo de Node.js:
 
@@ -32,27 +32,20 @@ Si el puerto 55432 está ocupado, define `PGLC_DEMO_PORT` antes de iniciar Compo
 export PGLC_DEMO_PORT=55433
 ```
 
-## Lee como un rol de aplicación {#read-as-an-application-role}
+## Leer por RESP {#read-as-an-application-role}
 
 La configuración crea 4.096 filas en `public.items`. Solo esa tabla está asociada a la caché. El rol `demo` no es superusuario.
 
 ```bash
-docker compose -f examples/compose.yaml exec -T postgres \
-  psql -X -v ON_ERROR_STOP=1 -U demo -d pglc_demo <<'SQL'
-SELECT unnest(local_cache.mget(
-  'public.items'::regclass,
-  ARRAY[42, 7, 42, NULL, 999999]::bigint[]
-));
-SELECT unnest(local_cache.mget(
-  'public.items'::regclass,
-  ARRAY[42, 7, 42, NULL, 999999]::bigint[]
-));
-SQL
+export REDISCLI_AUTH=DemoRespToken_0123456789abcdef0123456789
+redis-cli -2 -p 56379 MGET \
+  'CRUD:pglc_demo.public.items:{"id":42}' \
+  'CRUD:pglc_demo.public.items:{"id":7}' \
+  'CRUD:pglc_demo.public.items:{"id":42}' \
+  'CRUD:pglc_demo.public.items:{"id":999999}'
 ```
 
-Ambas llamadas devuelven las mismas filas ordenadas. La primera y tercera posiciones se refieren a la fila 42. Las dos últimas posiciones son `NULL` SQL: una entrada es nula y la clave 999999 no existe. En psql, los valores nulos SQL aparecen en blanco de forma predeterminada.
-
-La función devuelve **`text[]`**. El `unnest` anterior muestra una entrada del array por línea.
+La respuesta conserva el orden de las claves y los duplicados. La primera y la tercera posición corresponden a la fila 42; la última posición es RESP null porque la clave 999999 no existe. Una solicitud RESP omite las claves de entrada nulas; los helpers del cliente pueden restaurar esas posiciones cuando haga falta.
 
 Inspecciona los contadores como administrador de la base de datos:
 
@@ -63,7 +56,7 @@ docker compose -f examples/compose.yaml exec -T postgres \
   -c 'SELECT local_cache.stats();'
 ```
 
-En esta demo recién creada, `local_cache.health()` debe indicar `ready: true`, y repetir las lecturas debe aumentar `sql_cache_hits`. Si los aciertos permanecen en cero, inspecciona `sql_cache_misses`, `sql_cache_fills` y `sql_cache_bypasses` usando la [guía de invalidación](cache-invalidation.md#inspect-the-cause-of-a-miss).
+En esta demo recién creada, `local_cache.health()` debe indicar `ready: true`, y repetir las lecturas debe aumentar `cache_hits`. Si hace falta, revisa `cache_misses`, `database_reads` y `cache_enabled` en `local_cache.stats()` y `local_cache.health()`.
 
 ## Comprueba el commit y el rollback {#check-commit-and-rollback}
 
@@ -74,22 +67,22 @@ npm --prefix examples/node-postgres ci --ignore-scripts
 npm --prefix examples/node-postgres run demo
 ```
 
-La prueba abre conexiones de lectura y escritura separadas. Comprueba un acierto caliente, el orden de entrada, claves duplicadas y ausentes, una actualización no confirmada, la lectura de los propios cambios, el rollback y una actualización confirmada. Termina con código distinto de cero si falla una aserción.
+La prueba usa RESP para las lecturas y PostgreSQL para las escrituras. Comprueba un acierto caliente, el orden de entrada, claves duplicadas y ausentes, la invalidación de caché y la visibilidad de las actualizaciones confirmadas. Los workers RESP usan un rol PostgreSQL configurado y no comparten la transacción SQL ni la instantánea de la aplicación.
 
-Consulta el [recorrido SQL con dos sesiones](cache-invalidation.md) o la [explicación de la consulta de Node.js](node-postgres.md).
+Consulta la [guía de invalidación de caché](cache-invalidation.md) o la [explicación de consultas de Node.js](node-postgres.md).
 
 ## Conecta tu aplicación {#connect-your-application}
 
-- [Node.js](node-postgres.md): usa tu conexión o pool de `pg` existente.
-- [Go](go.md): conéctate con `pgx` y descodifica las filas devueltas.
-- [RESP](resp.md): habilita el endpoint opcional y conéctate con un cliente Redis.
+- [Node.js](node-postgres.md): usa RESP para lecturas en caché y `pg` para escrituras SQL.
+- [Go](go.md): usa RESP para lecturas en caché y `pgx` para escrituras SQL.
+- [RESP](resp.md): conecta con un cliente Redis.
 
-A continuación, [compara la misma carga de trabajo SQL y RESP](BENCHMARKS.md#run-the-same-comparison-on-every-client). Para problemas de resultados o configuración, abre un [informe de carga de trabajo](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml) con tu entorno y el JSON del benchmark o el registro de errores.
+A continuación, [compara la misma carga de SQL preparado y RESP](BENCHMARKS.md#run-the-same-comparison-on-every-client). Para informar de resultados o problemas de configuración, abre un [informe de carga](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml) con el entorno, el JSON del benchmark o el registro de errores.
 
 ## Elimina la demo {#remove-the-demo}
 
 ```bash
-docker compose -f examples/compose.yaml down
+docker compose -f examples/compose.yaml -f examples/compose.resp.yaml down
 ```
 
 La imagen Docker compilada localmente queda disponible para otra ejecución. No es necesario reiniciar ni restaurar el servicio PostgreSQL del host.

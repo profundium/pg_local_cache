@@ -3,8 +3,8 @@ layout: doc
 lang: zh
 translation_key: batch-primary-key-lookups
 title: 批量查找 PostgreSQL 主键
-seo_title: 批量查找 PostgreSQL 主键 | pg_local_cache
-description: 用一次参数化 PostgreSQL 查询替代 N+1 主键读取，按需保留输入位置，并比较显式 pg_local_cache mget 路径。
+seo_title: "使用 ANY 和 RESP MGET 批量查找 PostgreSQL 主键"
+description: "用一次参数化 PostgreSQL 查询替代 N+1 主键读取，按需保留输入位置，并与经过身份验证的 RESP MGET 比较。"
 section: 指南
 permalink: /zh/docs/batch-primary-key-lookups.html
 last_modified_at: '2026-09-16'
@@ -44,18 +44,15 @@ ORDER BY requested.position;
 
 `WITH ORDINALITY` 保留重复项和 `NULL` 位置；左连接为缺失键返回空的 `row`。对需要明确位置对齐的客户端而言，这是有用的基线。[node-postgres 示例](node-postgres.md)介绍如何在客户端恢复同样的约定。
 
-## 何时适合使用 mget {#when-mget-is-the-right-alternative}
+## 何时适合使用 RESP `MGET` {#when-mget-is-the-right-alternative}
 
-对于按主键读取完整行的场景，`pg_local_cache` 提供显式且有界的批量 API：
+按主键读取完整行时，`pg_local_cache` 提供经过身份验证的 RESP2 `MGET` 命令。键由关联表的数据库、模式、表和主键值组成：
 
-```sql
-SELECT local_cache.mget(
-  'public.items'::regclass,
-  $1::bigint[]
-) AS rows;
+```text
+MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
 ```
 
-返回的 `text[]` 保留输入顺序与重复项。输入 `NULL` 和缺失行产生位置对应的 `NULL` 元素。每次调用最多接受 1,024 个键；函数可能根据事务、快照、映射与行大小规则绕过缓存或未命中，并回退到 PostgreSQL，而不会改变结果约定。它返回序列化的整行，因此需要投影、连接、主键以外的过滤条件或不受此上限约束的批次时，应使用 `ANY` 或带 ordinality 的查询。
+响应保留键顺序和重复项；缺失行返回 null。每个请求最多接受 1,024 个键，并返回完整 JSON 行。RESP worker 使用配置的数据库角色，不共享调用方的 SQL 事务或快照。需要投影、连接、主键以外的过滤条件或 SQL 事务语义时，请使用 SQL `ANY` 或 ordinality 查询。
 
 ## GraphQL、DataLoader 与 N+1 读取 {#graphql-dataloader-and-n1-reads}
 
@@ -63,4 +60,4 @@ SELECT local_cache.mget(
 
 DataLoader 的[请求内记忆化](https://github.com/graphql/dataloader#caching-per-request)与 PostgreSQL 共享行缓存不同。每个请求应创建自己的 loader，并在该请求中发生修改后清除受影响的条目。PostgreSQL 的失效机制无法清除已经存放在 JavaScript loader 中的值。保留应用授权检查；`pg_local_cache` 不支持 RLS 表。
 
-运行[快速开始](QUICKSTART.md)，然后在[基准测试](BENCHMARKS.md)中比较两种读取路径。[技术参考](TECHNICAL.md#sql-mget-api)定义 API；[事务指南](cache-invalidation.md)说明写入行为。
+运行[快速开始](QUICKSTART.md)，然后在[基准测试](BENCHMARKS.md)中比较两种读取路径。[技术参考](TECHNICAL.md#optional-resp2-endpoint)定义 API；[事务指南](cache-invalidation.md)说明写入行为。

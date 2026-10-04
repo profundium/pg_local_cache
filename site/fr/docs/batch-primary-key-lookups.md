@@ -3,8 +3,8 @@ layout: doc
 lang: fr
 translation_key: batch-primary-key-lookups
 title: Recherches PostgreSQL par clé primaire en lots
-seo_title: "Recherches PostgreSQL par clé primaire en lots avec ANY et mget"
-description: Remplacez les lectures de clés primaires N+1 par une requête PostgreSQL paramétrée, conservez les positions d'entrée si nécessaire et comparez le chemin mget explicite de pg_local_cache.
+seo_title: "Recherches PostgreSQL par clé primaire en lots avec ANY et RESP MGET"
+description: "Remplacez les lectures N+1 par clé primaire par une requête PostgreSQL paramétrée, préservez les positions d’entrée si nécessaire et comparez avec RESP MGET authentifié."
 section: Guides
 permalink: /fr/docs/batch-primary-key-lookups.html
 last_modified_at: "2026-09-16"
@@ -59,26 +59,15 @@ bonne référence pour un client qui a besoin d'un alignement explicite.
 Consultez [l'exemple node-postgres](node-postgres.md) pour restaurer le même
 contrat côté client.
 
-## Quand `mget` est la bonne alternative {#when-mget-is-the-right-alternative}
+## Quand RESP `MGET` convient {#when-mget-is-the-right-alternative}
 
-Pour des lignes complètes par clé primaire, `pg_local_cache` offre une API de
-lots explicite et bornée :
+Pour lire des lignes complètes par clé primaire, `pg_local_cache` propose la commande RESP2 authentifiée `MGET`. Les clés utilisent la base, le schéma, la table et les valeurs de clé primaire de la table associée :
 
-```sql
-SELECT local_cache.mget(
-  'public.items'::regclass,
-  $1::bigint[]
-) AS rows;
+```text
+MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
 ```
 
-Le tableau `text[]` renvoyé conserve l'ordre d'entrée et les doublons. Les
-entrées `NULL` et les lignes absentes produisent des éléments `NULL` alignés.
-Les appels acceptent au plus 1 024 clés, et la fonction peut contourner ou
-manquer le cache selon les règles de transaction, de snapshot, de mapping et
-de taille de ligne ; elle revient à PostgreSQL sans changer le contrat de
-résultat. Elle renvoie des lignes complètes sérialisées ; utilisez donc `ANY`
-ou la requête avec ordinality si vous avez besoin d'une projection, de
-jointures, de filtres au-delà de la clé ou d'un lot non borné.
+La réponse conserve l’ordre des clés et les doublons ; les lignes absentes renvoient null. Chaque requête accepte au plus 1 024 clés et renvoie des lignes JSON complètes. Les workers RESP utilisent le rôle de base de données configuré et ne partagent ni la transaction SQL ni le snapshot de l’appelant. Utilisez SQL `ANY` ou la requête avec ordinality pour les projections, jointures, filtres supplémentaires ou la sémantique transactionnelle SQL.
 
 ## GraphQL, DataLoader et lectures N+1 {#graphql-dataloader-and-n1-reads}
 
@@ -95,6 +84,6 @@ dans un loader JavaScript. Conservez les contrôles d'autorisation applicatifs ;
 `pg_local_cache` ne prend pas en charge les tables RLS.
 
 Lancez le [démarrage rapide](QUICKSTART.md), puis comparez les deux chemins de
-lecture dans les [benchmarks](BENCHMARKS.md). La [référence technique](TECHNICAL.md#sql-mget-api)
+lecture dans les [benchmarks](BENCHMARKS.md). La [référence technique](TECHNICAL.md#optional-resp2-endpoint)
 définit l'API ; le [guide des transactions](cache-invalidation.md) couvre les
 écritures.

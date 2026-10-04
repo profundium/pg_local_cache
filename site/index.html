@@ -4,7 +4,7 @@ lang: en
 translation_key: home
 title: "PostgreSQL row cache extension | pg_local_cache"
 seo_title: "PostgreSQL Row Cache Extension | pg_local_cache"
-description: Cache PostgreSQL primary-key rows in shared memory with explicit SQL mget and transaction-aware invalidation. Try the local demo and compare it with batched SQL.
+description: Cache PostgreSQL primary-key rows in shared memory and read them with authenticated RESP MGET. Ordinary SQL continues to use PostgreSQL, and writes invalidate affected cache entries.
 image: /assets/social-card.png
 last_modified_at: "2026-09-22"
 home: true
@@ -17,12 +17,12 @@ permalink: /
   <section id="sql-api" class="page-section hero" aria-labelledby="hero-title">
     <div class="hero-copy">
       <h1 id="hero-title">A row cache<br>inside <span>PostgreSQL.</span></h1>
-      <p>Read rows by primary key with SQL <code>mget</code> or RESP. PostgreSQL writes automatically invalidate affected cache entries.</p>
+      <p>Read rows by primary key over authenticated RESP MGET. PostgreSQL writes automatically invalidate affected cache entries.</p>
       <div class="hero-actions">
         <a class="button primary" href="{{ '/docs/QUICKSTART.html' | prepend: locale.prefix | relative_url }}">Try locally <span aria-hidden="true">→</span></a>
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Compare with SQL <span aria-hidden="true">→</span></a>
       </div>
-      <p class="hero-note">Explicit SQL API · PostgreSQL 14–18 · Open source</p>
+      <p class="hero-note">Authenticated RESP API · PostgreSQL 14–18 · Open source</p>
     </div>
     <figure class="hero-benchmark" aria-label="Local single-key benchmark: RESP compared with SQL">
       <p class="benchmark-label">Measured locally · 15 Sep 2026</p>
@@ -30,9 +30,9 @@ permalink: /
       <p class="benchmark-gain"><strong>3.31×</strong> the prepared SQL throughput<br>in this single-key comparison</p>
       <dl class="benchmark-baselines">
         <div><dt>Prepared SQL</dt><dd>253,790 <span>req/s</span></dd></div>
-        <div><dt>SQL mget</dt><dd>186,296 <span>req/s</span></dd></div>
+        <div><dt>2.x SQL mget (removed in 3.0.0)</dt><dd>186,296 <span>req/s</span></dd></div>
       </dl>
-      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 connections.<br>Warm cache, 1 key/request. Median of 3 × 5 seconds.<br>SQL mget was slower here; batch results differ.</figcaption>
+      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 connections.<br>This historical 2.x SQL mget lane was removed in 3.0.0; batch results differ.</figcaption>
       <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">Results, raw data &amp; conditions <span aria-hidden="true">→</span></a>
     </figure>
   </section>
@@ -43,15 +43,13 @@ permalink: /
       <p>An eligible hit returns the stored row. A miss or bypass reads the source table. Your ordinary <code>SELECT</code> queries keep their existing path.</p>
     </div>
     <div class="read-path-grid">
-    <div class="terminal" aria-label="PostgreSQL mget example">
-      <div class="terminal-bar"><strong>psql</strong> │ primary-key reads</div>
+    <div class="terminal" aria-label="RESP MGET example">
+      <div class="terminal-bar"><strong>RESP2</strong> │ primary-key reads</div>
       <pre><code><span class="comment">-- Attach your table once.</span>
 <span class="sql">SELECT</span> local_cache.attach_table('public.items');
 
 <span class="comment">-- Read rows by primary key.</span>
-<span class="sql">SELECT</span> local_cache.mget(
-  'public.items', ARRAY[42, 7]::bigint[]
-);</code></pre>
+MGET CRUD:pglc_demo.public.items:{"id":42} CRUD:pglc_demo.public.items:{"id":7}</code></pre>
       <p class="terminal-links"><a href="{{ '/docs/node-postgres.html' | prepend: locale.prefix | relative_url }}">Node.js example</a><a href="{{ '/docs/go.html' | prepend: locale.prefix | relative_url }}">Go example</a><a href="{{ '/docs/resp.html' | prepend: locale.prefix | relative_url }}">RESP example</a></p>
     </div>
     {% include diagrams/read-path.html id="home-read" %}
@@ -60,7 +58,7 @@ permalink: /
   </section>
 
   <section class="proof-rail" aria-label="Requirements and behavior">
-    <div class="proof-item"><strong>SQL mget</strong><p>Up to 1,024 keys per call. Order, duplicates, and NULL positions are preserved.</p></div>
+    <div class="proof-item"><strong>RESP MGET</strong><p>Authenticated and bounded to 1,024 keys per request. Missing rows return null.</p></div>
     <div class="proof-item"><strong>Ordinary writes</strong><p>INSERT, UPDATE, and DELETE invalidate affected entries.</p></div>
     <div class="proof-item"><strong>Fixed capacity</strong><p>Allocate the shared row cache at PostgreSQL startup.</p></div>
     <div class="proof-item"><strong>Snapshot checks</strong><p>Ineligible reads use the source table under PostgreSQL visibility rules.</p></div>
@@ -70,7 +68,7 @@ permalink: /
     <div class="page-section section-grid">
       <div class="section-intro">
         <h2 id="benchmark-title">Run the same test.<br>On every client.</h2>
-        <p>Node.js and Go. Prepared SQL, SQL mget, and RESP MGET.</p>
+        <p>Node.js and Go. Prepared SQL and RESP MGET.</p>
       </div>
       <div>
         <p>One runner uses the same keys, batch sizes, connection counts, duration, and result checks. Compare throughput, latency, and PostgreSQL CPU and memory on your machine.</p>
@@ -84,7 +82,7 @@ permalink: /
     <div class="fit-columns">
       <section class="fit-group">
         <h3>Worth measuring</h3>
-        <ul><li>Repeated complete primary-key lookups.</li><li>A small hot set of whole rows.</li><li>READ COMMITTED on one writable primary.</li><li>An application that can call the explicit SQL API.</li></ul>
+        <ul><li>Repeated complete primary-key lookups.</li><li>A small hot set of whole rows.</li><li>READ COMMITTED on one writable primary.</li><li>An application that can use authenticated RESP MGET.</li></ul>
       </section>
       <section class="fit-group">
         <h3>Keep ordinary SQL</h3>
@@ -101,7 +99,7 @@ permalink: /
       <button class="copy-button" type="button" data-copy="demo-command" aria-live="polite">Copy</button>
       <pre id="demo-command"><code>git clone https://github.com/profundium/pg_local_cache.git
 cd pg_local_cache
-docker compose -f examples/compose.yaml up --build --wait</code></pre>
+docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build --wait</code></pre>
     </div>
     <p class="quick-start-more"><a href="{{ '/docs/QUICKSTART.html#read-as-an-application-role' | prepend: locale.prefix | relative_url }}">Read sample rows and check cache hits</a>. Already cloned the repository? Run the last command from its root. For an existing server, use the <a href="{{ '/docs/INSTALL_EXISTING.html' | prepend: locale.prefix | relative_url }}">installation guide</a>.</p>
     <p class="quick-start-more">Installing on an existing server requires a PostgreSQL restart.</p>
@@ -124,9 +122,9 @@ docker compose -f examples/compose.yaml up --build --wait</code></pre>
     <h2 id="faq-title">Before you try it</h2>
     <div class="faq-list">
       <details><summary>Does this replace shared_buffers?</summary><p>No. PostgreSQL caches database pages. This extension separately caches serialized whole rows by primary key. See the <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">read-path comparison</a>.</p></details>
-      <details><summary>Does it cache ordinary SELECT queries?</summary><p>No. Only explicit <code>local_cache.mget</code> calls use the SQL cache. Your existing queries keep PostgreSQL's normal execution path.</p></details>
-      <details><summary>Does it replace Redis?</summary><p>No. The optional RESP2 endpoint is limited. There is no general-purpose Redis command set, TTL, pub/sub, or distributed coordination. Compare the <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">PostgreSQL and Redis cache-aside paths</a>.</p></details>
-      <details><summary>How do I check updates and rollback?</summary><p>The <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">invalidation guide</a> includes a two-session test. The runnable example checks uncommitted writes, read-your-writes, rollback, and committed updates.</p></details>
+      <details><summary>Does it cache ordinary SELECT queries?</summary><p>No. Only authenticated RESP MGET uses the shared row cache. Your existing queries keep PostgreSQL’s normal execution path.</p></details>
+      <details><summary>Does it replace Redis?</summary><p>No. The RESP2 endpoint is limited. There is no general-purpose Redis command set, TTL, pub/sub, or distributed coordination. Compare the <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">PostgreSQL and Redis cache-aside paths</a>.</p></details>
+      <details><summary>How do I check updates and rollback?</summary><p>The <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">invalidation guide</a> explains write behavior. The <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">upgrade guide</a> covers 2.x to 3.0.0.</p></details>
     </div>
   </section>
 </main>

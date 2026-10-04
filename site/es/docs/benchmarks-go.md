@@ -11,6 +11,9 @@ last_modified_at: "2026-09-16"
 
 # Benchmarks de Go: SQL y RESP {#go-benchmarks-sql-and-resp}
 
+Los valores de SQL mget de las tablas siguientes son resultados históricos de 2.x. Esta interfaz SQL se eliminó en 3.0.0; las lecturas en caché compatibles usan RESP MGET.
+
+
 [Resumen](BENCHMARKS.md) · [Node.js](benchmarks-node.md) · [Go y RESP](benchmarks-go.md)
 
 Go 1.27.1 con pgx 5.11.0 y un cliente RESP2 de la biblioteca estándar; `GOMAXPROCS=8`.
@@ -22,7 +25,7 @@ El cliente Go se ejecuta dentro de la VM Linux, en un contenedor separado que co
 
 Mediana de **solicitudes/s**, tres muestras de cinco segundos por caso:
 
-| Claves/solicitud | Conexiones | SQL preparado | SQL mget | RESP MGET |
+| Claves/solicitud | Conexiones | SQL preparado | SQL mget 2.x (eliminado en 3.0.0) | RESP MGET |
 |---:|---:|---:|---:|---:|
 | 1 | 64 | 277,088 | 211,251 | 722,133 |
 | 1 | 256 | 253,790 | 186,296 | 839,678 |
@@ -51,7 +54,7 @@ Con **256 conexiones**, medianas de las mismas muestras:
 
 A través de los puertos publicados por Docker, con **64 conexiones**; medianas de tres muestras de cinco segundos, en solicitudes/s:
 
-| Claves/solicitud, 64 conexiones | SQL preparado | SQL mget | RESP MGET |
+| Claves/solicitud, 64 conexiones | SQL preparado | SQL mget 2.x (eliminado en 3.0.0) | RESP MGET |
 |---:|---:|---:|---:|
 | 1 | 49,194 | 48,010 | 52,426 |
 | 64 | 14,324 | 15,751 | 16,240 |

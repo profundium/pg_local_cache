@@ -6,9 +6,11 @@ title: PostgreSQL 缓存失效：延迟填充竞态
 description: 逐步分析旧读取如何在提交后重新填入已删除的缓存键，并理解发布屏障、快照、回滚与请求本地缓存。
 permalink: /zh/blog/cache-aside-late-fill/
 date: '2026-09-22'
-last_modified_at: '2026-09-22'
+last_modified_at: "2026-10-04"
 topic: correctness
 ---
+
+> **2026-10-04 版本说明：** SQL `mget` 已在 3.0.0 中移除；现在由 RESP `MGET` 提供替代功能。
 
 # 缓存失效与延迟填充竞态 {#cache-invalidation-and-the-late-fill-race}
 
@@ -32,7 +34,7 @@ TTL 可以限制该值保持可用的时间，却无法使第 4 步变得正确�
 
 缓存填充需要证明：结果在发布时仍然符合使用条件。在 `pg_local_cache` 2.0 中，写入为受影响的键或关系设置屏障；填充携带代次信息，存在记录的缓存项携带元组可见性信息。代次变化可以拒绝旧填充。无法安全使用缓存项的读取会回退到 PostgreSQL。
 
-这些检查属于一条特定的 PostgreSQL 读取路径，不会把可选 RESP 接口变成通用 Redis 服务器，也不会使应用已经复制到其他位置的值失效。
+这些检查属于一条特定的 PostgreSQL 读取路径，不会把RESP 接口变成通用 Redis 服务器，也不会使应用已经复制到其他位置的值失效。
 
 ## 同时测试回滚与提交 {#test-transactions}
 

@@ -27,7 +27,7 @@ for mode in ('all', 'node-workload'):
         assert {(r['driver'], r['mode'], r['batch'], r['clients'], r['repeat']) for r in data['results']} == {
             (driver, variant, batch, 4, 1)
             for driver in ('node-json', 'go-pgx')
-            for variant in ('postgres-any', 'mget', 'resp-mget')
+            for variant in ('postgres-any', 'resp-mget')
             for batch in (1, 16, 64)
         }
     for row in data['results']:

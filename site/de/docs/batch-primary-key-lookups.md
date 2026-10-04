@@ -3,8 +3,8 @@ layout: doc
 lang: de
 translation_key: batch-primary-key-lookups
 title: Batch-Abfragen von PostgreSQL per Primärschlüssel
-seo_title: "Batch-Abfragen von PostgreSQL-Primärschlüsseln mit ANY und mget"
-description: Ersetzen Sie N+1-Abfragen per Primärschlüssel durch eine parametrisierte PostgreSQL-Abfrage, erhalten Sie bei Bedarf Eingabepositionen und vergleichen Sie den expliziten pg_local_cache-mget-Pfad.
+seo_title: "Batch-Abfragen von PostgreSQL-Primärschlüsseln mit ANY und RESP MGET"
+description: "Ersetzen Sie N+1-Primärschlüsselabfragen durch eine parametrisierte PostgreSQL-Abfrage, erhalten Sie bei Bedarf Eingabepositionen und vergleichen Sie mit authentifiziertem RESP MGET."
 section: Leitfäden
 permalink: /de/docs/batch-primary-key-lookups.html
 last_modified_at: "2026-09-16"
@@ -60,26 +60,15 @@ Baseline für einen Client, der eine explizite Ausrichtung benötigt. Siehe das
 [node-postgres-Beispiel](node-postgres.md) für die clientseitige Wiederherstellung
 des gleichen Vertrags.
 
-## Wann `mget` die richtige Alternative ist {#when-mget-is-the-right-alternative}
+## Wann RESP `MGET` passt {#when-mget-is-the-right-alternative}
 
-Für vollständige Zeilen per Primärschlüssel bietet `pg_local_cache` eine
-explizite, begrenzte Batch-API:
+Für vollständige Zeilen per Primärschlüssel bietet `pg_local_cache` den authentifizierten RESP2-Befehl `MGET`. Schlüssel verwenden Datenbank, Schema, Tabelle und Primärschlüsselwerte der zugeordneten Tabelle:
 
-```sql
-SELECT local_cache.mget(
-  'public.items'::regclass,
-  $1::bigint[]
-) AS rows;
+```text
+MGET CRUD:app.public.items:{"id":42} CRUD:app.public.items:{"id":7}
 ```
 
-Das zurückgegebene `text[]` bewahrt Eingabereihenfolge und Duplikate. Eingabe-
-`NULL` und fehlende Zeilen erzeugen ausgerichtete `NULL`-Elemente. Aufrufe
-akzeptieren höchstens 1.024 Schlüssel, und die Funktion kann den Cache gemäß
-Transaktions-, Snapshot-, Zuordnungs- und Zeilengrößenregeln umgehen oder
-verfehlen; sie fällt auf PostgreSQL zurück, statt den Ergebnisvertrag zu ändern.
-Sie gibt vollständige serialisierte Zeilen zurück. Verwenden Sie daher `ANY`
-oder die Ordinalitätsabfrage, wenn Sie eine Projektion, Joins, Filter jenseits
-des Schlüssels oder einen unbegrenzten Batch benötigen.
+Die Antwort behält Schlüsselreihenfolge und Duplikate bei; fehlende Zeilen liefern null. Jede Anfrage akzeptiert höchstens 1.024 Schlüssel und liefert vollständige JSON-Zeilen. RESP-Worker verwenden die konfigurierte Datenbankrolle und teilen weder SQL-Transaktion noch Snapshot des Aufrufers. Verwenden Sie SQL `ANY` oder die Ordinality-Abfrage für Projektionen, Joins, zusätzliche Filter oder SQL-Transaktionssemantik.
 
 ## GraphQL, DataLoader und N+1-Lesevorgänge {#graphql-dataloader-and-n1-reads}
 
@@ -97,6 +86,6 @@ Autorisierungsprüfungen der Anwendung bei; `pg_local_cache` unterstützt keine
 RLS-Tabellen.
 
 Führen Sie den [Quickstart](QUICKSTART.md) aus und vergleichen Sie anschließend
-beide Lesepfade in den [Benchmarks](BENCHMARKS.md). Die [technische Referenz](TECHNICAL.md#sql-mget-api)
+beide Lesepfade in den [Benchmarks](BENCHMARKS.md). Die [technische Referenz](TECHNICAL.md#optional-resp2-endpoint)
 definiert die API; der [Transaktionsleitfaden](cache-invalidation.md) behandelt
 Schreibvorgänge.

@@ -37,6 +37,7 @@ bootstrap_database="${POSTGRES_DB:-${POSTGRES_USER:-postgres}}"
 database="${PG_LOCAL_CACHE_DATABASE:-$bootstrap_database}"
 role="${PG_LOCAL_CACHE_ROLE:-local_cache_worker}"
 bind_address="${PG_LOCAL_CACHE_BIND_ADDRESS:-0.0.0.0}"
+allow_plaintext_network="${PG_LOCAL_CACHE_ALLOW_PLAINTEXT_NETWORK:-off}"
 port="${PG_LOCAL_CACHE_PORT:-6380}"
 workers="${PG_LOCAL_CACHE_WORKERS:-8}"
 cache_entries="${PG_LOCAL_CACHE_CACHE_ENTRIES:-65536}"
@@ -64,6 +65,8 @@ runtime_token_config=""
     || fail "PG_LOCAL_CACHE_DATABASE must match POSTGRES_DB for first-run initialization"
 [[ "$bind_address" == "127.0.0.1" || "$bind_address" == "0.0.0.0" ]] \
     || fail "PG_LOCAL_CACHE_BIND_ADDRESS must be 127.0.0.1 or 0.0.0.0"
+[[ "$allow_plaintext_network" == "on" || "$allow_plaintext_network" == "off" ]] \
+    || fail "PG_LOCAL_CACHE_ALLOW_PLAINTEXT_NETWORK must be on or off"
 
 require_integer_between "PG_LOCAL_CACHE_PORT" "$port" 0 65535
 require_integer_between "PG_LOCAL_CACHE_WORKERS" "$workers" 1 32
@@ -145,6 +148,8 @@ temporary_config="${runtime_config}.tmp"
     printf "pg_local_cache.database = '%s'\n" "$database"
     printf "pg_local_cache.role = '%s'\n" "$role"
     printf "pg_local_cache.bind_address = '%s'\n" "$bind_address"
+    # Non-loopback plaintext binds require an explicit opt-in; the shipped demo scopes the listener to its container network.
+    printf "pg_local_cache.allow_plaintext_network = %s\n" "$allow_plaintext_network"
     printf "pg_local_cache.port = %s\n" "$port"
     printf "pg_local_cache.workers = %s\n" "$workers"
     printf "pg_local_cache.cache_entries = %s\n" "$cache_entries"

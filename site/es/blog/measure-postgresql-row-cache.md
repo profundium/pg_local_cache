@@ -6,9 +6,11 @@ title: "Cuándo ayuda una caché de filas de PostgreSQL: mide toda la lectura"
 description: Diseña una comparación justa de cachés de filas de PostgreSQL con SQL preparado, SQL mget y RESP MGET. Separa lecturas calientes, fallos, tamaños de lote, escrituras y costes del cliente.
 permalink: /es/blog/measure-postgresql-row-cache/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: performance
 ---
+
+> **Nota del 2026-10-04:** SQL `mget` se eliminó en 3.0.0; RESP `MGET` lo sustituye.
 
 # Cuándo ayuda una caché de filas de PostgreSQL {#when-a-postgresql-row-cache-helps}
 

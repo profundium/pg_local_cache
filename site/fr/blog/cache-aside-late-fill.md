@@ -6,9 +6,11 @@ title: "Invalidation du cache PostgreSQL : la course au remplissage tardif"
 description: Parcourez une course cache-aside où une ancienne lecture remplit une clé supprimée après le commit. Comprenez la validation des remplissages, les snapshots, le rollback et les caches locaux aux requêtes.
 permalink: /fr/blog/cache-aside-late-fill/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: correctness
 ---
+
+> **Note du 04/10/2026 :** SQL `mget` a été supprimé en 3.0.0 ; RESP `MGET` le remplace.
 
 # Invalidation du cache et course au remplissage tardif {#cache-invalidation-and-the-late-fill-race}
 
@@ -49,7 +51,7 @@ ancien remplissage. Une lecture qui ne peut pas utiliser une entrée de manière
 sûre revient à PostgreSQL.
 
 Ces vérifications appartiennent à un chemin de lecture PostgreSQL précis. Elles
-ne transforment pas le point de terminaison RESP optionnel en serveur Redis
+ne transforment pas le point de terminaison RESP en serveur Redis
 généraliste et n'invalident pas les valeurs qu'une application a déjà copiées
 ailleurs.
 

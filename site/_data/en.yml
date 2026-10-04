@@ -31,8 +31,8 @@ topics:
   correctness: Correctness
   application: Application design
 read_diagram:
-  title: The SQL mget read path
-  description: The application calls local_cache.mget inside PostgreSQL. After eligibility and snapshot checks, a cache hit returns the stored whole-row payload. A miss or bypass reads the source table. Both paths return rows through the same PostgreSQL connection.
+  title: The RESP MGET read path
+  description: The application sends authenticated RESP MGET. An eligible cache hit returns the stored whole-row payload. A miss or bypass reads the source table through the configured worker role and returns the row over RESP.
   application: Application
   checks: Eligibility + snapshot
   hit: Hit
@@ -41,7 +41,7 @@ read_diagram:
   row: row
   source: Source
   table: table
-  caption: Both paths return serialized whole rows over the same PostgreSQL connection. An eligible source-table read may fill the cache.
+  caption: Both paths return whole rows over RESP. A source-table read can fill the cache.
 transaction_diagram:
   title: What readers see during an update
   description: Under READ COMMITTED, start with revision zero. A transaction updates it to one. The writer sees one through a source-table read, while another session still sees zero. After COMMIT, a new statement in the other session sees one. After ROLLBACK, it still sees zero.

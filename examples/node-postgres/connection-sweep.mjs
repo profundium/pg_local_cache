@@ -8,7 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import pg from 'pg';
 import { integer, latency } from './benchmark.mjs';
-import { demoConnection, getRows, MGET_SQL, ANY_SQL } from './queries.mjs';
+import { demoConnection, getRows, ANY_SQL } from './queries.mjs';
 
 const exec = promisify(execFile);
 const seconds = integer('DURATION_SECONDS', 5, 120);
@@ -20,7 +20,6 @@ assert.ok(batches.length && new Set(batches).size === batches.length && batches.
 const connection = demoConnection();
 const admin = new pg.Client(demoConnection(true));
 const directory = await mkdtemp(join(tmpdir(), 'pglc-sweep-'));
-const counters = async () => (await admin.query('SELECT local_cache.stats() AS s')).rows[0].s;
 let container;
 async function serverCPU() {
   const { stdout } = await exec('docker', ['exec', container.trim(), 'cat', '/sys/fs/cgroup/cpu.stat']);
@@ -29,12 +28,12 @@ async function serverCPU() {
   return Number(usage[1]) / 1e6;
 }
 
-async function nodeRun(clients, keys, cached) {
+async function nodeRun(clients, keys) {
   const pool = Array.from({ length: clients }, () => new pg.Client(connection));
   try {
     await Promise.all(pool.map(client => client.connect()));
     // Prepare and warm every persistent connection before starting the clock.
-    await Promise.all(pool.map(client => getRows(client, keys, cached)));
+    await Promise.all(pool.map(client => getRows(client, keys)));
     const times = [];
     let failure;
     const cpuStart = process.cpuUsage();
@@ -43,7 +42,7 @@ async function nodeRun(clients, keys, cached) {
     await Promise.all(pool.map(async client => {
       while (!failure && performance.now() < end) {
         const before = performance.now();
-        try { await getRows(client, keys, cached); }
+        try { await getRows(client, keys); }
         catch (error) { failure = error; break; }
         times.push(performance.now() - before);
       }
@@ -60,9 +59,9 @@ async function nodeRun(clients, keys, cached) {
   }
 }
 
-async function pgbenchRun(clients, keys, cached) {
+async function pgbenchRun(clients, keys) {
   const script = join(directory, 'read.sql');
-  await writeFile(script, (cached ? MGET_SQL : ANY_SQL).replace('$1', ':keys') + ';\n');
+  await writeFile(script, ANY_SQL.replace('$1', ':keys') + ';\n');
   const threads = Math.min(clients, 8);
   const args = ['-h', connection.host, '-p', String(connection.port), '-U', connection.user,
     '-d', connection.database, '-n', '-M', 'prepared', '-c', String(clients), '-j', String(threads),
@@ -105,35 +104,26 @@ try {
   await verifier.connect();
   try {
     const keys = [42,7,42,null,999999];
-    assert.deepEqual(await getRows(verifier, keys), await getRows(verifier, keys, false));
-    await getRows(verifier, Array.from({ length: 128 }, (_, i) => i + 1), false);
+    assert.deepEqual((await getRows(verifier, keys)).map(row => row?.id), [42, 7, 42, null, null]);
     await getRows(verifier, Array.from({ length: 128 }, (_, i) => i + 1));
   } finally { await verifier.end(); }
   const results = [];
   for (let repeat = 1; repeat <= repeats; repeat++) {
     const drivers = repeat % 2 ? ['node', 'pgbench'] : ['pgbench', 'node'];
-    const modes = repeat % 2 ? ['postgres-any', 'mget'] : ['mget', 'postgres-any'];
     const levels = repeat % 2 ? connections : [...connections].reverse();
-    for (const batch of batches) for (const clients of levels) for (const driver of drivers) for (const mode of modes) {
+    for (const batch of batches) for (const clients of levels) for (const driver of drivers) {
       const keys = Array.from({ length: batch }, (_, i) => i + 1);
-      const before = await counters(admin), cpuBefore = await serverCPU();
+      const cpuBefore = await serverCPU();
       const started = performance.now();
-      const result = await (driver === 'node' ? nodeRun : pgbenchRun)(clients, keys, mode === 'mget');
+      const result = await (driver === 'node' ? nodeRun : pgbenchRun)(clients, keys);
       const cpuAfter = await serverCPU(), cpuWindow = (performance.now() - started) / 1000;
-      const after = await counters(admin);
-      const cache = Object.fromEntries(['sql_cache_hits','sql_cache_misses','sql_cache_fills','sql_cache_bypasses'].map(key => [key, Number(after[key]) - Number(before[key])]));
-      assert.ok(Object.values(cache).every(n => Number.isFinite(n) && n >= 0));
       assert.ok(result.requests > 0 && Number.isFinite(result.requests_s) && result.requests_s > 0);
       assert.ok(cpuAfter >= cpuBefore);
-      if (mode === 'mget') {
-        assert.ok(cache.sql_cache_hits >= result.requests * batch);
-        assert.equal(cache.sql_cache_misses + cache.sql_cache_fills + cache.sql_cache_bypasses, 0);
-      }
-      const row = { repeat, batch, clients, driver, mode, ...result,
+      const row = { repeat, batch, clients, driver, mode: 'postgres-any', ...result,
         server_cpu_cores: (cpuAfter - cpuBefore) / cpuWindow, server_cpu_seconds: cpuAfter - cpuBefore,
-        server_cpu_window_seconds: cpuWindow, counters: cache };
+        server_cpu_window_seconds: cpuWindow };
       results.push(row);
-      console.error(`${repeat}: batch=${batch} clients=${clients} ${driver}/${mode}: ${result.requests_s.toFixed(0)} req/s, client=${result.client_cpu_cores.toFixed(2)} CPU cores, server=${row.server_cpu_cores.toFixed(2)} cores`);
+      console.error(`${repeat}: batch=${batch} clients=${clients} ${driver}/postgres-any: ${result.requests_s.toFixed(0)} req/s, client=${result.client_cpu_cores.toFixed(2)} CPU cores, server=${row.server_cpu_cores.toFixed(2)} cores`);
     }
   }
   const { stdout: revision } = await exec('git', ['rev-parse', 'HEAD']);

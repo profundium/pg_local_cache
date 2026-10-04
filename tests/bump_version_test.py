@@ -76,6 +76,27 @@ class BumpVersionChecks(unittest.TestCase):
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, destination)
 
+        # This checkout is already on a released version. Seed the isolated
+        # fixture with an Unreleased section so the tests exercise the next bump.
+        changelog_path = self.repo / "CHANGELOG.md"
+        changelog = changelog_path.read_text(encoding="utf-8")
+        release = re.search(
+            rf"(?m)^## \[{re.escape(self.old)}\](?: - \d{{4}}-\d{{2}}-\d{{2}})?\n",
+            changelog,
+        )
+        if release is None:
+            raise AssertionError(f"missing current release section for {self.old}")
+        next_release = re.search(r"(?m)^## \[", changelog[release.end():])
+        release_end = release.end() + next_release.start() if next_release else len(changelog)
+        notes = changelog[release.end():release_end].strip()
+        if not notes:
+            raise AssertionError("current release section has no notes")
+        changelog_path.write_text(
+            changelog[:release.start()] + "## [Unreleased]\n\n" + notes + "\n\n" +
+            changelog[release.start():],
+            encoding="utf-8",
+        )
+
         command(["git", "init", "--quiet"], self.repo)
         command(["git", "config", "user.name", "Bump Version Test"], self.repo)
         command(["git", "config", "user.email", "bump-version-test@example.invalid"], self.repo)
@@ -109,7 +130,10 @@ class BumpVersionChecks(unittest.TestCase):
             project_changelog,
             rf"(?m)^## \[Unreleased\]\n\n## \[{re.escape(self.new)}\] - ",
         )
-        self.assertIn("### Added\n\n- Debian and RPM package references", project_changelog)
+        self.assertIn(
+            "### Added\n\n- Add the SIGHUP `pg_local_cache.enabled` operational kill switch.",
+            project_changelog,
+        )
         rpm_spec = (self.repo / "rpm/pg_local_cache.spec").read_text(encoding="utf-8")
         self.assertRegex(rpm_spec, rf"(?m)^Version:\s*{re.escape(self.new)}\s*$")
 

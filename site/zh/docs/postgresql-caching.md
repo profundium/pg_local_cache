@@ -20,7 +20,7 @@ last_modified_at: '2026-09-16'
 |---|---|---|
 | 保持表页与索引页为热数据 | PostgreSQL `shared_buffers` 和操作系统缓存 | 减少存储读取；SQL 仍需执行 |
 | 多次发送相同语句 | 预备语句 | 减少重复解析与规划；仍需执行 |
-| 按主键返回完整行 | `pg_local_cache` SQL `mget` | 通过显式 API 复用符合条件的整行载荷 |
+| 按主键返回完整行 | pg_local_cache RESP MGET | 通过经过身份验证的端点复用符合条件的整行 |
 | 预计算连接或聚合 | 物化视图 | 读取持久化结果；刷新决定新鲜度 |
 | 跨服务共享应用对象 | Redis 等外部缓存 | 应用管理键、TTL 和失效 |
 
@@ -32,7 +32,7 @@ last_modified_at: '2026-09-16'
 
 ### 按主键缓存整行 {#whole-rows-by-primary-key}
 
-`pg_local_cache` 在有界 PostgreSQL 共享内存中，按完整主键存储序列化的完整行。通过 `local_cache.mget('public.items'::regclass, $1::bigint[])` 访问；普通 `SELECT` 从不查询此缓存。未写入映射数据且符合条件的 `READ COMMITTED` 读取可以命中，而更严格的隔离级别、事务中的写入、恢复、并行执行或超大行会使用 PostgreSQL。在关联期间，不支持的表映射会被拒绝。这是一条特定读取路径，不是任意查询结果缓存。参阅[批量查找指南](batch-primary-key-lookups.md)、[技术约定](TECHNICAL.md)和[事务检查](cache-invalidation.md)。
+pg_local_cache 在有界 PostgreSQL 共享内存中按完整主键存储序列化整行。通过经过身份验证的 RESP MGET 访问；普通 SELECT 从不查询此缓存。符合条件且未写入映射数据的 READ COMMITTED 读取可以命中；更严格的隔离级别、事务内写入、恢复、并行执行或过大的行会使用 PostgreSQL。RESP 工作进程使用配置的数据库角色，不共享调用方的 SQL 事务或快照。关联时会拒绝不受支持的表映射。这是一条特定读取路径，不是任意查询结果缓存。参阅[批量查找指南](batch-primary-key-lookups.md)、[技术约定](TECHNICAL.md)和[事务检查](cache-invalidation.md)。
 
 ### 视图与外部缓存 {#views-and-external-caches}
 

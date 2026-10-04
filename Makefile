@@ -3,7 +3,7 @@ PGLC_SRCDIR := $(dir $(firstword $(MAKEFILE_LIST)))
 EXTENSION = pg_local_cache
 MODULE_big = pg_local_cache
 
-OBJS = src/pg_local_cache.o src/pg_local_cache_sql.o \
+OBJS = src/pg_local_cache.o \
 	src/pg_local_cache_worker.o src/resp.o src/key_codec.o \
 	src/row_payload.o
 

@@ -4,7 +4,7 @@ lang: zh
 translation_key: cache-invalidation
 title: PostgreSQL 中的事务感知缓存失效
 seo_title: PostgreSQL 中的事务感知缓存失效 | pg_local_cache
-description: 用并发 PostgreSQL 会话测试 pg_local_cache 2.0 失效，检查未提交更新、读取自身写入、回滚、已提交读取以及回退规则。
+description: "了解 RESP 行读取的触发器失效机制、已提交更新、源表读取以及独立的 SQL 事务边界。"
 section: 缓存失效
 permalink: /zh/docs/cache-invalidation.html
 last_modified_at: '2026-09-16'
@@ -18,33 +18,9 @@ last_modified_at: '2026-09-16'
 
 {% include diagrams/transaction.html id="invalidation-transaction" %}
 
-## 使用两个会话测试 {#test-with-two-sessions}
+## 检查 SQL 与 RESP 之间的失效行为 {#test-with-two-sessions}
 
-启动[本地演示](QUICKSTART.md)，在两个终端中分别执行：
-
-```bash
-docker compose -f examples/compose.yaml exec postgres \
-  psql -X -v ON_ERROR_STOP=1 -U demo -d pglc_demo
-```
-
-在会话 A 中读取行 42 并记下 revision，再读取一次以预热缓存：
-
-```sql
-SELECT (local_cache.mget('public.items'::regclass, ARRAY[42]::bigint[]))[1]::jsonb ->> 'revision';
-SELECT (local_cache.mget('public.items'::regclass, ARRAY[42]::bigint[]))[1]::jsonb ->> 'revision';
-```
-
-在会话 B 中更新该行，但保持事务打开：
-
-```sql
-BEGIN;
-UPDATE public.items SET revision = revision + 1 WHERE id = 42;
-SELECT (local_cache.mget('public.items'::regclass, ARRAY[42]::bigint[]))[1]::jsonb ->> 'revision';
-```
-
-B 能看到自己增加后的值。此读取会绕过缓存。保持 B 事务打开，在 A 中重复查询：A 必须仍看到已提交的 revision，而不是 B 的未提交值。在 B 中执行 `ROLLBACK`；A 的后续查询仍应返回原始 revision。
-
-现在在 B 中运行：
+启动[本地演示](QUICKSTART.md)。通过 RESP 读取行 42 并记下 revision。然后在 PostgreSQL 中更新该行并提交：
 
 ```sql
 BEGIN;
@@ -52,16 +28,18 @@ UPDATE public.items SET revision = revision + 1 WHERE id = 42;
 COMMIT;
 ```
 
-A 中在这次提交之后启动的查询，必须返回增加后的 revision。这是相关边界：较早启动且仍在运行的语句，无需切换到启动之后创建的新快照。PostgreSQL 的 [Read Committed](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED) 文档说明了该行为。
+关联表的触发器会在提交时使受影响的缓存行失效。下一次 RESP 读取会返回已提交的 revision。要观察回滚行为，可再次开始更新并回滚；RESP 仍会返回最后一次已提交的 revision。
 
-可运行的 [Node.js 测试](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/demo.mjs)使用独立连接验证这些观察结果。
+RESP worker 使用配置的 PostgreSQL 角色，不共享应用的 SQL 事务或快照。要检查读己之写，必须在同一应用事务中使用 SQL；该路径会照常读取源表。RESP 接口用于由独立 worker 角色执行的读取。
+
+可运行的 [Node.js 测试](https://github.com/profundium/pg_local_cache/blob/master/examples/node-postgres/demo.mjs)会检查 PostgreSQL 写入前后的 RESP 读取。
 
 ## 主动绕过缓存的情况 {#cases-that-deliberately-bypass-the-cache}
 
 `REPEATABLE READ`、`SERIALIZABLE`、恢复、并行执行，以及已经写入映射数据的事务，都使用源表路径。超大行可能成功返回，但不会被缓存。命中率接近零不一定代表安装失败：请检查工作负载和绕过计数器。
 
-如果应用需要 `SELECT ... FOR UPDATE`，应使用普通 PostgreSQL 操作；`mget` 不能替代行锁。
+若应用需要 `SELECT ... FOR UPDATE`，请使用普通 PostgreSQL 操作。RESP `MGET` 不提供行锁或 SQL 会话语义。
 
 ## 检查未命中的原因 {#inspect-the-cause-of-a-miss}
 
-以管理员身份使用 `local_cache.stats()` 和 `local_cache.health()`。比较受控测试前后的计数器快照，并将 SQL `mget` 与 RESP 计数器分开观察。主动执行 DDL 后，遵循文档中的 `reconcile_table` 或 `reconcile_all` 流程，不要假定旧映射仍然描述修改后的表。
+以管理员身份使用 `local_cache.stats()` 和 `local_cache.health()`。比较受控测试前后的计数器。缓存计数器描述 RESP 读取路径。执行预期的 DDL 更改后，请按文档运行 `reconcile_table` 或 `reconcile_all`，不要假设旧映射仍描述修改后的表。

@@ -4,9 +4,13 @@ All notable changes to pg_local_cache are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2026-10-04
 
 ### Added
+
+- Add the SIGHUP `pg_local_cache.enabled` operational kill switch.
+- Add an explicit opt-in for plaintext RESP listeners on non-loopback addresses.
+- Add an upgrade path from 2.0.4 that preserves existing trigger function OIDs.
 
 - Debian and RPM package references and package-build CI for PGDG repositories.
 - Release `.deb` and `.rpm` packages, a source tarball, `SHA256SUMS`, and build
@@ -16,6 +20,10 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ### Changed
 
+- Make the extension RESP-only; RESP `MGET` replaces SQL `local_cache.mget`.
+- Advance the global cache epoch when the kill switch is re-enabled.
+- Require `pg_local_cache.allow_plaintext_network` for non-loopback plaintext
+  listeners.
 - Move the multilingual documentation site under `site/` and keep release
   archives focused on extension source, SQL, tests, and Markdown documentation.
 - Replace legacy release helpers with the tested `scripts/bump-version.sh`
@@ -23,6 +31,7 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ### Removed
 
+- Remove SQL `local_cache.mget(regclass, anyarray)` and its SQL-only counters.
 - Remove the bespoke installer and glibc/musl binary tarballs.
 - Remove duplicate historical install SQL copies, obsolete release helpers, and
   superseded contract tests; retain current install SQL and upgrade paths.

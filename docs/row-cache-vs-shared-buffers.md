@@ -4,7 +4,7 @@ lang: en
 translation_key: row-cache-vs-shared-buffers
 title: PostgreSQL row cache vs shared_buffers
 seo_title: "PostgreSQL Row Cache vs shared_buffers | pg_local_cache"
-description: Compare PostgreSQL page caching with pg_local_cache 2.0 whole-row caching. See what a row-cache hit avoids, what it still costs, and when not to add another cache.
+description: Compare PostgreSQL page caching with pg_local_cache 3.0 whole-row caching. See what a row-cache hit avoids, what it still costs, and when not to add another cache.
 section: Read paths
 permalink: /docs/row-cache-vs-shared-buffers.html
 last_modified_at: "2026-09-16"
@@ -29,22 +29,22 @@ baseline.
 `shared_buffers` caches pages used by a query, rather than its final result set.
 A [prepared statement](https://www.postgresql.org/docs/18/sql-prepare.html)
 reuses parsing work and may reuse a plan, but PostgreSQL still executes it.
-pg_local_cache adds whole-row caching through explicit `mget` calls; it does
-not cache arbitrary SELECT results or rewrite existing queries. The
-[Node.js example](node-postgres.md) shows the two read APIs side by side.
+pg_local_cache adds whole-row caching through authenticated RESP `MGET`; it
+does not cache arbitrary SELECT results or rewrite existing queries. The
+[Node.js example](node-postgres.md) shows the separate RESP and SQL paths.
 
 ## Compare the work, not just the storage medium {#compare-the-work-not-just-the-storage-medium}
 
 | Read | Work remaining |
 |---|---|
 | Prepared primary-key SQL over warm pages | Protocol handling, plan execution, row visibility checks, and result conversion |
-| Eligible SQL mget cache hit | Protocol handling, SQL function execution, key conversion, cache synchronization, snapshot checks, and returning the stored payload |
-| SQL mget miss or bypass | The function's checks plus a source-table query; a successful eligible fill can populate the cache |
+| Eligible RESP MGET cache hit | Protocol handling, key conversion, cache synchronization, snapshot checks, and returning the stored payload |
+| RESP MGET miss or bypass | Cache checks plus a source-table query; a successful eligible fill can populate the cache |
 
 A row-cache hit avoids repeated source-table execution and whole-row
 serialization. Cache checks and synchronization also consume CPU, and a hit still
-uses a PostgreSQL connection and backend. This SQL API does not eliminate
-connection limits or connection-pool queueing.
+uses a PostgreSQL worker and its configured database role. RESP does not share
+the caller's SQL transaction or snapshot.
 
 ## Costs to include {#costs-to-include}
 
@@ -66,7 +66,7 @@ joins, ranges, and aggregation dominate. First compare an ordinary batched
 query with the application's current per-key calls. A gain from batching is
 not evidence of a gain from caching.
 
-pg_local_cache 2.0 requires explicit `mget` calls, extension installation,
+pg_local_cache 3.0 requires explicit RESP `MGET` calls, extension installation,
 and a startup preload. It rejects RLS, partitioned, and inherited tables.
 
 ## Row cache or an external cache? {#row-cache-or-an-external-cache}

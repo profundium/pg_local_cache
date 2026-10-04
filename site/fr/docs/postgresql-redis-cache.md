@@ -7,7 +7,7 @@ seo_title: "Cache-aside PostgreSQL et Redis : invalidation et courses"
 description: Utilisez PostgreSQL comme source de vérité avec un chemin cache-aside Redis, comprenez les courses de lectures obsolètes et voyez où se place pg_local_cache.
 section: Guides
 permalink: /fr/docs/postgresql-redis-cache.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
 # Cache-aside PostgreSQL et Redis {#postgresql-and-redis-cache-aside}
@@ -53,7 +53,7 @@ montre le problème analogue de remplissage tardif dans PostgreSQL.
 ## Où se place pg_local_cache {#where-pg_local_cache-fits}
 
 `pg_local_cache` est une option PostgreSQL locale plus étroite pour des lignes
-complètes indexées par clé primaire. `local_cache.mget` est explicite ; un
+complètes indexées par clé primaire. `RESP `MGET`` est explicite ; un
 `SELECT` normal et une forme de requête arbitraire ne lisent jamais le cache.
 Les triggers des tables attachées mettent en place une barrière pour les clés ou relations concernées
 sur le chemin d'écriture de la base, et les lectures éligibles peuvent revenir
@@ -73,5 +73,5 @@ invalidations et métriques séparées pour chaque couche.
 
 Lancez le [démarrage rapide](QUICKSTART.md), comparez avec la requête client
 ordinaire dans [l'exemple node-postgres](node-postgres.md) et inspectez les
-compteurs SQL et RESP séparés. Le [guide de décision sur la mise en cache](postgresql-caching.md)
+compteurs du cache et RESP. Le [guide de décision sur la mise en cache](postgresql-caching.md)
 liste les autres options PostgreSQL.

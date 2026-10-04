@@ -28,7 +28,8 @@ def main():
     args = parser.parse_args()
     text = (ROOT / 'docs/QUICKSTART.md').read_text()
     recorded = subprocess.check_output([
-        'docker', 'compose', '-f', 'examples/compose.yaml', 'exec', '-T', 'postgres',
+        'docker', 'compose', '-f', 'examples/compose.yaml', '-f', 'examples/compose.resp.yaml',
+        'exec', '-T', 'postgres',
         'psql', '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'pglc_demo',
         '-c', "SELECT json_build_object('version', current_setting('pg_local_cache.binary_version'), "
         "'build_id', current_setting('pg_local_cache.binary_build_id'), "

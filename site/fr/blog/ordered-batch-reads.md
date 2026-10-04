@@ -10,6 +10,8 @@ last_modified_at: "2026-09-22"
 topic: application
 ---
 
+> **Note du 04/10/2026 :** SQL `mget` a été supprimé en 3.0.0 ; RESP `MGET` le remplace.
+
 # Les lectures par lots ont besoin d'un contrat de résultat {#batch-reads-need-a-result-contract}
 
 Remplacer une boucle de requêtes par clé primaire par une seule requête `ANY`

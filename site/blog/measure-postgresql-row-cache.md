@@ -6,9 +6,11 @@ title: "When a PostgreSQL row cache helps: measure the whole read"
 description: Design a fair PostgreSQL row-cache comparison using prepared SQL, SQL mget and RESP MGET. Separate warm reads, misses, batch sizes, writes and client costs.
 permalink: /blog/measure-postgresql-row-cache/
 date: "2026-09-22"
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-04"
 topic: performance
 ---
+
+> **2026-10-04 release note:** SQL `mget` was removed in 3.0.0; RESP `MGET` replaces it.
 
 # When a PostgreSQL row cache helps {#when-a-postgresql-row-cache-helps}
 

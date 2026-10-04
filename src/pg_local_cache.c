@@ -33,6 +33,7 @@
 
 PG_MODULE_MAGIC;
 
+
 int			pglc_port = 6380;
 int			pglc_worker_count = 4;
 int			pglc_cache_entries = 16384;
@@ -52,14 +53,13 @@ char	   *pglc_role = NULL;
 char	   *pglc_auth_token = NULL;
 char	   *pglc_auth_token_file = NULL;
 bool		pglc_allow_superuser = false;
+bool		pglc_enabled = true;
+bool		pglc_allow_plaintext_network = false;
 
 PgLocalCacheSharedState *pglc_shared = NULL;
 HTAB	   *pglc_cache_hash = NULL;
 HTAB	   *pglc_relation_hash = NULL;
 
-static PgLocalCacheSqlCounterSlot *pglc_sql_counter_slots = NULL;
-static PgLocalCacheSqlCounterSlot *pglc_my_sql_counter_slot = NULL;
-static int	pglc_sql_counter_slot_count = 0;
 static char *pglc_binary_version = NULL;
 static char *pglc_binary_build_id = NULL;
 
@@ -128,24 +128,31 @@ static uint64 pglc_workers_without_current_mappings(void);
 static uint32 pglc_cache_key_hash(const void *key, Size keysize);
 static int pglc_cache_key_match(const void *left, const void *right,
 								Size keysize);
-static PgLocalCacheSqlCounterSlot *pglc_current_sql_counter_slot(void);
-static inline void pglc_increment_owned_sql_counter(
-	pg_atomic_uint64 *counter);
-
-typedef struct PgLocalCacheSqlCounterSnapshot
-{
-	uint64		hits;
-	uint64		misses;
-	uint64		fills;
-	uint64		bypasses;
-} PgLocalCacheSqlCounterSnapshot;
-
-static void pglc_read_sql_counter_snapshot(
-	PgLocalCacheSqlCounterSnapshot *snapshot);
-
 static void
 pglc_define_gucs(void)
 {
+	DefineCustomBoolVariable("pg_local_cache.enabled",
+							 "Enable RESP cache lookups and fills.",
+							 NULL,
+							 &pglc_enabled,
+							 true,
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomBoolVariable("pg_local_cache.allow_plaintext_network",
+							 "Allow plaintext RESP on non-loopback IPv4 addresses.",
+							 NULL,
+							 &pglc_allow_plaintext_network,
+							 false,
+							 PGC_POSTMASTER,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	DefineCustomStringVariable("pg_local_cache.binary_version",
 							   "Version compiled into the active pg_local_cache library.",
 							   NULL,
@@ -456,22 +463,10 @@ _PG_init(void)
 }
 
 Size
-pglc_sql_counter_memory_bytes(void)
-{
-	Size		array_bytes;
-
-	array_bytes = mul_size((Size) MaxBackends,
-						   sizeof(PgLocalCacheSqlCounterSlot));
-	/* ShmemInitStruct guarantees MAXALIGN, not cache-line alignment. */
-	return MAXALIGN(add_size(array_bytes, PG_CACHE_LINE_SIZE - 1));
-}
-
-Size
 pglc_shared_memory_bytes(void)
 {
 	Size		size = MAXALIGN(sizeof(PgLocalCacheSharedState));
 
-	size = add_size(size, pglc_sql_counter_memory_bytes());
 	size = add_size(size,
 					hash_estimate_size(pglc_cache_entries,
 									   sizeof(PgLocalCacheCacheEntry)));
@@ -512,10 +507,9 @@ pglc_validate_startup_limits(void)
 	estimated_bytes = pglc_estimated_memory_bytes();
 	if (estimated_bytes > budget_bytes)
 			ereport(FATAL,
-					(errmsg("pg_local_cache estimated memory exceeds its configured budget"),
-					 errdetail("Estimated deterministic extension memory is %zu bytes; pg_local_cache.memory_budget_mb allows %zu bytes. SQL counters reserve %zu bytes for %d PostgreSQL backend slots.",
-							   estimated_bytes, budget_bytes,
-							   pglc_sql_counter_memory_bytes(), MaxBackends),
+					 (errmsg("pg_local_cache estimated memory exceeds its configured budget"),
+					  errdetail("Estimated deterministic extension memory is %zu bytes; pg_local_cache.memory_budget_mb allows %zu bytes.",
+								estimated_bytes, budget_bytes),
 					 errhint("Raise pg_local_cache.memory_budget_mb; lower cache_entries, relation_states, workers, or max_clients_per_worker; or lower PostgreSQL backend limits.")));
 }
 
@@ -535,11 +529,8 @@ static void
 pglc_shmem_startup(void)
 {
 	bool		found;
-	bool		counter_slots_found;
 	HASHCTL		control;
 	int		worker_index;
-	int		counter_slot_index;
-	void	   *counter_slots_raw;
 
 	if (previous_shmem_startup_hook)
 		previous_shmem_startup_hook();
@@ -549,30 +540,6 @@ pglc_shmem_startup(void)
 	pglc_shared = ShmemInitStruct("pg_local_cache shared state",
 								 sizeof(PgLocalCacheSharedState),
 								 &found);
-	counter_slots_raw = ShmemInitStruct(
-		"pg_local_cache SQL counter slots",
-		pglc_sql_counter_memory_bytes(), &counter_slots_found);
-	pglc_sql_counter_slots = (PgLocalCacheSqlCounterSlot *) TYPEALIGN(
-		PG_CACHE_LINE_SIZE, counter_slots_raw);
-	pglc_sql_counter_slot_count = MaxBackends;
-	if (found != counter_slots_found)
-		elog(PANIC, "pg_local_cache shared state is inconsistent");
-	if (!counter_slots_found)
-	{
-		for (counter_slot_index = 0;
-			 counter_slot_index < pglc_sql_counter_slot_count;
-			 counter_slot_index++)
-		{
-			PgLocalCacheSqlCounterSlot *slot =
-				&pglc_sql_counter_slots[counter_slot_index];
-
-			MemSet(slot, 0, sizeof(*slot));
-			pg_atomic_init_u64(&slot->counters.hits, 0);
-			pg_atomic_init_u64(&slot->counters.misses, 0);
-			pg_atomic_init_u64(&slot->counters.fills, 0);
-			pg_atomic_init_u64(&slot->counters.bypasses, 0);
-		}
-	}
 	if (!found)
 	{
 		memset(pglc_shared, 0, sizeof(PgLocalCacheSharedState));
@@ -584,10 +551,6 @@ pglc_shmem_startup(void)
 		pg_atomic_init_u64(&pglc_shared->cache_misses, 0);
 		pg_atomic_init_u64(&pglc_shared->negative_hits, 0);
 		pg_atomic_init_u64(&pglc_shared->negative_writes, 0);
-		pg_atomic_init_u64(&pglc_shared->sql_cache_hits, 0);
-		pg_atomic_init_u64(&pglc_shared->sql_cache_misses, 0);
-		pg_atomic_init_u64(&pglc_shared->sql_cache_fills, 0);
-		pg_atomic_init_u64(&pglc_shared->sql_cache_bypasses, 0);
 		pg_atomic_init_u64(&pglc_shared->database_reads, 0);
 		pg_atomic_init_u64(&pglc_shared->database_writes, 0);
 		pg_atomic_init_u64(&pglc_shared->invalidations, 0);
@@ -651,121 +614,6 @@ pglc_shmem_startup(void)
 									  HASH_ELEM | HASH_BLOBS);
 
 	LWLockRelease(AddinShmemInitLock);
-}
-
-/*
- * PostgreSQL 14-16 call this identifier pgprocno; PostgreSQL 17+ exposes
- * ProcNumber as vxid.procNumber. It is stable for the lifetime of a backend
- * and unique among live backends.
- * Slots are never reset on process reuse, so aggregation cannot lose counts.
- */
-static PgLocalCacheSqlCounterSlot *
-pglc_current_sql_counter_slot(void)
-{
-	int			proc_number;
-
-	if (pglc_my_sql_counter_slot != NULL)
-		return pglc_my_sql_counter_slot;
-	if (pglc_sql_counter_slots == NULL || MyProc == NULL)
-		return NULL;
-
-#if PG_VERSION_NUM >= 170000
-	proc_number = MyProc->vxid.procNumber;
-#else
-	proc_number = MyProc->pgprocno;
-#endif
-	if (proc_number < 0 || proc_number >= pglc_sql_counter_slot_count)
-		return NULL;
-
-	pglc_my_sql_counter_slot = &pglc_sql_counter_slots[proc_number];
-	return pglc_my_sql_counter_slot;
-}
-
-/* A live ProcNumber has one writer, while scrapers only read the value. */
-static inline void
-pglc_increment_owned_sql_counter(pg_atomic_uint64 *counter)
-{
-	pg_atomic_write_u64(counter, pg_atomic_read_u64(counter) + 1);
-}
-
-void
-pglc_note_sql_cache_hits(uint64 count)
-{
-	PgLocalCacheSqlCounterSlot *slot = pglc_current_sql_counter_slot();
-
-	if (count == 0)
-		return;
-	if (slot != NULL)
-		pg_atomic_write_u64(&slot->counters.hits,
-			pg_atomic_read_u64(&slot->counters.hits) + count);
-	else if (pglc_shared != NULL)
-		pg_atomic_fetch_add_u64(&pglc_shared->sql_cache_hits, count);
-}
-
-void
-pglc_note_sql_cache_hit(void)
-{
-	pglc_note_sql_cache_hits(1);
-}
-
-void
-pglc_note_sql_cache_miss(void)
-{
-	PgLocalCacheSqlCounterSlot *slot = pglc_current_sql_counter_slot();
-
-	if (slot != NULL)
-		pglc_increment_owned_sql_counter(&slot->counters.misses);
-	else if (pglc_shared != NULL)
-		pg_atomic_fetch_add_u64(&pglc_shared->sql_cache_misses, 1);
-}
-
-void
-pglc_note_sql_cache_fill(void)
-{
-	PgLocalCacheSqlCounterSlot *slot = pglc_current_sql_counter_slot();
-
-	if (slot != NULL)
-		pglc_increment_owned_sql_counter(&slot->counters.fills);
-	else if (pglc_shared != NULL)
-		pg_atomic_fetch_add_u64(&pglc_shared->sql_cache_fills, 1);
-}
-
-void
-pglc_note_sql_cache_bypass(void)
-{
-	PgLocalCacheSqlCounterSlot *slot = pglc_current_sql_counter_slot();
-
-	if (slot != NULL)
-		pglc_increment_owned_sql_counter(&slot->counters.bypasses);
-	else if (pglc_shared != NULL)
-		pg_atomic_fetch_add_u64(&pglc_shared->sql_cache_bypasses, 1);
-}
-
-static void
-pglc_read_sql_counter_snapshot(PgLocalCacheSqlCounterSnapshot *snapshot)
-{
-	int			counter_slot_index;
-
-	MemSet(snapshot, 0, sizeof(*snapshot));
-	/* Keep counters written by older callers and non-backend processes. */
-	snapshot->hits = pg_atomic_read_u64(&pglc_shared->sql_cache_hits);
-	snapshot->misses = pg_atomic_read_u64(&pglc_shared->sql_cache_misses);
-	snapshot->fills = pg_atomic_read_u64(&pglc_shared->sql_cache_fills);
-	snapshot->bypasses = pg_atomic_read_u64(
-		&pglc_shared->sql_cache_bypasses);
-
-	for (counter_slot_index = 0;
-		 counter_slot_index < pglc_sql_counter_slot_count;
-		 counter_slot_index++)
-	{
-		PgLocalCacheSqlCounterSlot *slot =
-			&pglc_sql_counter_slots[counter_slot_index];
-
-		snapshot->hits += pg_atomic_read_u64(&slot->counters.hits);
-		snapshot->misses += pg_atomic_read_u64(&slot->counters.misses);
-		snapshot->fills += pg_atomic_read_u64(&slot->counters.fills);
-		snapshot->bypasses += pg_atomic_read_u64(&slot->counters.bypasses);
-	}
 }
 
 void
@@ -1652,6 +1500,30 @@ pglc_cache_invalidate_all(void)
 	return count;
 }
 
+bool
+pglc_cache_is_enabled(void)
+{
+	return pglc_enabled;
+}
+
+/*
+ * Called by each RESP worker after it reloads its configuration.  The switch is
+ * process-local on purpose: every worker applies pg_local_cache.enabled when it
+ * processes SIGHUP, and a worker that turns caching back on discards everything
+ * cached before it serves cached reads again.  Several workers may each
+ * invalidate once; that only costs refills.  Trigger invalidation keeps running
+ * while the cache is off.
+ */
+void
+pglc_sync_cache_enabled(void)
+{
+	static bool applied_enabled = true;
+
+	if (pglc_enabled && !applied_enabled)
+		(void) pglc_cache_invalidate_all();
+	applied_enabled = pglc_enabled;
+}
+
 void
 pglc_note_database_read(void)
 {
@@ -2482,7 +2354,6 @@ char *
 pglc_stats_json(void)
 {
 	StringInfoData expanded;
-	PgLocalCacheSqlCounterSnapshot sql_counters;
 	HASH_SEQ_STATUS sequence;
 	PgLocalCacheCacheEntry *entry;
 	uint64		positive = 0;
@@ -2497,10 +2368,6 @@ pglc_stats_json(void)
 	uint64		cache_hits;
 	uint64		cache_misses;
 	uint64		negative_hits;
-	uint64		sql_cache_hits;
-	uint64		sql_cache_misses;
-	uint64		sql_cache_fills;
-	uint64		sql_cache_bypasses;
 	uint64		database_reads;
 	uint64		database_writes;
 	uint64		invalidations;
@@ -2562,11 +2429,6 @@ pglc_stats_json(void)
 	cache_hits = pg_atomic_read_u64(&pglc_shared->cache_hits);
 	cache_misses = pg_atomic_read_u64(&pglc_shared->cache_misses);
 	negative_hits = pg_atomic_read_u64(&pglc_shared->negative_hits);
-	pglc_read_sql_counter_snapshot(&sql_counters);
-	sql_cache_hits = sql_counters.hits;
-	sql_cache_misses = sql_counters.misses;
-	sql_cache_fills = sql_counters.fills;
-	sql_cache_bypasses = sql_counters.bypasses;
 	database_reads = pg_atomic_read_u64(&pglc_shared->database_reads);
 	database_writes = pg_atomic_read_u64(&pglc_shared->database_writes);
 	invalidations = pg_atomic_read_u64(&pglc_shared->invalidations);
@@ -2608,10 +2470,6 @@ pglc_stats_json(void)
 		",\"cache_hits\":" UINT64_FORMAT
 		",\"cache_misses\":" UINT64_FORMAT
 		",\"negative_hits\":" UINT64_FORMAT
-		",\"sql_cache_hits\":" UINT64_FORMAT
-		",\"sql_cache_misses\":" UINT64_FORMAT
-		",\"sql_cache_fills\":" UINT64_FORMAT
-		",\"sql_cache_bypasses\":" UINT64_FORMAT
 		",\"database_reads\":" UINT64_FORMAT
 		",\"database_writes\":" UINT64_FORMAT
 		",\"invalidations\":" UINT64_FORMAT
@@ -2636,8 +2494,6 @@ pglc_stats_json(void)
 		relation_states, pending_forget,
 		global_dirty_writers, positive + negative,
 		cache_hits, cache_misses, negative_hits,
-		sql_cache_hits, sql_cache_misses, sql_cache_fills,
-		sql_cache_bypasses,
 		database_reads, database_writes, invalidations, evictions,
 		singleflight_leaders, singleflight_waiters,
 		singleflight_reuses, singleflight_timeouts,
@@ -2742,7 +2598,6 @@ char *
 pglc_metrics_json(void)
 {
 	StringInfoData result;
-	PgLocalCacheSqlCounterSnapshot sql_counters;
 	uint64		entries;
 	uint64		relation_states;
 	uint64		global_dirty_writers;
@@ -2756,8 +2611,6 @@ pglc_metrics_json(void)
 	LWLockRelease(pglc_shared->lock);
 	workers_with_incomplete_mappings =
 		pglc_workers_without_current_mappings();
-	pglc_read_sql_counter_snapshot(&sql_counters);
-
 	initStringInfo(&result);
 	appendStringInfo(
 		&result,
@@ -2791,6 +2644,8 @@ pglc_metrics_json(void)
 		pglc_shared_memory_bytes(), pglc_worker_memory_bytes(),
 		pglc_estimated_memory_bytes(),
 		mul_size((Size) pglc_memory_budget_mb, (Size) 1024 * 1024));
+	appendStringInfo(&result, ",\"cache_enabled\":%s",
+					 pglc_cache_is_enabled() ? "true" : "false");
 
 #define PGLC_APPEND_METRIC_COUNTER(json_name, field_name) \
 	appendStringInfo(&result, ",\"" json_name "\":" UINT64_FORMAT, \
@@ -2798,14 +2653,6 @@ pglc_metrics_json(void)
 	PGLC_APPEND_METRIC_COUNTER("cache_hits_total", cache_hits);
 	PGLC_APPEND_METRIC_COUNTER("cache_misses_total", cache_misses);
 	PGLC_APPEND_METRIC_COUNTER("negative_hits_total", negative_hits);
-	appendStringInfo(&result, ",\"sql_cache_hits_total\":" UINT64_FORMAT,
-					 sql_counters.hits);
-	appendStringInfo(&result, ",\"sql_cache_misses_total\":" UINT64_FORMAT,
-					 sql_counters.misses);
-	appendStringInfo(&result, ",\"sql_cache_fills_total\":" UINT64_FORMAT,
-					 sql_counters.fills);
-	appendStringInfo(&result, ",\"sql_cache_bypasses_total\":" UINT64_FORMAT,
-					 sql_counters.bypasses);
 	PGLC_APPEND_METRIC_COUNTER("database_reads_total", database_reads);
 	PGLC_APPEND_METRIC_COUNTER("database_writes_total", database_writes);
 	PGLC_APPEND_METRIC_COUNTER("invalidations_total", invalidations);

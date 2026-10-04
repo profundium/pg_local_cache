@@ -10,6 +10,8 @@ last_modified_at: "2026-09-22"
 topic: application
 ---
 
+> **2026-10-04 release note:** SQL `mget` was removed in 3.0.0; RESP `MGET` replaces it.
+
 # Batch reads need a result contract {#batch-reads-need-a-result-contract}
 
 Replacing a loop of primary-key queries with one `ANY` query removes round

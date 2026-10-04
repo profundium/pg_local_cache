@@ -20,7 +20,7 @@ last_modified_at: "2026-09-16"
 |---|---|---|
 | Mantener calientes las páginas de tablas e índices | `shared_buffers` de PostgreSQL y la caché del sistema operativo | Menos lecturas de almacenamiento; el SQL sigue ejecutándose |
 | Enviar muchas veces la misma sentencia | Una sentencia preparada | Menos trabajo repetido de análisis y planificación; la ejecución sigue ocurriendo |
-| Devolver filas completas por clave primaria | SQL `mget` de `pg_local_cache` | Reutiliza cargas útiles de filas completas elegibles mediante una API explícita |
+| Devolver filas completas por clave primaria | RESP MGET de pg_local_cache | Reutiliza filas completas aptas mediante un endpoint autenticado |
 | Precalcular una unión o un agregado | Una vista materializada | Lee resultados persistidos; la actualización define la frescura |
 | Compartir objetos de aplicación entre servicios | Una caché externa como Redis | Claves, TTL e invalidación gestionados por la aplicación |
 
@@ -32,7 +32,7 @@ La [comparación de cachés de filas](row-cache-vs-shared-buffers.md) muestra qu
 
 ### Filas completas por clave primaria {#whole-rows-by-primary-key}
 
-`pg_local_cache` almacena cargas serializadas de filas completas bajo claves primarias completas en memoria compartida acotada de PostgreSQL. Se accede mediante `local_cache.mget('public.items'::regclass, $1::bigint[])`; un `SELECT` normal nunca la consulta. Las lecturas elegibles y limpias con `READ COMMITTED` pueden acertar, mientras que los modos de aislamiento más estrictos, las escrituras en la transacción, la recuperación, la ejecución paralela o las filas demasiado grandes usan PostgreSQL. Los mapeos de tablas no compatibles se rechazan al asociarlos. Es un recorrido de lectura específico, no una caché de resultados de consultas arbitrarias. Consulta la [guía de consultas por lotes](batch-primary-key-lookups.md), el [contrato técnico](TECHNICAL.md) y las [comprobaciones de transacciones](cache-invalidation.md).
+pg_local_cache almacena cargas serializadas de filas completas bajo claves primarias completas en memoria compartida acotada de PostgreSQL. Se accede mediante RESP MGET autenticado; un SELECT normal nunca consulta esta caché. Las lecturas limpias aptas con READ COMMITTED pueden acertar; los niveles de aislamiento más estrictos, las escrituras en la transacción, la recuperación, la ejecución paralela o las filas demasiado grandes usan PostgreSQL. Los trabajadores RESP usan el rol de base de datos configurado y no comparten la transacción SQL ni la instantánea del llamador. Las asignaciones no compatibles se rechazan al asociarlas. Es un recorrido de lectura específico, no una caché de resultados de consultas arbitrarias. Consulta la [guía de búsquedas por lotes](batch-primary-key-lookups.md), el [contrato técnico](TECHNICAL.md) y las [comprobaciones de transacciones](cache-invalidation.md).
 
 ### Vistas y cachés externas {#views-and-external-caches}
 

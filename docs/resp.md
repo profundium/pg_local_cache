@@ -6,7 +6,7 @@ title: Connect over RESP
 description: Read PostgreSQL rows over RESP2 with redis-cli or Node.js. Includes authentication, client settings, runnable examples and cleanup.
 section: RESP
 permalink: /docs/resp.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
 # Connect over RESP {#connect-over-resp}
@@ -74,11 +74,24 @@ RESP workers use one configured PostgreSQL role for all clients. For reads
 within a SQL transaction, use [Node.js SQL](node-postgres.md) or [Go SQL](go.md).
 See the [RESP reference](TECHNICAL.md#optional-resp2-endpoint) for commands and limits.
 
+The listener binds to loopback by default. A non-loopback IPv4 bind requires
+`pg_local_cache.allow_plaintext_network=on`; the demo enables it only inside
+its container network. The listener does not provide TLS, so use a trusted
+network or an authenticated TLS proxy. `pg_local_cache.enabled` is a SIGHUP
+kill switch. Each RESP worker applies a reload asynchronously at its next
+command boundary, after any command it is executing finishes.
+`local_cache.health()` reports `cache_enabled` as seen by the SQL session that
+calls it; it does not acknowledge that every worker has applied the setting.
+To disable cache reads without a restart, run
+`ALTER SYSTEM SET pg_local_cache.enabled = off;` and `SELECT pg_reload_conf();`.
+While disabled, each read goes directly to the source table.
+
 ## Compare with SQL {#compare-with-sql}
 
 The [common benchmark](BENCHMARKS.md#run-the-same-comparison-on-every-client)
-runs RESP `MGET`, SQL `mget` and prepared SQL with the same keys and decoded
-results in both Node.js and Go.
+runs RESP `MGET` and prepared SQL with the same keys and decoded results in both
+Node.js and Go. Published SQL `mget` measurements from 2.x are historical; that
+lane was removed in 3.0.0.
 For broader application caching, read the
 [PostgreSQL and Redis cache-aside guide](postgresql-redis-cache.md).
 

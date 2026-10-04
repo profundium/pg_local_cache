@@ -4,10 +4,10 @@ lang: fr
 translation_key: row-cache-vs-shared-buffers
 title: Cache de lignes PostgreSQL contre shared_buffers
 seo_title: "Cache de lignes PostgreSQL contre shared_buffers | pg_local_cache"
-description: Comparez la mise en cache des pages PostgreSQL au cache de lignes complètes pg_local_cache 2.0. Voyez ce qu'évite un hit, ce qu'il coûte encore et quand ne pas ajouter un autre cache.
+description: Comparez la mise en cache des pages PostgreSQL au cache de lignes complètes pg_local_cache 3.0. Voyez ce qu'évite un hit, ce qu'il coûte encore et quand ne pas ajouter un autre cache.
 section: Chemins de lecture
 permalink: /fr/docs/row-cache-vs-shared-buffers.html
-last_modified_at: "2026-09-16"
+last_modified_at: "2026-10-04"
 ---
 
 # Cache de lignes PostgreSQL contre shared_buffers {#postgresql-row-cache-vs-shared_buffers}
@@ -27,26 +27,17 @@ Utilisez une base chaude comme référence.
 
 ## PostgreSQL met-il en cache les résultats de SELECT ? {#does-postgresql-cache-select-results}
 
-`shared_buffers` met en cache les pages utilisées par une requête, plutôt que
-son jeu de résultats final. Une [instruction préparée](https://www.postgresql.org/docs/18/sql-prepare.html)
-réutilise le travail de parsing et peut réutiliser un plan, mais PostgreSQL
-l'exécute toujours. pg_local_cache ajoute la mise en cache de lignes complètes
-via des appels explicites à `mget` ; il ne met pas en cache les résultats de
-`SELECT` arbitraires et ne réécrit pas les requêtes existantes. [L'exemple Node.js](node-postgres.md) montre les deux API de lecture côte à côte.
+`shared_buffers` met en cache les pages utilisées par une requête, plutôt que son jeu de résultats final. Une instruction préparée réutilise le travail de parsing et peut réutiliser un plan, mais PostgreSQL l’exécute toujours. pg_local_cache ajoute la mise en cache de lignes complètes via RESP `MGET` authentifié ; il ne met pas en cache les résultats de SELECT arbitraires et ne réécrit pas les requêtes existantes. L’exemple Node.js montre les chemins RESP et SQL séparés.
 
 ## Comparer le travail, pas seulement le support de stockage {#compare-the-work-not-just-the-storage-medium}
 
 | Lecture | Travail restant |
 |---|---|
 | SQL préparé par clé primaire sur des pages chaudes | Gestion du protocole, exécution du plan, vérifications de visibilité des lignes et conversion du résultat |
-| Hit éligible du cache SQL mget | Gestion du protocole, exécution de la fonction SQL, conversion de la clé, synchronisation du cache, vérifications du snapshot et renvoi de la charge utile stockée |
-| Miss ou contournement SQL mget | Vérifications de la fonction et requête de la table source ; un remplissage éligible réussi peut alimenter le cache |
+| Hit éligible du cache RESP MGET | Gestion du protocole, conversion de la clé, synchronisation du cache, vérifications du snapshot et renvoi de la charge utile stockée |
+| Miss ou contournement RESP MGET | Vérifications du cache et requête de la table source ; un remplissage éligible réussi peut alimenter le cache |
 
-Un hit du cache de lignes évite l'exécution répétée de la table source et la
-sérialisation de la ligne complète. Les vérifications et la synchronisation du
-cache consomment aussi du CPU, et un hit utilise toujours une connexion et un
-backend PostgreSQL. Cette API SQL ne supprime ni les limites de connexions ni
-la mise en file d'attente du pool.
+Un hit du cache de lignes évite l’exécution répétée de la table source et la sérialisation de la ligne complète. Les vérifications et la synchronisation consomment aussi du CPU. Le worker RESP utilise le rôle PostgreSQL configuré ; RESP ne partage ni la transaction SQL ni le snapshot du client appelant.
 
 ## Coûts à inclure {#costs-to-include}
 
@@ -70,16 +61,14 @@ Comparez d'abord une requête ordinaire par lots aux appels actuels par clé de
 l'application. Un gain dû au regroupement ne prouve pas un gain dû à la mise en
 cache.
 
-pg_local_cache 2.0 exige des appels `mget` explicites, l'installation de
-l'extension et un preload au démarrage. Il rejette les tables RLS,
-partitionnées et héritées.
+pg_local_cache 3.0 exige des appels RESP `MGET` explicites, la mise en place de l extension et un preload au démarrage. Les tables RLS, partitionnées et héritées sont rejetées.
 
 ## Cache de lignes ou cache externe ? {#row-cache-or-an-external-cache}
 
 Pour les données dont PostgreSQL reste la source d'autorité, cette conception
 garde l'invalidation sur le chemin d'écriture de la base et évite de maintenir
 un protocole cache-aside applicatif. Elle ne fournit pas la sémantique Redis
-générale. Le point de terminaison RESP2 optionnel possède un ensemble limité de
+générale. Le point de terminaison RESP2 possède un ensemble limité de
 commandes et un modèle de sécurité séparé.
 
 Un cache de lignes PostgreSQL ne peut pas remplacer un état applicatif fondé
