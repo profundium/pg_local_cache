@@ -42,7 +42,7 @@ def main():
     print(f'PASS checked-out extension: {binary}', flush=True)
     # Startup and teardown are owned by Actions, so cleanup also runs on failure.
     # These are the commands a reader runs after `compose up --wait`.
-    sections = ['Read as an application role', 'Check commit and rollback']
+    sections = ['Read over RESP', 'Check commit and rollback']
     for heading in sections:
         commands = blocks(text, heading, 'bash')
         for command in commands:
