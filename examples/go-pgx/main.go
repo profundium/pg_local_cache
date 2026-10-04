@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand/v2"
 	"os"
 	"runtime"
 	"sort"
@@ -32,6 +33,8 @@ type inputConfig struct {
 	Port      int    `json:"port"`
 	RespPort  int    `json:"resp_port"`
 	RespToken string `json:"resp_token"`
+	// KeySpace > 0 reads random keys from [1, KeySpace]; 0 reads keys 1..batch.
+	KeySpace  int    `json:"key_space"`
 }
 
 type readyMessage struct {
@@ -75,6 +78,9 @@ func validateConfig(cfg inputConfig) error {
 	if cfg.Seconds < 1 || cfg.Seconds > 120 {
 		return fmt.Errorf("seconds must be between 1 and 120")
 	}
+	if cfg.KeySpace != 0 && (cfg.KeySpace < cfg.Batch || cfg.KeySpace > 10_000_000) {
+		return fmt.Errorf("key_space must be 0 or between batch and 10000000")
+	}
 	if cfg.Mode != "postgres-any" && cfg.Mode != "resp-mget" {
 		return fmt.Errorf("mode must be postgres-any or resp-mget")
 	}
@@ -98,8 +104,8 @@ func validateConfig(cfg inputConfig) error {
 
 func connectionConfig(port int) (*pgx.ConnConfig, error) {
 	connString := fmt.Sprintf(
-		"host=127.0.0.1 port=%d dbname=pglc_demo user=demo password=demo-only sslmode=disable",
-		port,
+		"host=%s port=%d dbname=pglc_demo user=demo password=demo-only sslmode=disable",
+		benchHost(), port,
 	)
 	cfg, err := pgx.ParseConfig(connString)
 	if err != nil {
@@ -216,6 +222,32 @@ func queryAny(ctx context.Context, conn *pgx.Conn, keys []*int64) ([]map[string]
 		decoded[i] = row
 	}
 	return decoded, formats, nil
+}
+
+// benchHost is the PostgreSQL and RESP host; a two-machine benchmark sets it to
+// the database server's private address.
+func benchHost() string {
+	if host := os.Getenv("PGLC_BENCH_HOST"); host != "" {
+		return host
+	}
+	return "127.0.0.1"
+}
+
+// keySource returns the keys for each timed request: the fixed hot set 1..batch,
+// or a fresh uniform sample from [1, KeySpace].
+func keySource(cfg inputConfig) func() []*int64 {
+	if cfg.KeySpace == 0 {
+		keys := fixedKeys(cfg.Batch)
+		return func() []*int64 { return keys }
+	}
+	return func() []*int64 {
+		keys := make([]*int64, cfg.Batch)
+		for i := range keys {
+			key := rand.Int64N(int64(cfg.KeySpace)) + 1
+			keys[i] = &key
+		}
+		return keys
+	}
 }
 
 func fixedKeys(batch int) []*int64 {
@@ -445,10 +477,10 @@ func run(reader *bufio.Reader, writer *bufio.Writer) error {
 	if strings.TrimSpace(goLine) != "go" {
 		return fmt.Errorf("expected go command")
 	}
-	keys := fixedKeys(cfg.Batch)
+	nextKeys := keySource(cfg)
 	requests := make([]func(context.Context) error, len(connections))
 	for i, conn := range connections {
-		requests[i] = func(ctx context.Context) error { return timedRequest(ctx, conn, keys) }
+		requests[i] = func(ctx context.Context) error { return timedRequest(ctx, conn, nextKeys()) }
 	}
 	result, err := runTimed(cfg, requests)
 	if err != nil {
