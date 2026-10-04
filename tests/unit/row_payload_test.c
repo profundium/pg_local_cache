@@ -96,6 +96,8 @@ main(void)
 	char		oversized_json[PGLC_VALUE_MAX];
 	const char *decoded_json;
 	Size		decoded_json_len;
+	Size		max_json_len = PGLC_VALUE_MAX - PGLC_ROW_PAYLOAD_HEADER_SIZE;
+	Size		oversized_json_len = max_json_len + 1;
 	Size		payload_len = 0;
 	Size		index;
 
@@ -148,15 +150,38 @@ main(void)
 		return 1;
 	}
 
-	memset(oversized_json, 'x', sizeof(oversized_json));
-	oversized_json[0] = '{';
-	oversized_json[sizeof(oversized_json) - 1] = '}';
+	/* Valid JSON exactly fills the maximum payload after its header. */
+	memset(oversized_json, 'x', max_json_len);
+	memcpy(oversized_json, "{\"x\":\"", 6);
+	oversized_json[max_json_len - 2] = '"';
+	oversized_json[max_json_len - 1] = '}';
+	if (!pglc_row_payload_encode(TEST_ROW_TYPE_OID, TEST_ROW_TYPMOD,
+								 TEST_ROW_NATTS,
+								 TEST_DESCRIPTOR_FINGERPRINT,
+								 oversized_json, max_json_len,
+								 payload, sizeof(payload), &payload_len) ||
+		payload_len != sizeof(payload) ||
+		!decode_payload(payload, payload_len, &decoded_json,
+					 &decoded_json_len) ||
+		decoded_json_len != max_json_len ||
+		memcmp(decoded_json, oversized_json, max_json_len) != 0)
+	{
+		fprintf(stderr, "maximum-length JSON rejected or corrupted\n");
+		return 1;
+	}
+
+	/* Valid JSON one byte beyond the output limit must fail on capacity. */
+	memset(oversized_json, 'x', oversized_json_len);
+	memcpy(oversized_json, "{\"x\":\"", 6);
+	oversized_json[oversized_json_len - 2] = '"';
+	oversized_json[oversized_json_len - 1] = '}';
+	payload_len = 0;
 	if (pglc_row_payload_encode(TEST_ROW_TYPE_OID, TEST_ROW_TYPMOD,
-								TEST_ROW_NATTS,
-								TEST_DESCRIPTOR_FINGERPRINT,
-								oversized_json,
-								PGLC_VALUE_MAX - PGLC_ROW_PAYLOAD_HEADER_SIZE + 1,
-								payload, sizeof(payload), &payload_len) ||
+								 TEST_ROW_NATTS,
+								 TEST_DESCRIPTOR_FINGERPRINT,
+								 oversized_json,
+								 oversized_json_len,
+								 payload, sizeof(payload), &payload_len) ||
 		payload_len != 0)
 	{
 		fprintf(stderr, "oversized JSON accepted\n");

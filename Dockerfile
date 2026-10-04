@@ -2,12 +2,14 @@
 
 ARG POSTGRES_MAJOR=16
 ARG POSTGRES_VARIANT=bookworm
+ARG PGLC_TEST_HOOKS=0
 
 FROM postgres:${POSTGRES_MAJOR}-${POSTGRES_VARIANT} AS builder
 
 ARG POSTGRES_MAJOR
 ARG POSTGRES_VARIANT
 ARG PGLC_BUILD_ID
+ARG PGLC_TEST_HOOKS
 
 RUN case "$POSTGRES_MAJOR" in \
         14|15|16|17|18) ;; \
@@ -40,6 +42,8 @@ COPY src/ ./src/
 
 RUN set -eu; \
     pg_config="$(cat /tmp/pg_config)"; \
+    test_hook_args=""; \
+    if [ "$PGLC_TEST_HOOKS" = 1 ]; then test_hook_args="PGLC_TEST_HOOKS=1"; fi; \
     installed_version="$("$pg_config" --version)"; \
     case "$installed_version" in \
         "PostgreSQL ${POSTGRES_MAJOR}."*) ;; \
@@ -48,10 +52,10 @@ RUN set -eu; \
     esac; \
     make_extension() { \
         if [ -n "${PGLC_BUILD_ID:-}" ]; then \
-            make PG_CONFIG="$pg_config" PGLC_BUILD_ID="$PGLC_BUILD_ID" with_llvm=no "$@"; \
+            make PG_CONFIG="$pg_config" PGLC_BUILD_ID="$PGLC_BUILD_ID" $test_hook_args with_llvm=no "$@"; \
         else \
             unset PGLC_BUILD_ID; \
-            make PG_CONFIG="$pg_config" with_llvm=no "$@"; \
+            make PG_CONFIG="$pg_config" $test_hook_args with_llvm=no "$@"; \
         fi; \
     }; \
     make_extension clean; \

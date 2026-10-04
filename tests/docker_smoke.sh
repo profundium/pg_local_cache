@@ -124,6 +124,9 @@ printf '%s\n' "$auth_token" >"$cache_secret"
 cat >"$override_file" <<YAML
 services:
   postgres:
+    build:
+      args:
+        PGLC_TEST_HOOKS: "1"
     environment:
       POSTGRES_DB: ${database}
       PG_LOCAL_CACHE_DATABASE: ${database}

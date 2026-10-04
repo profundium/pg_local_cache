@@ -4,7 +4,10 @@ CPPFLAGS += -DPGLC_RESP_STANDALONE -I../../src
 COMMON_CFLAGS = -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic
 PG_CONFIG ?= pg_config
 PG_SERVER_INCLUDE = $(shell $(PG_CONFIG) --includedir-server)
-ROW_PAYLOAD_CPPFLAGS = -DPGLC_BUILD_ID='"unit-test"' \
+
+# PostgreSQL server headers require the same feature-test macros as server code.
+PG_SERVER_CPPFLAGS = $(shell $(PG_CONFIG) --cppflags)
+ROW_PAYLOAD_CPPFLAGS = $(PG_SERVER_CPPFLAGS) -DPGLC_BUILD_ID='"unit-test"' \
 	-I$(PG_SERVER_INCLUDE) -I../../src
 ROW_PAYLOAD_CFLAGS = -std=c11 -O2 -g -Wall -Wextra -Werror \
 	-Wno-unused-parameter
