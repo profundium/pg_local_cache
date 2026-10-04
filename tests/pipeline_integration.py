@@ -729,6 +729,33 @@ def drop_test_hook_functions() -> None:
     )
 
 
+def start_updating_key_writer(
+    table: str,
+    row_id: int,
+    *,
+    application_name: str,
+) -> subprocess.Popen[str]:
+    environment = os.environ.copy()
+    environment["PGAPPNAME"] = application_name
+    process = subprocess.Popen(
+        psql_base_args(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+    )
+    assert process.stdin is not None
+    process.stdin.write(
+        "BEGIN;\n"
+        f"UPDATE public.{sql_identifier(table)} SET value = value "
+        f"WHERE id = {row_id};\n"
+        "COMMIT;\n"
+    )
+    process.stdin.flush()
+    return process
+
+
 def start_publishing_key_writer(
     table: str,
     namespace: str,
@@ -1540,7 +1567,8 @@ def test_overlapping_publishers_on_one_key(
     key = crud_key(table, row_id)
     client = RespConnection()
     assert mget_one(client, key) == row_bytes(row_id, value)
-    dirty_key = json.dumps({"id": row_id}, separators=(",", ":"))
+    # Canonical int8 key: decimal byte length, colon, value, semicolon.
+    canonical_key = f"{len(str(row_id))}:{row_id};"
     relation = f"public.{sql_identifier(table)}"
     original_incarnation = int(
         sql(
@@ -1559,8 +1587,8 @@ def test_overlapping_publishers_on_one_key(
             application_name=f"pglc_publish_barrier_first_{os.getpid()}",
         )
         first_name = f"pglc_publish_first_{os.getpid()}"
-        first = start_publishing_key_writer(
-            table, namespace, dirty_key, application_name=first_name
+        first = start_updating_key_writer(
+            table, row_id, application_name=first_name
         )
         wait_for_blocked_relation_pid(
             barrier_table, application_name=first_name, timeout=10
@@ -1572,8 +1600,9 @@ def test_overlapping_publishers_on_one_key(
             application_name=f"pglc_publish_barrier_second_{os.getpid()}",
         )
         second_name = f"pglc_publish_second_{os.getpid()}"
+        # A second UPDATE of this row would wait on the first transaction's row lock.
         second = start_publishing_key_writer(
-            table, namespace, dirty_key, application_name=second_name
+            table, namespace, canonical_key, application_name=second_name
         )
         wait_for_blocked_relation_pid(
             second_barrier_table, application_name=second_name, timeout=10
@@ -1663,14 +1692,14 @@ def test_abort_after_dirty_publication(
     )
     client = RespConnection()
     key = crud_key(table, row_id)
-    dirty_key = json.dumps({"id": row_id}, separators=(",", ":"))
     try:
         assert mget_one(client, key) == row_bytes(row_id, value)
         before = read_cache_stats()
         set_test_pause("after_publish_abort", barrier_table)
         command = (
             "BEGIN; "
-            f"{test_collect_key_sql(table, namespace, dirty_key)}; "
+            f"UPDATE public.{sql_identifier(table)} SET value = value "
+            f"WHERE id = {row_id}; "
             "COMMIT"
         )
         result = subprocess.run(
@@ -1707,8 +1736,8 @@ def test_partial_reservation_abort_releases_identity(
             f"'{relation}'::regclass, {sql_literal(namespace)})"
         )
     )
-    key_one = json.dumps({"id": 1}, separators=(",", ":"))
-    key_two = json.dumps({"id": 2}, separators=(",", ":"))
+    key_one = "1:1;"
+    key_two = "1:2;"
     command = (
         "BEGIN; SELECT public.pglc_test_abort_after_reservation(); "
         f"{test_collect_key_sql(table, namespace, key_one)}; "
@@ -2058,6 +2087,8 @@ def main() -> None:
         f"public.{table}, public.{composite_table}, public.{scoped_table}, "
         f"public.{incarnation_table} "
         f"TO {sql_identifier(role)};"
+        f"GRANT UPDATE ON TABLE public.{barrier_table}, "
+        f"public.{second_barrier_table} TO {sql_identifier(role)};"
         for role in granted_roles
     )
     sql("CREATE EXTENSION IF NOT EXISTS pg_local_cache")
