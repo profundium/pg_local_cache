@@ -34,7 +34,16 @@ type inputConfig struct {
 	RespPort  int    `json:"resp_port"`
 	RespToken string `json:"resp_token"`
 	// KeySpace > 0 reads random keys from [1, KeySpace]; 0 reads keys 1..batch.
-	KeySpace  int    `json:"key_space"`
+	KeySpace    int    `json:"key_space"`
+	CheckIDs    []int64 `json:"check_ids"`
+	KeyDist     string `json:"key_dist"`
+	Rate        int    `json:"rate"`
+	Op          string `json:"op"`
+	Table       string `json:"table"`
+	SyncCommit  string `json:"synchronous_commit"`
+	ValkeyDel   bool   `json:"valkey_del"`
+	InsertStart int64  `json:"insert_start"`
+	Target      string `json:"target"`
 }
 
 type readyMessage struct {
@@ -61,7 +70,7 @@ type timedResult struct {
 }
 
 type resultMessage struct {
-	Result timedResult `json:"result"`
+	Result any `json:"result"`
 }
 
 type workerResult struct {
@@ -81,22 +90,54 @@ func validateConfig(cfg inputConfig) error {
 	if cfg.KeySpace != 0 && (cfg.KeySpace < cfg.Batch || cfg.KeySpace > 10_000_000) {
 		return fmt.Errorf("key_space must be 0 or between batch and 10000000")
 	}
-	if cfg.Mode != "postgres-any" && cfg.Mode != "resp-mget" {
-		return fmt.Errorf("mode must be postgres-any or resp-mget")
+	if cfg.KeyDist != "uniform" && cfg.KeyDist != "zipf" {
+		return fmt.Errorf("key_dist must be uniform or zipf")
 	}
-	if cfg.Mode == "resp-mget" && (cfg.RespPort < 1 || cfg.RespPort > 65535 || len(cfg.RespToken) < 32) {
+	if cfg.KeyDist == "zipf" && cfg.KeySpace == 0 {
+		return fmt.Errorf("zipf requires key_space")
+	}
+	if cfg.Mode != "postgres-any" && cfg.Mode != "resp-mget" && cfg.Mode != "valkey-aside" && cfg.Mode != "write" && cfg.Mode != "stale-check" {
+		return fmt.Errorf("unsupported mode")
+	}
+	if (cfg.Mode == "resp-mget" || cfg.Mode == "valkey-aside" || cfg.Mode == "stale-check" || cfg.ValkeyDel) && (cfg.RespPort < 1 || cfg.RespPort > 65535 || len(cfg.RespToken) < 32) {
 		return fmt.Errorf("RESP requires a valid port and demo authentication token")
+	}
+	if cfg.Mode == "valkey-aside" && cfg.Batch != 1 {
+		return fmt.Errorf("valkey-aside requires batch 1")
+	}
+	if (cfg.Mode == "write" || cfg.Mode == "stale-check") && cfg.KeySpace < 1 {
+		return fmt.Errorf("mode requires key_space")
+	}
+	if cfg.Mode == "write" {
+		if cfg.Rate < 0 {
+			return fmt.Errorf("rate must be zero or positive")
+		}
+		if cfg.Op != "update" && cfg.Op != "update_value" && cfg.Op != "insert" {
+			return fmt.Errorf("op must be update, update_value, or insert")
+		}
+		if cfg.Table != "items" && cfg.Table != "direct_items" {
+			return fmt.Errorf("table must be items or direct_items")
+		}
+		if cfg.SyncCommit != "on" && cfg.SyncCommit != "off" {
+			return fmt.Errorf("synchronous_commit must be on or off")
+		}
+		if cfg.Op == "insert" && cfg.InsertStart < 1 {
+			return fmt.Errorf("insert_start must be positive")
+		}
+	}
+	if cfg.Mode == "stale-check" && cfg.Target != "pglc" && cfg.Target != "valkey" {
+		return fmt.Errorf("target must be pglc or valkey")
 	}
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
 	}
-	if strings.TrimSpace(cfg.AnySQL) == "" {
+	if (cfg.Mode == "postgres-any" || cfg.Mode == "resp-mget") && strings.TrimSpace(cfg.AnySQL) == "" {
 		return fmt.Errorf("any_sql must be non-empty")
 	}
 	if strings.IndexByte(cfg.AnySQL, 0) >= 0 {
 		return fmt.Errorf("any_sql contains NUL")
 	}
-	if !strings.Contains(cfg.AnySQL, "$1") {
+	if (cfg.Mode == "postgres-any" || cfg.Mode == "resp-mget") && !strings.Contains(cfg.AnySQL, "$1") {
 		return fmt.Errorf("any_sql must contain $1")
 	}
 	return nil
@@ -186,7 +227,11 @@ func decodeJSONRows(raw []*string) ([]map[string]any, error) {
 }
 
 func queryAny(ctx context.Context, conn *pgx.Conn, keys []*int64) ([]map[string]any, []string, error) {
-	rows, err := conn.Query(ctx, anyStatement, keys)
+	return queryNamed(ctx, conn, anyStatement, keys)
+}
+
+func queryNamed(ctx context.Context, conn *pgx.Conn, statement string, keys []*int64) ([]map[string]any, []string, error) {
+	rows, err := conn.Query(ctx, statement, keys)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -233,17 +278,25 @@ func benchHost() string {
 	return "127.0.0.1"
 }
 
-// keySource returns the keys for each timed request: the fixed hot set 1..batch,
-// or a fresh uniform sample from [1, KeySpace].
-func keySource(cfg inputConfig) func() []*int64 {
+// keySource returns fixed keys when KeySpace is zero, otherwise it samples
+// uniformly or with the configured Zipf distribution using a private RNG.
+func keySource(cfg inputConfig, stream uint64) func() []*int64 {
 	if cfg.KeySpace == 0 {
 		keys := fixedKeys(cfg.Batch)
 		return func() []*int64 { return keys }
 	}
+	rng := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), stream+1))
+	var zipf *rand.Zipf
+	if cfg.KeyDist == "zipf" {
+		zipf = rand.NewZipf(rng, 1.1, 1, uint64(cfg.KeySpace-1))
+	}
 	return func() []*int64 {
 		keys := make([]*int64, cfg.Batch)
 		for i := range keys {
-			key := rand.Int64N(int64(cfg.KeySpace)) + 1
+			key := rng.Int64N(int64(cfg.KeySpace)) + 1
+			if zipf != nil {
+				key = int64(zipf.Uint64()) + 1
+			}
 			keys[i] = &key
 		}
 		return keys
@@ -260,8 +313,19 @@ func fixedKeys(batch int) []*int64 {
 }
 
 func edgeKeys() []*int64 {
-	values := []int64{42, 7, 42, 999999}
-	return []*int64{&values[0], &values[1], &values[2], nil, &values[3]}
+	return checkKeys(defaultCheckIDs())
+}
+
+func defaultCheckIDs() []int64 {
+	return []int64{42, 7, 42, 999999}
+}
+
+func checkKeys(ids []int64) []*int64 {
+	keys := make([]*int64, len(ids))
+	for i := range ids {
+		keys[i] = &ids[i]
+	}
+	return keys
 }
 
 func verifyAny(ctx context.Context, conn *pgx.Conn) (map[string][]string, error) {
@@ -422,6 +486,15 @@ func readInput(reader *bufio.Reader) (inputConfig, error) {
 	if err := json.Unmarshal([]byte(line), &cfg); err != nil {
 		return inputConfig{}, fmt.Errorf("parse config JSON: %w", err)
 	}
+	if cfg.KeyDist == "" {
+		cfg.KeyDist = "uniform"
+	}
+	if cfg.SyncCommit == "" {
+		cfg.SyncCommit = "on"
+	}
+	if cfg.CheckIDs == nil {
+		cfg.CheckIDs = defaultCheckIDs()
+	}
 	if err := validateConfig(cfg); err != nil {
 		return inputConfig{}, err
 	}
@@ -446,6 +519,15 @@ func run(reader *bufio.Reader, writer *bufio.Writer) error {
 	defer cancel()
 	if cfg.Mode == "resp-mget" {
 		return runRESP(reader, writer, cfg, setupCtx)
+	}
+	if cfg.Mode == "valkey-aside" {
+		return runValkeyAside(reader, writer, cfg, setupCtx)
+	}
+	if cfg.Mode == "write" {
+		return runWrite(reader, writer, cfg, setupCtx)
+	}
+	if cfg.Mode == "stale-check" {
+		return runStaleCheck(reader, writer, cfg, setupCtx)
 	}
 	connections, err := connectAll(setupCtx, cfg)
 	if err != nil {
@@ -477,9 +559,9 @@ func run(reader *bufio.Reader, writer *bufio.Writer) error {
 	if strings.TrimSpace(goLine) != "go" {
 		return fmt.Errorf("expected go command")
 	}
-	nextKeys := keySource(cfg)
 	requests := make([]func(context.Context) error, len(connections))
 	for i, conn := range connections {
+		nextKeys := keySource(cfg, uint64(i))
 		requests[i] = func(ctx context.Context) error { return timedRequest(ctx, conn, nextKeys()) }
 	}
 	result, err := runTimed(cfg, requests)
