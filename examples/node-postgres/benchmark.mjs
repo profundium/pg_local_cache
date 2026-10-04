@@ -127,7 +127,7 @@ async function main() {
     const rowCount = (await admin.query('SELECT count(*)::int AS n FROM public.items')).rows[0].n;
     assert.equal(rowCount, 4096, 'run against the unmodified demo dataset');
     const edgeKeys = [42, 7, 42, null, 999999];
-    assert.deepEqual((await getRows(clients[0], edgeKeys)).map(row => row?.id), [42, 7, 42, null, null]);
+    assert.deepEqual((await getRows(clients[0], edgeKeys)).map(row => row?.id ?? null), [42, 7, 42, null, null]);
     // Warm PostgreSQL pages outside benchmark timing.
     await admin.query('SELECT sum(octet_length(value)) FROM public.items');
     const health = (await admin.query('SELECT local_cache.health() AS health')).rows[0].health;

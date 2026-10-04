@@ -104,7 +104,7 @@ try {
   await verifier.connect();
   try {
     const keys = [42,7,42,null,999999];
-    assert.deepEqual((await getRows(verifier, keys)).map(row => row?.id), [42, 7, 42, null, null]);
+    assert.deepEqual((await getRows(verifier, keys)).map(row => row?.id ?? null), [42, 7, 42, null, null]);
     await getRows(verifier, Array.from({ length: 128 }, (_, i) => i + 1));
   } finally { await verifier.end(); }
   const results = [];
