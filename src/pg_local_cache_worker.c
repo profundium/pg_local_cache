@@ -37,6 +37,7 @@
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
+#include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/array.h"
 #include "utils/jsonb.h"
@@ -104,6 +105,10 @@ PG_FUNCTION_INFO_V1(pg_local_cache_test_key_scan_matches);
 #define PGLC_AUTH_TOKEN_FILE_MAX 256
 #define PGLC_TLS_READ_MAX 8192
 #define PGLC_MAX_LOAD_RETRIES 3
+#define PGLC_DEFERRED_REQUEST_BYTES_MAX (512 * 1024)
+#define PGLC_DEFERRED_RETRIES_PER_TURN 8
+
+typedef struct PgLocalCacheDeferredMiss PgLocalCacheDeferredMiss;
 
 typedef struct PgLocalCacheClient
 {
@@ -111,11 +116,16 @@ typedef struct PgLocalCacheClient
 	bool		authenticated;
 	bool		close_after_flush;
 	bool		input_ready;
+	bool		input_eof;
 	uint8		authentication_failures;
 	Size		input_start;
 	Size		used;
 	Size		output_used;
 	Size		output_sent;
+	PgLocalCacheDeferredMiss *deferred_miss;
+	TimestampTz deferred_deadline;
+	bool		deferred_deadline_expired;
+	bool		retrying_deferred_miss;
 #ifdef PGLC_TEST_HOOKS
 	uint64		test_last_request_palloc_count;
 #endif
@@ -137,6 +147,23 @@ typedef struct PgLocalCacheClient
 	char	   *output;
 } PgLocalCacheClient;
 
+struct PgLocalCacheDeferredMiss
+{
+	PgLocalCacheDeferredMiss *next;
+	PgLocalCacheClient *client;
+	Size		request_offset;
+	Size		request_length;
+	TimestampTz deadline;
+	uint64		mapping_generation;
+};
+
+typedef enum PgLocalCacheDeferredResult
+{
+	PGLC_DEFERRED_QUEUED,
+	PGLC_DEFERRED_QUEUE_FULL,
+	PGLC_DEFERRED_EXPIRED
+} PgLocalCacheDeferredResult;
+
 static MemoryContext mapping_context = NULL;
 static MemoryContext reload_context = NULL;
 static MemoryContext command_context = NULL;
@@ -151,6 +178,13 @@ static char *worker_auth_token = NULL;
 static bool bind_address_is_loopback(const char *address);
 static uint64 worker_client_reservations = 0;
 static bool worker_counted_active = false;
+static PgLocalCacheDeferredMiss *deferred_misses_head = NULL;
+static PgLocalCacheDeferredMiss *deferred_misses_tail = NULL;
+static int deferred_misses_count = 0;
+static Size deferred_misses_bytes = 0;
+static uint64 deferred_misses_total = 0;
+static uint64 deferred_timeouts_total = 0;
+static uint64 deferred_rejections_total = 0;
 #ifdef USE_OPENSSL
 static SSL_CTX *worker_ssl_ctx = NULL;
 #endif
@@ -167,7 +201,13 @@ static bool flush_client_output(PgLocalCacheClient *client);
 static bool queue_response(PgLocalCacheClient *client,
 						   const char *response, Size response_length,
 						   bool close_after);
-static bool process_client(PgLocalCacheClient *client);
+static bool process_client(PgLocalCacheClient *client,
+						   bool retry_tls_read);
+static void retry_deferred_misses(void);
+static int deferred_miss_poll_timeout(int current_timeout);
+static PgLocalCacheDeferredResult enqueue_deferred_miss(
+	PgLocalCacheClient *client, Size request_length, TimestampTz deadline);
+static void remove_deferred_miss(PgLocalCacheClient *client);
 static bool try_fast_mget_hit(PgLocalCacheClient *client,
 							  PgLocalCacheRespArg *args, int argc);
 static void note_resp_cache_lookup(bool hit, bool negative);
@@ -183,9 +223,11 @@ static ssize_t client_send(PgLocalCacheClient *client, const void *buffer, Size 
 #endif
 static char *execute_command(PgLocalCacheClient *client,
 							 PgLocalCacheRespArg *args, int argc,
+							 Size request_length,
 							 Size *response_length, bool *close_after);
 static char *execute_command_inner(PgLocalCacheClient *client,
 								   PgLocalCacheRespArg *args, int argc,
+								   Size request_length,
 								   Size *response_length, bool *close_after);
 static void maybe_reload_mappings(void);
 static void worker_process_config_reload(void);
@@ -208,9 +250,12 @@ static char *command_mget_one(PgLocalCacheMapping *mapping,
 								  const char *canonical, Datum *key_values,
 								  TimestampTz deadline,
 								  bool waiter_already_counted,
+								  bool *relation_locked,
 								  Size *response_length);
-static char *command_mget(PgLocalCacheRespArg *args, int argc,
-							  Size *response_length);
+static char *command_mget(PgLocalCacheClient *client,
+						  PgLocalCacheRespArg *args, int argc,
+						  Size request_length,
+						  Size *response_length);
 
 typedef struct PgLocalCacheMgetItem
 {
@@ -338,6 +383,9 @@ pglc_worker_memory_bytes_per_worker(void)
 		return 0;
 	slots = (Size) pglc_max_clients_per_worker;
 	bytes = mul_size(slots, sizeof(PgLocalCacheClient));
+	bytes = add_size(bytes,
+				 mul_size((Size) pglc_max_deferred_misses,
+						  MAXALIGN(sizeof(PgLocalCacheDeferredMiss))));
 	bytes = add_size(bytes,
 				 mul_size(slots + 1, sizeof(struct pollfd)));
 	bytes = add_size(bytes, mul_size(slots + 1, sizeof(int)));
@@ -852,6 +900,7 @@ client_has_tls_input(PgLocalCacheClient *client)
 {
 	return client->ssl != NULL && client->tls_ready &&
 		client->tls_read_wait == 0 && client->tls_write_wait == 0 &&
+		client->used < PGLC_REQUEST_MAX && !client->input_eof &&
 		SSL_pending(client->ssl) > 0;
 }
 
@@ -962,6 +1011,8 @@ run_server(int listener)
 
 		worker_process_config_reload();
 		maybe_reload_mappings();
+		retry_deferred_misses();
+		poll_timeout = deferred_miss_poll_timeout(poll_timeout);
 
 		/*
 		 * A fairness yield leaves complete requests in the client buffer.  Give
@@ -995,11 +1046,12 @@ run_server(int listener)
 				   client->tls_write_wait == POLLIN ||
 				   client->tls_write_wait == POLLOUT);
 			if (client->tls_handshake_wait != 0 ||
-				client->tls_read_wait != 0 || client->tls_write_wait != 0)
+				client->tls_write_wait != 0 ||
+				(client->tls_read_wait != 0 && !client->input_ready))
 				continue;
 #endif
 			client->input_ready = false;
-			if (!process_client(client))
+			if (!process_client(client, false))
 				close_client(client);
 			next_ready_client =
 				(client_index + 1) % client_slots;
@@ -1074,19 +1126,19 @@ run_server(int listener)
 							clients[i].tls_write_wait |
 							clients[i].tls_read_wait;
 						if (clients[i].tls_read_wait == 0 &&
-							clients[i].output_sent == clients[i].output_used)
+							clients[i].output_sent == clients[i].output_used &&
+							clients[i].used < PGLC_REQUEST_MAX &&
+							!clients[i].input_eof)
 							poll_fds[poll_count].events |= POLLIN;
 					}
-					Assert(poll_fds[poll_count].events != 0);
 				}
 				else
 #endif
 				poll_fds[poll_count].events =
 					(clients[i].output_sent < clients[i].output_used) ?
-					POLLOUT : POLLIN;
-				poll_fds[poll_count].revents = 0;
-				poll_to_client[poll_count] = i;
-				poll_count++;
+					POLLOUT :
+					(clients[i].used < PGLC_REQUEST_MAX &&
+					 !clients[i].input_eof ? POLLIN : 0);
 				if ((clients[i].input_ready
 #ifdef USE_OPENSSL
 					 || client_has_tls_input(&clients[i])
@@ -1095,13 +1147,18 @@ run_server(int listener)
 					clients[i].output_sent == clients[i].output_used)
 				{
 #ifdef USE_OPENSSL
-					if (clients[i].tls_handshake_wait != 0 ||
-						clients[i].tls_read_wait != 0 ||
-						clients[i].tls_write_wait != 0)
-						continue;
+					if (clients[i].tls_handshake_wait == 0 &&
+						clients[i].tls_write_wait == 0 &&
+						(clients[i].tls_read_wait == 0 ||
+						 clients[i].input_ready))
 #endif
-					have_buffered_ready = true;
+						have_buffered_ready = true;
 				}
+				if (poll_fds[poll_count].events == 0)
+					continue;
+				poll_fds[poll_count].revents = 0;
+				poll_to_client[poll_count] = i;
+				poll_count++;
 			}
 		}
 
@@ -1230,6 +1287,7 @@ run_server(int listener)
 				clients[slot].output_sent = 0;
 				clients[slot].close_after_flush = false;
 				clients[slot].input_ready = false;
+				clients[slot].input_eof = false;
 				clients[slot].authentication_failures = 0;
 #ifdef USE_OPENSSL
 				clients[slot].last_activity = ssl == NULL ? accepted_at : 0;
@@ -1318,13 +1376,15 @@ run_server(int listener)
 					if (operation_ok &&
 						clients[client_index].output_sent ==
 						clients[client_index].output_used &&
-						clients[client_index].input_start <
-						clients[client_index].used)
+						(clients[client_index].input_start <
+						 clients[client_index].used ||
+						 clients[client_index].input_eof))
 						clients[client_index].input_ready = true;
 				}
 				if (operation_ok && read_retry_ready &&
 					clients[client_index].fd >= 0)
-					operation_ok = process_client(&clients[client_index]);
+					operation_ok =
+						process_client(&clients[client_index], true);
 				if (!operation_ok)
 				{
 					close_client(&clients[client_index]);
@@ -1348,8 +1408,9 @@ run_server(int listener)
 					}
 					if (clients[client_index].output_sent ==
 						clients[client_index].output_used &&
-						clients[client_index].input_start <
-						clients[client_index].used)
+						(clients[client_index].input_start <
+						 clients[client_index].used ||
+						 clients[client_index].input_eof))
 						clients[client_index].input_ready = true;
 				}
 				if (clients[client_index].fd >= 0 &&
@@ -1358,7 +1419,7 @@ run_server(int listener)
 					clients[client_index].tls_read_wait == 0 &&
 					(revents & POLLIN))
 				{
-					if (!process_client(&clients[client_index]))
+					if (!process_client(&clients[client_index], false))
 						close_client(&clients[client_index]);
 				}
 				if (clients[client_index].fd < 0)
@@ -1376,7 +1437,7 @@ run_server(int listener)
 					}
 					if (!(revents & POLLIN))
 					{
-						if (!process_client(&clients[client_index]))
+						if (!process_client(&clients[client_index], false))
 						{
 							close_client(&clients[client_index]);
 							continue;
@@ -1410,15 +1471,16 @@ run_server(int listener)
 				}
 				if (clients[client_index].output_sent ==
 					clients[client_index].output_used &&
-					clients[client_index].input_start <
-					clients[client_index].used)
+					(clients[client_index].input_start <
+					 clients[client_index].used ||
+					 clients[client_index].input_eof))
 					clients[client_index].input_ready = true;
 				if (!(poll_fds[i].revents & POLLHUP))
 					continue;
 			}
 			if (poll_fds[i].revents & POLLIN)
 			{
-				if (!process_client(&clients[client_index]))
+				if (!process_client(&clients[client_index], false))
 					close_client(&clients[client_index]);
 			}
 			if (clients[client_index].fd < 0)
@@ -1460,9 +1522,211 @@ run_server(int listener)
 	pfree(clients);
 }
 
+static PgLocalCacheDeferredResult
+enqueue_deferred_miss(PgLocalCacheClient *client, Size request_length,
+					  TimestampTz deadline)
+{
+	PgLocalCacheDeferredMiss *miss;
+	MemoryContext old_context;
+
+	if (GetCurrentTimestamp() >= deadline)
+		return PGLC_DEFERRED_EXPIRED;
+	if (client->deferred_miss != NULL ||
+		deferred_misses_count >= pglc_max_deferred_misses ||
+		request_length > PGLC_DEFERRED_REQUEST_BYTES_MAX -
+		deferred_misses_bytes)
+	{
+		if (!client->retrying_deferred_miss)
+			deferred_rejections_total++;
+		return PGLC_DEFERRED_QUEUE_FULL;
+	}
+
+	old_context = MemoryContextSwitchTo(TopMemoryContext);
+	miss = MemoryContextAllocZero(TopMemoryContext, sizeof(*miss));
+	MemoryContextSwitchTo(old_context);
+	miss->client = client;
+	miss->request_offset = client->input_start;
+	miss->request_length = request_length;
+	miss->deadline = deadline;
+	miss->mapping_generation = worker_mapping_generation;
+	if (deferred_misses_tail == NULL)
+		deferred_misses_head = miss;
+	else
+		deferred_misses_tail->next = miss;
+	deferred_misses_tail = miss;
+	client->deferred_miss = miss;
+	client->deferred_deadline = deadline;
+	client->deferred_deadline_expired = false;
+	deferred_misses_count++;
+	deferred_misses_bytes += request_length;
+	if (!client->retrying_deferred_miss)
+		deferred_misses_total++;
+	return PGLC_DEFERRED_QUEUED;
+}
+
+static void
+remove_deferred_miss(PgLocalCacheClient *client)
+{
+	PgLocalCacheDeferredMiss *miss = client->deferred_miss;
+	PgLocalCacheDeferredMiss *previous = NULL;
+	PgLocalCacheDeferredMiss *current;
+
+	if (miss == NULL)
+		return;
+	for (current = deferred_misses_head; current != NULL;
+		 current = current->next)
+	{
+		if (current == miss)
+			break;
+		previous = current;
+	}
+	Assert(current == miss);
+	if (previous == NULL)
+		deferred_misses_head = miss->next;
+	else
+		previous->next = miss->next;
+	if (deferred_misses_tail == miss)
+		deferred_misses_tail = previous;
+	Assert(deferred_misses_count > 0);
+	Assert(deferred_misses_bytes >= miss->request_length);
+	deferred_misses_count--;
+	deferred_misses_bytes -= miss->request_length;
+	client->deferred_miss = NULL;
+	pfree(miss);
+}
+
+static void
+rotate_deferred_miss_head(void)
+{
+	PgLocalCacheDeferredMiss *miss = deferred_misses_head;
+
+	if (miss == NULL || miss->next == NULL)
+		return;
+	deferred_misses_head = miss->next;
+	miss->next = NULL;
+	deferred_misses_tail->next = miss;
+	deferred_misses_tail = miss;
+}
+
+static void
+retry_deferred_misses(void)
+{
+	int			attempts = Min(deferred_misses_count,
+								 PGLC_DEFERRED_RETRIES_PER_TURN);
+	int			attempt;
+
+	for (attempt = 0; attempt < attempts && deferred_misses_head != NULL;
+		 attempt++)
+	{
+		PgLocalCacheDeferredMiss *miss = deferred_misses_head;
+		PgLocalCacheClient *client = miss->client;
+
+		if (GetCurrentTimestamp() >= miss->deadline)
+			client->deferred_deadline_expired = true;
+		if (client->output_sent < client->output_used)
+		{
+			rotate_deferred_miss_head();
+			continue;
+		}
+#ifdef USE_OPENSSL
+		if (client->ssl != NULL && client->tls_write_wait != 0)
+		{
+			rotate_deferred_miss_head();
+			continue;
+		}
+#endif
+		if (client->deferred_deadline_expired)
+		{
+			MemoryContext old_context =
+				MemoryContextSwitchTo(command_context);
+			Size		response_length;
+			char	   *response = pglc_resp_error(
+				"ERR MGET deadline exceeded", &response_length);
+			bool		queued = queue_response(client, response,
+											 response_length, false);
+
+			MemoryContextSwitchTo(old_context);
+			MemoryContextReset(command_context);
+			if (!queued)
+			{
+				rotate_deferred_miss_head();
+				continue;
+			}
+			Assert(client->input_start == miss->request_offset);
+			client->input_start += miss->request_length;
+			client->deferred_miss = NULL;
+			client->deferred_deadline = 0;
+			client->deferred_deadline_expired = false;
+			client->retrying_deferred_miss = false;
+			client->input_ready = client->input_start < client->used ||
+				client->input_eof;
+			deferred_timeouts_total++;
+			deferred_misses_head = miss->next;
+			deferred_misses_count--;
+			deferred_misses_bytes -= miss->request_length;
+			if (deferred_misses_head == NULL)
+				deferred_misses_tail = NULL;
+			pfree(miss);
+			continue;
+		}
+
+		/* The input cursor retains wire bytes, never mapping pointers. */
+		if (miss->mapping_generation != worker_mapping_generation)
+			maybe_reload_mappings();
+		Assert(miss->request_offset + miss->request_length <= client->used);
+		deferred_misses_head = miss->next;
+		if (deferred_misses_head == NULL)
+			deferred_misses_tail = NULL;
+		miss->next = NULL;
+		deferred_misses_count--;
+		deferred_misses_bytes -= miss->request_length;
+		client->deferred_miss = NULL;
+		client->retrying_deferred_miss = true;
+		client->deferred_deadline = miss->deadline;
+		client->deferred_deadline_expired = false;
+		pfree(miss);
+		if (!process_client(client, false))
+			close_client(client);
+	}
+}
+
+static int
+deferred_miss_poll_timeout(int current_timeout)
+{
+	PgLocalCacheDeferredMiss *miss;
+	TimestampTz now = GetCurrentTimestamp();
+	int64		remaining_us;
+	int64		remaining_ms;
+
+	for (miss = deferred_misses_head; miss != NULL; miss = miss->next)
+	{
+		PgLocalCacheClient *client = miss->client;
+		bool		transport_blocked =
+			client->output_sent < client->output_used;
+
+#ifdef USE_OPENSSL
+		transport_blocked |= client->ssl != NULL &&
+			client->tls_write_wait != 0;
+#endif
+		remaining_us = miss->deadline - now;
+		if (remaining_us <= 0)
+		{
+			client->deferred_deadline_expired = true;
+			if (!transport_blocked)
+				return 0;
+			continue;
+		}
+		remaining_ms = (remaining_us + 999) / 1000;
+		current_timeout = Min(current_timeout,
+							  (int) Min(remaining_ms, INT_MAX));
+	}
+	return current_timeout;
+}
+
 static void
 close_client(PgLocalCacheClient *client)
 {
+	remove_deferred_miss(client);
 	if (client->fd >= 0)
 	{
 #ifdef USE_OPENSSL
@@ -1507,8 +1771,12 @@ close_client(PgLocalCacheClient *client)
 	client->used = 0;
 	client->output_used = 0;
 	client->output_sent = 0;
+	client->deferred_deadline = 0;
+	client->deferred_deadline_expired = false;
+	client->retrying_deferred_miss = false;
 	client->close_after_flush = false;
 	client->input_ready = false;
+	client->input_eof = false;
 	client->authentication_failures = 0;
 	client->authenticated = false;
 #ifdef USE_OPENSSL
@@ -1593,11 +1861,19 @@ queue_response(PgLocalCacheClient *client,
 static bool
 finish_client_turn(PgLocalCacheClient *client)
 {
-	if (client->input_start == client->used)
+	if (client->input_start == client->used
+#ifdef USE_OPENSSL
+		&& (client->ssl == NULL || client->tls_write_wait != 0 ||
+			client->tls_read_wait == 0)
+#endif
+		)
 	{
 		client->input_start = 0;
 		client->used = 0;
 	}
+	if (client->input_eof && client->deferred_miss == NULL &&
+		client->input_start == client->used)
+		client->close_after_flush = true;
 #ifdef USE_OPENSSL
 	if (client->ssl != NULL && client->tls_write_wait != 0)
 		return true;
@@ -1609,11 +1885,12 @@ finish_client_turn(PgLocalCacheClient *client)
 }
 
 static bool
-process_client(PgLocalCacheClient *client)
+process_client(PgLocalCacheClient *client, bool retry_tls_read)
 {
 	bool		read_attempted = false;
 	int			commands_processed = 0;
 
+	(void) retry_tls_read;
 #ifdef USE_OPENSSL
 	Assert(client->tls_read_wait == 0 ||
 		   client->tls_read_wait == POLLIN ||
@@ -1626,15 +1903,42 @@ process_client(PgLocalCacheClient *client)
 		)
 		return true;
 	client->input_ready = false;
+	if (client->deferred_miss != NULL)
+	{
+		ssize_t		received = -1;
+
+		if (client->used < PGLC_REQUEST_MAX && !client->input_eof
+#ifdef USE_OPENSSL
+			&& (client->ssl == NULL || client->tls_read_wait == 0 ||
+				retry_tls_read)
+#endif
+			)
+			received = client_recv(client, client->input + client->used,
+								   PGLC_REQUEST_MAX - client->used);
+		else
+			return finish_client_turn(client);
+		if (received < 0 && errno == EINTR)
+			return finish_client_turn(client);
+		if (received == 0)
+		{
+			client->input_eof = true;
+			return finish_client_turn(client);
+		}
+		if (received > 0)
+		{
+			client->used += (Size) received;
+			client->last_activity = GetCurrentTimestamp();
+			return finish_client_turn(client);
+		}
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return finish_client_turn(client);
+		return false;
+	}
 	maybe_reload_mappings();
 
 	for (;;)
 	{
-		while (client->input_start < client->used
-#ifdef USE_OPENSSL
-			   && client->tls_read_wait == 0
-#endif
-			)
+		while (client->input_start < client->used)
 		{
 			PgLocalCacheRespArg args[PGLC_RESP_MAX_ARGS];
 			int			argc;
@@ -1685,7 +1989,17 @@ process_client(PgLocalCacheClient *client)
 #ifdef PGLC_TEST_HOOKS
 				(void) pglc_test_end_request_palloc_count(false);
 #endif
+#ifdef USE_OPENSSL
+				if (client->ssl == NULL || client->tls_read_wait == 0)
+					compact_client_input(client);
+#else
 				compact_client_input(client);
+#endif
+				if (client->input_eof)
+				{
+					client->input_start = client->used;
+					break;
+				}
 				if (client->used == PGLC_REQUEST_MAX)
 				{
 					client->close_after_flush = true;
@@ -1721,14 +2035,21 @@ process_client(PgLocalCacheClient *client)
 				return finish_client_turn(client);
 			}
 
-			pg_atomic_fetch_add_u64(
-				&pglc_shared->stats_shards[worker_slot].client_requests, 1);
+			if (!client->retrying_deferred_miss)
+				pg_atomic_fetch_add_u64(
+					&pglc_shared->stats_shards[worker_slot].client_requests, 1);
 			if (try_fast_mget_hit(client, args, argc))
 			{
 #ifdef PGLC_TEST_HOOKS
 				client->test_last_request_palloc_count =
 					pglc_test_end_request_palloc_count(true);
 #endif
+				if (client->retrying_deferred_miss)
+				{
+					client->retrying_deferred_miss = false;
+					client->deferred_deadline = 0;
+					client->deferred_deadline_expired = false;
+				}
 				client->input_start += consumed;
 				commands_processed++;
 				if (commands_processed >= pglc_max_pipeline_commands)
@@ -1739,8 +2060,21 @@ process_client(PgLocalCacheClient *client)
 				continue;
 			}
 			previous_context = MemoryContextSwitchTo(command_context);
-			response = execute_command(client, args, argc,
-								   &response_length, &close_after);
+			response = execute_command(client, args, argc, consumed,
+							   &response_length, &close_after);
+			if (response == NULL && client->deferred_miss != NULL)
+			{
+#ifdef PGLC_TEST_HOOKS
+				client->test_last_request_palloc_count =
+					pglc_test_end_request_palloc_count(true);
+#endif
+				Assert(CurrentMemoryContext == command_context);
+				MemoryContextSwitchTo(previous_context);
+				MemoryContextReset(command_context);
+				return finish_client_turn(client);
+			}
+			if (response == NULL)
+				elog(ERROR, "pg_local_cache deferred MGET lost its queue entry");
 			if (response_length > 0 && response[0] == '-')
 				pg_atomic_fetch_add_u64(
 					&pglc_shared->stats_shards[worker_slot].client_request_errors, 1);
@@ -1752,6 +2086,12 @@ process_client(PgLocalCacheClient *client)
 #endif
 			if (queued)
 				client->input_start += consumed;
+			if (queued && client->retrying_deferred_miss)
+			{
+				client->retrying_deferred_miss = false;
+				client->deferred_deadline = 0;
+				client->deferred_deadline_expired = false;
+			}
 			Assert(CurrentMemoryContext == command_context);
 			MemoryContextSwitchTo(previous_context);
 			MemoryContextReset(command_context);
@@ -1774,6 +2114,13 @@ process_client(PgLocalCacheClient *client)
 
 		if (read_attempted)
 			break;
+		if (client->input_eof)
+			break;
+#ifdef USE_OPENSSL
+		if (client->ssl != NULL && client->tls_read_wait != 0 &&
+			!retry_tls_read)
+			break;
+#endif
 
 #ifdef USE_OPENSSL
 		if (client->tls_read_wait == 0)
@@ -1807,8 +2154,8 @@ process_client(PgLocalCacheClient *client)
 			read_attempted = true;
 			if (received == 0)
 			{
-				client->close_after_flush = true;
-				return finish_client_turn(client);
+				client->input_eof = true;
+				break;
 			}
 			if (received > 0)
 			{
@@ -1834,15 +2181,16 @@ process_client(PgLocalCacheClient *client)
 
 static char *
 execute_command(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int argc,
-				Size *response_length, bool *close_after)
+				Size request_length, Size *response_length,
+				bool *close_after)
 {
 	MemoryContext error_context = CurrentMemoryContext;
 	char	   *response = NULL;
 
 	PG_TRY();
 	{
-		response = execute_command_inner(client, args, argc,
-										 response_length, close_after);
+		response = execute_command_inner(client, args, argc, request_length,
+											 response_length, close_after);
 	}
 	PG_CATCH();
 	{
@@ -1895,8 +2243,31 @@ raw_response(const char *value, Size *length)
 }
 
 static char *
+worker_stats_json(void)
+{
+	char	   *base = pglc_stats_json();
+	Size		base_length = strlen(base);
+	StringInfoData expanded;
+
+	if (base_length == 0 || base[base_length - 1] != '}')
+		return base;
+	initStringInfo(&expanded);
+	appendBinaryStringInfo(&expanded, base, (int) base_length - 1);
+	appendStringInfo(&expanded,
+					 ",\"deferred_misses_total\":" UINT64_FORMAT
+					 ",\"deferred_misses_current\":%d"
+					 ",\"deferred_timeouts_total\":" UINT64_FORMAT
+					 ",\"deferred_rejections_total\":" UINT64_FORMAT,
+					 deferred_misses_total, deferred_misses_count,
+					 deferred_timeouts_total, deferred_rejections_total);
+	appendStringInfoChar(&expanded, '}');
+	return expanded.data;
+}
+
+static char *
 execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int argc,
-					  Size *response_length, bool *close_after)
+					  Size request_length, Size *response_length,
+					  bool *close_after)
 {
 	char	   *raw_key;
 	char	   *key_error;
@@ -1983,7 +2354,8 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 		if (argc > PGLC_MGET_MAX_KEYS + 1)
 			return pglc_resp_error("ERR MGET accepts at most 1024 keys",
 								  response_length);
-		return command_mget(args, argc, response_length);
+		return command_mget(client, args, argc, request_length,
+						response_length);
 	}
 
 	if (pglc_resp_arg_equals(&args[0], "PING"))
@@ -2074,7 +2446,7 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 		if (argc != 1)
 			return pglc_resp_error("ERR wrong number of arguments for STAT",
 								  response_length);
-		json = pglc_stats_json();
+		json = worker_stats_json();
 		return pglc_resp_bulk(json, strlen(json), response_length);
 	}
 	if (pglc_resp_arg_equals(&args[0], "INVALIDATE"))
@@ -2673,8 +3045,9 @@ try_fast_mget_hit(PgLocalCacheClient *client, PgLocalCacheRespArg *args,
 		client->output_used += response_length;
 		pg_atomic_fetch_add_u64(
 			&pglc_shared->stats_shards[worker_slot].fast_path_hits, 1);
-		pg_atomic_fetch_add_u64(
-			&pglc_shared->stats_shards[worker_slot].client_mget_keys, 1);
+		if (!client->retrying_deferred_miss)
+			pg_atomic_fetch_add_u64(
+				&pglc_shared->stats_shards[worker_slot].client_mget_keys, 1);
 		note_resp_cache_lookup(true, negative);
 		return true;
 	}
@@ -2807,6 +3180,95 @@ begin_spi_transaction(int statement_timeout_ms)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	return caller_context;
+}
+
+/*
+ * Begin a source-read transaction only after all source relations have been
+ * conditionally locked.  A failed conditional lock aborts the empty
+ * transaction, which releases only the AccessShareLocks acquired by this
+ * request, without entering SPI or waiting on the relation lock.
+ */
+static MemoryContext
+begin_mget_spi_transaction(int statement_timeout_ms,
+							 PgLocalCacheMgetItem *items, int item_count,
+							 PgLocalCacheMapping *single_mapping,
+							 bool *relation_locked)
+{
+	MemoryContext caller_context = CurrentMemoryContext;
+	Oid			relation_oids[PGLC_MGET_MAX_KEYS];
+	int			relation_count = 0;
+	int			item_index;
+	char		timeout[32];
+
+	Assert(statement_timeout_ms > 0);
+	*relation_locked = false;
+	PG_TRY();
+	{
+		StartTransactionCommand();
+		if (single_mapping != NULL)
+		{
+			relation_oids[relation_count++] = single_mapping->relation_oid;
+		}
+		else
+		{
+			for (item_index = 0; item_index < item_count; item_index++)
+			{
+				PgLocalCacheMgetItem *item = &items[item_index];
+				int			prior;
+				bool		already_locked = false;
+
+				if (item->result_ready || item->deferred)
+					continue;
+				for (prior = 0; prior < relation_count; prior++)
+				{
+					if (relation_oids[prior] == item->mapping->relation_oid)
+					{
+						already_locked = true;
+						break;
+					}
+				}
+				if (!already_locked)
+					relation_oids[relation_count++] =
+						item->mapping->relation_oid;
+			}
+		}
+
+		for (item_index = 0; item_index < relation_count; item_index++)
+		{
+			if (!ConditionalLockRelationOid(relation_oids[item_index],
+											AccessShareLock))
+			{
+				abort_spi_transaction(caller_context);
+				*relation_locked = true;
+				break;
+			}
+		}
+		if (!*relation_locked)
+		{
+			if (SPI_connect() != SPI_OK_CONNECT)
+				elog(ERROR, "pg_local_cache could not connect to SPI");
+			PushActiveSnapshot(GetTransactionSnapshot());
+
+			snprintf(timeout, sizeof(timeout), "%d", statement_timeout_ms);
+			(void) set_config_option("statement_timeout", timeout,
+								 PGC_USERSET, PGC_S_SESSION,
+								 GUC_ACTION_LOCAL, true, ERROR, false);
+			snprintf(timeout, sizeof(timeout), "%d", pglc_lock_timeout_ms);
+			(void) set_config_option("lock_timeout", timeout,
+								 PGC_USERSET, PGC_S_SESSION,
+								 GUC_ACTION_LOCAL, true, ERROR, false);
+			enable_timeout_after(STATEMENT_TIMEOUT, statement_timeout_ms);
+		}
+	}
+	PG_CATCH();
+	{
+		abort_spi_transaction(caller_context);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (*relation_locked)
+		return NULL;
 	return caller_context;
 }
 
@@ -3039,6 +3501,7 @@ static char *
 command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 					Datum *key_values, TimestampTz deadline,
 					bool waiter_already_counted,
+					bool *relation_locked,
 					Size *response_length)
 {
 	char		cached_value[PGLC_VALUE_MAX];
@@ -3198,9 +3661,22 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 										 remaining_ms);
 	}
 
+	*relation_locked = false;
 	PG_TRY();
 	{
-		transaction_context = begin_spi_transaction(statement_timeout_ms);
+		transaction_context = begin_mget_spi_transaction(statement_timeout_ms,
+												 NULL, 0, mapping,
+												 relation_locked);
+		if (transaction_context == NULL)
+		{
+			if (owns_load)
+			{
+				pglc_cache_release_load(mapping, canonical, &token, load_id);
+				owns_load = false;
+			}
+		}
+		else
+		{
 		ensure_mapping_current(mapping);
 		pg_atomic_fetch_add_u64(
 			&pglc_shared->stats_shards[worker_slot].pass_to_main, 1);
@@ -3277,6 +3753,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 			pglc_cache_release_load(mapping, canonical, &token, load_id);
 			owns_load = false;
 		}
+		}
 	}
 	PG_CATCH();
 	{
@@ -3285,6 +3762,8 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	if (*relation_locked)
+		return NULL;
 
 	if (database_value == NULL)
 		return pglc_resp_null(response_length);
@@ -3294,17 +3773,20 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 }
 
 static char *
-command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
+command_mget(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int argc,
+			Size request_length, Size *response_length)
 {
 	int			key_count = argc - 1;
-	TimestampTz deadline = TimestampTzPlusMilliseconds(
-		GetCurrentTimestamp(), pglc_statement_timeout_ms);
+	TimestampTz deadline = client->retrying_deferred_miss ?
+		client->deferred_deadline : TimestampTzPlusMilliseconds(
+			GetCurrentTimestamp(), pglc_statement_timeout_ms);
 	PgLocalCacheMgetItem *items;
 	int		   *slot_items;
 	int			item_count = 0;
 	int			key_index;
 	Size		response_size;
 	volatile bool failed = false;
+	volatile bool relation_blocked = false;
 	volatile int failure_code = 0; /* 1 = deadline, 2 = response limit */
 	char	   * volatile command_error = NULL;
 	volatile Size command_error_length = 0;
@@ -3349,9 +3831,10 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 		items[item_index].response_slots++;
 	}
 
-	pg_atomic_fetch_add_u64(
-		&pglc_shared->stats_shards[worker_slot].client_mget_keys,
-		(uint64) key_count);
+	if (!client->retrying_deferred_miss)
+		pg_atomic_fetch_add_u64(
+			&pglc_shared->stats_shards[worker_slot].client_mget_keys,
+			(uint64) key_count);
 	response_size = 1 + mget_decimal_digits((Size) key_count) + 2;
 	for (key_index = 0; key_index < item_count; key_index++)
 	{
@@ -3443,59 +3926,67 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 			{
 				int			statement_timeout_ms = (int) Min(
 					(long) pglc_statement_timeout_ms, remaining_ms);
+				bool		lock_failed = false;
 
-				transaction_context = begin_spi_transaction(
-					statement_timeout_ms);
-				for (item_index = 0; item_index < item_count; item_index++)
+				transaction_context = begin_mget_spi_transaction(
+					statement_timeout_ms, items, item_count, NULL,
+					&lock_failed);
+				relation_blocked = lock_failed;
+				if (transaction_context == NULL)
+					relation_blocked = true;
+				else
 				{
-					PgLocalCacheMgetItem *item = &items[item_index];
+					for (item_index = 0; item_index < item_count; item_index++)
+					{
+						PgLocalCacheMgetItem *item = &items[item_index];
 
-					if (item->result_ready || item->deferred)
-						continue;
-					if (GetCurrentTimestamp() >= deadline)
+						if (item->result_ready || item->deferred)
+							continue;
+						if (GetCurrentTimestamp() >= deadline)
+						{
+							failed = true;
+							failure_code = 1;
+							break;
+						}
+						mget_read_one(item, result_context);
+						if (!mget_account_result(item, &response_size))
+						{
+							failed = true;
+							failure_code = 2;
+							break;
+						}
+					}
+					{
+						MemoryContext commit_context =
+							(MemoryContext) transaction_context;
+
+						/* commit_spi_transaction aborts internally before rethrowing. */
+						transaction_context = NULL;
+						commit_spi_transaction(commit_context);
+					}
+					for (item_index = 0; item_index < item_count; item_index++)
+					{
+						PgLocalCacheMgetItem *item = &items[item_index];
+
+						if (!item->database_read)
+							continue;
+						pglc_note_database_read();
+						if (!failed)
+						{
+							if (item->null_result)
+								item->response_element = pglc_resp_null(
+										&item->response_element_length);
+							else
+								item->response_element = pglc_resp_bulk(
+										item->json, item->json_length,
+										&item->response_element_length);
+						}
+					}
+					if (!failed && GetCurrentTimestamp() >= deadline)
 					{
 						failed = true;
 						failure_code = 1;
-						break;
 					}
-					mget_read_one(item, result_context);
-					if (!mget_account_result(item, &response_size))
-					{
-						failed = true;
-						failure_code = 2;
-						break;
-					}
-				}
-				{
-					MemoryContext commit_context =
-						(MemoryContext) transaction_context;
-
-					/* commit_spi_transaction aborts internally before rethrowing. */
-					transaction_context = NULL;
-					commit_spi_transaction(commit_context);
-				}
-				for (item_index = 0; item_index < item_count; item_index++)
-				{
-					PgLocalCacheMgetItem *item = &items[item_index];
-
-					if (!item->database_read)
-						continue;
-					pglc_note_database_read();
-					if (!failed)
-					{
-						if (item->null_result)
-							item->response_element = pglc_resp_null(
-								&item->response_element_length);
-						else
-							item->response_element = pglc_resp_bulk(
-								item->json, item->json_length,
-								&item->response_element_length);
-					}
-				}
-				if (!failed && GetCurrentTimestamp() >= deadline)
-				{
-					failed = true;
-					failure_code = 1;
 				}
 			}
 		}
@@ -3526,9 +4017,11 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 		}
 
 		/* WAIT handling starts only after every owner claim is stored/released. */
-		for (item_index = 0; item_index < item_count && !failed; item_index++)
+		for (item_index = 0; item_index < item_count && !failed &&
+			 !relation_blocked; item_index++)
 		{
 			PgLocalCacheMgetItem *item = &items[item_index];
+			bool		single_relation_locked = false;
 
 			if (!item->deferred)
 				continue;
@@ -3540,7 +4033,13 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 			}
 			item->response_element = command_mget_one(
 				item->mapping, item->canonical, item->key_values,
-				deadline, true, &item->response_element_length);
+				deadline, true, &single_relation_locked,
+				&item->response_element_length);
+			if (single_relation_locked)
+			{
+				relation_blocked = true;
+				break;
+			}
 			if (item->response_element_length > 0 &&
 				item->response_element[0] == '-')
 			{
@@ -3565,6 +4064,24 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	if (relation_blocked)
+	{
+		PgLocalCacheDeferredResult deferred_result;
+
+		mget_release_claims(items, item_count);
+		deferred_result = enqueue_deferred_miss(client, request_length,
+											deadline);
+		if (deferred_result == PGLC_DEFERRED_QUEUED)
+		{
+			*response_length = 0;
+			return NULL;
+		}
+		if (deferred_result == PGLC_DEFERRED_EXPIRED)
+			return pglc_resp_error("ERR MGET deadline exceeded",
+								  response_length);
+		return pglc_resp_error("ERR busy: relation locked, retry",
+							  response_length);
+	}
 
 	if (failed)
 	{

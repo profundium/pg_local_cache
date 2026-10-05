@@ -9,6 +9,7 @@ from pipeline_integration import (
     RespConnection,
     WORKER_ROLE,
     crud_key,
+    guc_number,
     read_cache_stats,
     row_bytes,
     sql,
@@ -110,14 +111,9 @@ def main() -> None:
     marker_fault_ids = allocate_insert_ids(fault_count)
     storm_ids = allocate_insert_ids(2_048)
     pressure_ids = allocate_insert_ids(PRESSURE_ROWS)
-    entries = int(sql("SELECT current_setting('pg_local_cache.cache_entries')::integer"))
+    entries = guc_number("pg_local_cache.cache_entries")
     assert entries >= ROW_COUNT, entries
-    budget_mb = int(
-        sql(
-            "SELECT setting FROM pg_catalog.pg_settings "
-            "WHERE name = 'pg_local_cache.memory_budget_mb'"
-        )
-    )
+    budget_mb = guc_number("pg_local_cache.memory_budget_mb")
     assert budget_mb <= 512, budget_mb
     defaults_active = sql(
         "SELECT count(*) = 5 FROM pg_catalog.pg_settings "

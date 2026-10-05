@@ -37,6 +37,8 @@
 #define PGLC_MAX_AUTH_FAILURES 5
 #define PGLC_EVICTION_SAMPLE 64
 #define PGLC_EVICTION_BATCH 8
+#define PGLC_DEFERRED_MISSES_DEFAULT 8
+#define PGLC_DEFERRED_MISSES_MAX 64
 
 typedef struct PgLocalCacheCacheKey
 {
@@ -294,6 +296,7 @@ extern int	pglc_lock_partitions;
 extern int	pglc_relation_states;
 extern int	pglc_max_clients;
 extern int	pglc_max_clients_per_worker;
+extern int	pglc_max_deferred_misses;
 extern int	pglc_memory_budget_mb;
 extern int	pglc_idle_timeout_ms;
 extern int	pglc_statement_timeout_ms;

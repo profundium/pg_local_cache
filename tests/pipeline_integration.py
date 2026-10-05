@@ -293,6 +293,16 @@ def sql(query: str) -> str:
     return checked_psql(psql_args(query), statement=query)
 
 
+def guc_number(name: str) -> int:
+    """Read a numeric GUC in pg_settings' base units."""
+    return int(
+        sql(
+            "SELECT setting FROM pg_catalog.pg_settings "
+            f"WHERE name = {sql_literal(name)}"
+        )
+    )
+
+
 def sql_commands(*queries: str) -> str:
     args = psql_base_args()
     for query in queries:
@@ -380,16 +390,16 @@ def composite_row_bytes(tenant: str, row_id: int, value: str) -> bytes:
 
 
 def start_idle_transaction(
-    statements: str, *, application_name: str
+    statements: str, *, application_name: str, admin_connection: bool = False
 ) -> subprocess.Popen[str]:
     role = (
         f"SET ROLE {sql_identifier(WORKER_ROLE)};"
-        if WORKER_ROLE and not WRITER_ROLE
+        if WORKER_ROLE and not WRITER_ROLE and not admin_connection
         else ""
     )
     arguments = psql_base_args()
     environment = None
-    if WRITER_ROLE:
+    if WRITER_ROLE and not admin_connection:
         arguments.extend(("-h", WRITER_HOST, "-U", WRITER_ROLE))
         environment = os.environ.copy()
         environment["PGPASSWORD"] = WRITER_PASSWORD
@@ -409,7 +419,9 @@ def start_idle_transaction(
     )
     deadline = time.monotonic() + 10
     writer_identity = (
-        f"AND usename = '{WRITER_ROLE}' " if WRITER_ROLE else ""
+        f"AND usename = '{WRITER_ROLE}' "
+        if WRITER_ROLE and not admin_connection
+        else ""
     )
     while sql(
         "SELECT count(*) FROM pg_catalog.pg_stat_activity "
@@ -1410,6 +1422,7 @@ def test_mget_does_not_hold_claim_while_waiting(
     table: str, scoped_table: str
 ) -> None:
     clients = distinct_worker_connections(3, socket_timeout=45)
+    stat_clients = [same_worker_peer(client) for client in clients[:2]]
     locker: subprocess.Popen[str] | None = None
     threads: list[threading.Thread] = []
     results: dict[str, object] = {}
@@ -1425,6 +1438,8 @@ def test_mget_does_not_hold_claim_while_waiting(
             f"VALUES ({row_a_id}, 'deferred-a')"
         )
         before = read_cache_stats()
+        before_owner = json.loads(stat_clients[0].command("STAT"))
+        before_deferred = json.loads(stat_clients[1].command("STAT"))
         owner = threading.Thread(
             target=run_mget_thread,
             args=(clients[0], [key_b], results, "owner"),
@@ -1432,7 +1447,12 @@ def test_mget_does_not_hold_claim_while_waiting(
         )
         threads.append(owner)
         owner.start()
-        wait_for_blocked_worker_pid(scoped_table, timeout=10)
+        wait_for_worker_stat(
+            stat_clients[0],
+            "deferred_misses_current",
+            int(before_owner["deferred_misses_current"]) + 1,
+            timeout=10,
+        )
 
         deferred = threading.Thread(
             target=run_mget_thread,
@@ -1441,17 +1461,14 @@ def test_mget_does_not_hold_claim_while_waiting(
         )
         threads.append(deferred)
         deferred.start()
-        waiting = wait_for_stat_at_least(
-            "singleflight_waiters",
-            before["singleflight_waiters"] + 1,
-            timeout=5,
-            poll_interval=0.001,
+        wait_for_worker_stat(
+            stat_clients[1],
+            "deferred_misses_current",
+            int(before_deferred["deferred_misses_current"]) + 1,
+            timeout=10,
         )
 
         assert clients[2].command("MGET", key_a) == [row_bytes(row_a_id, "deferred-a")]
-        after_probe = read_cache_stats()
-        assert after_probe["cache_hits"] - waiting["cache_hits"] == 1
-        assert after_probe["database_reads"] == waiting["database_reads"]
 
         finish_writer(locker, commit=True)
         locker = None
@@ -1464,11 +1481,13 @@ def test_mget_does_not_hold_claim_while_waiting(
         ], results
         after = read_cache_stats()
         assert after["loading_entries"] == 0
-        assert after["singleflight_leaders"] - before["singleflight_leaders"] >= 2
-        assert after["singleflight_waiters"] - before["singleflight_waiters"] >= 1
-        assert after["singleflight_timeouts"] == before["singleflight_timeouts"]
         assert after["database_reads"] - before["database_reads"] >= 2
-        assert after["cache_hits"] - before["cache_hits"] >= 1
+        assert json.loads(stat_clients[0].command("STAT"))[
+            "deferred_misses_current"
+        ] == before_owner["deferred_misses_current"]
+        assert json.loads(stat_clients[1].command("STAT"))[
+            "deferred_misses_current"
+        ] == before_deferred["deferred_misses_current"]
     finally:
         try:
             if locker is not None:
@@ -1479,110 +1498,99 @@ def test_mget_does_not_hold_claim_while_waiting(
                     thread.join(timeout=10)
             for client in clients:
                 client.close()
+            for client in stat_clients:
+                client.close()
 
 
 def test_mget_cancelled_owner_releases_claim(table: str) -> None:
     key = crud_key(table, allocate_test_row_ids(table)[0])
-    clients = distinct_worker_connections(2, socket_timeout=45)
-    locker = start_table_locker(
-        table, application_name=f"pglc_mget_cancel_lock_{os.getpid()}"
-    )
-    threads: list[threading.Thread] = []
-    results: dict[str, object] = {}
+    client = RespConnection(socket_timeout=10)
+    peer = same_worker_peer(client)
+    locker: subprocess.Popen[str] | None = None
     try:
-        before = read_cache_stats()
-        owner = threading.Thread(
-            target=run_mget_thread,
-            args=(clients[0], [key], results, "owner"),
-            name="mget-canceled-owner",
+        before = json.loads(peer.command("STAT"))
+        locker = start_table_locker(
+            table, application_name=f"pglc_mget_cancel_lock_{os.getpid()}"
         )
-        threads.append(owner)
-        owner.start()
-        owner_pid = wait_for_blocked_worker_pid(table, timeout=10)
-        assert sql(f"SELECT pg_cancel_backend({owner_pid})") == "t"
-
-        owner.join(timeout=10)
-        assert not owner.is_alive(), "canceled MGET owner did not finish"
-        assert isinstance(results["owner"], RespError), results["owner"]
-        after_cancel = read_cache_stats()
-        assert after_cancel["loading_entries"] == 0
-        assert after_cancel["singleflight_timeouts"] == before["singleflight_timeouts"]
-        assert (
-            after_cancel["expired_loading_entries"]
-            == before["expired_loading_entries"]
+        client.socket.sendall(client.encode("MGET", key))
+        deferred = wait_for_worker_stat(
+            peer,
+            "deferred_misses_current",
+            int(before["deferred_misses_current"]) + 1,
         )
-
+        assert deferred["loading_entries"] == 0
+        client.socket.shutdown(socket.SHUT_WR)
+        client.close()
+        cleared = wait_for_worker_stat(
+            peer,
+            "deferred_misses_current",
+            int(before["deferred_misses_current"]),
+        )
+        assert cleared["loading_entries"] == 0
         finish_writer(locker, commit=True)
         locker = None
-        assert clients[1].command("MGET", key) == [None]
-        after = read_cache_stats()
-        assert after["loading_entries"] == 0
-        assert after["singleflight_leaders"] - before["singleflight_leaders"] >= 2
-        assert after["singleflight_timeouts"] == before["singleflight_timeouts"]
-        assert (
-            after["expired_loading_entries"]
-            == before["expired_loading_entries"]
-        )
+        assert peer.command("MGET", key) == [None]
     finally:
         if locker is not None:
             finish_writer(locker, commit=True)
-        for thread in threads:
-            if thread.is_alive():
-                thread.join(timeout=10)
-        for client in clients:
-            client.close()
+        peer.close()
+        client.close()
 
 
 def test_mget_statement_timeout_cleanup(table: str) -> None:
     key = crud_key(table, allocate_test_row_ids(table)[0])
-    client = RespConnection()
-    locker = start_table_locker(
-        table, application_name=f"pglc_mget_error_lock_{os.getpid()}"
-    )
-    results: dict[str, object] = {}
-    before = read_cache_stats()
-    thread = threading.Thread(
-        target=run_mget_thread,
-        args=(client, [key], results, "timed-out"),
-        name="mget-read-statement-timeout",
-    )
+    client = RespConnection(socket_timeout=10)
+    peer = same_worker_peer(client)
+    locker: subprocess.Popen[str] | None = None
     try:
-        thread.start()
-        wait_for_stat_at_least(
-            "loading_entries",
-            before["loading_entries"] + 1,
-            timeout=10,
+        before = json.loads(peer.command("STAT"))
+        locker = start_table_locker(
+            table, application_name=f"pglc_mget_error_lock_{os.getpid()}"
         )
-        wait_for_blocked_worker_pid(table, timeout=10)
-        thread.join(timeout=5)
-        assert not thread.is_alive(), "read lock timeout did not fail promptly"
-        assert isinstance(results["timed-out"], RespError), results["timed-out"]
-        during_error = read_cache_stats()
-        assert during_error["loading_entries"] == 0
+        client.socket.sendall(
+            client.encode("ECHO", "before-deadline")
+            + client.encode("MGET", key)
+            + client.encode("ECHO", "after-deadline")
+        )
+        wait_for_worker_stat(
+            peer,
+            "deferred_misses_current",
+            int(before["deferred_misses_current"]) + 1,
+        )
+        assert client.read_response() == b"before-deadline"
+        try:
+            client.read_response()
+            raise AssertionError("relation-locked MGET did not expire")
+        except RespError as error:
+            assert "ERR MGET deadline exceeded" in str(error)
+        assert client.read_response() == b"after-deadline"
+        after_error = json.loads(peer.command("STAT"))
+        assert after_error["deferred_misses_current"] == before[
+            "deferred_misses_current"
+        ]
+        assert after_error["deferred_timeouts_total"] == (
+            before["deferred_timeouts_total"] + 1
+        )
+        assert after_error["loading_entries"] == 0
         finish_writer(locker, commit=True)
         locker = None
-        client.close()
-        client = RespConnection()
         assert mget_one(client, key) is None
-        after = read_cache_stats()
-        assert after["loading_entries"] == 0
-        assert after["singleflight_leaders"] - before["singleflight_leaders"] >= 2
     finally:
         if locker is not None:
             finish_writer(locker, commit=True)
-        if thread.is_alive():
-            thread.join(timeout=6)
+        peer.close()
         client.close()
 
 
 def test_mget_mapping_reload_cleanup(table: str) -> None:
     key = crud_key(table, allocate_test_row_ids(table)[0])
     client = RespConnection()
+    peer = same_worker_peer(client)
     locker = start_table_locker(
         table, application_name=f"pglc_mget_reload_lock_{os.getpid()}"
     )
+    before = json.loads(peer.command("STAT"))
     results: dict[str, object] = {}
-    before = read_cache_stats()
     thread = threading.Thread(
         target=run_mget_thread,
         args=(client, [key], results, "reloaded"),
@@ -1590,43 +1598,33 @@ def test_mget_mapping_reload_cleanup(table: str) -> None:
     )
     try:
         thread.start()
-        wait_for_stat_at_least(
-            "loading_entries",
-            before["loading_entries"] + 1,
-            timeout=10,
+        wait_for_worker_stat(
+            peer,
+            "deferred_misses_current",
+            int(before["deferred_misses_current"]) + 1,
         )
-        wait_for_blocked_worker_pid(table, timeout=10)
         sql("SELECT local_cache._reload()")
         finish_writer(locker, commit=True)
         locker = None
         thread.join(timeout=10)
-        assert not thread.is_alive(), "mapping reload did not release the blocked MGET"
-        assert isinstance(results["reloaded"], RespError), results["reloaded"]
-        assert "mapping changed while the command was running" in str(
-            results["reloaded"]
-        )
-        after_error = read_cache_stats()
+        assert not thread.is_alive(), "mapping reload did not release deferred MGET"
+        assert results["reloaded"] == [None], results["reloaded"]
+        after_error = json.loads(peer.command("STAT"))
         assert after_error["loading_entries"] == 0
-        client.close()
-        client = RespConnection()
         assert mget_one(client, key) is None
-        after_refill = read_cache_stats()
+        after_refill = json.loads(peer.command("STAT"))
         assert after_refill["loading_entries"] == 0
-        assert (
-            after_refill["singleflight_leaders"]
-            - before["singleflight_leaders"]
-            == 2
-        )
     finally:
         if locker is not None:
             finish_writer(locker, commit=True)
         if thread.is_alive():
             thread.join(timeout=6)
+        peer.close()
         client.close()
 
 
 def test_pipeline_budget_is_a_fairness_yield() -> None:
-    limit = int(sql("SHOW pg_local_cache.max_pipeline_commands"))
+    limit = guc_number("pg_local_cache.max_pipeline_commands")
     client = RespConnection()
     try:
         # max_pipeline_commands is documented as an event-loop work budget,
@@ -1675,6 +1673,311 @@ def same_worker_peer(reference: RespConnection) -> RespConnection:
             return candidate
         candidate.close()
     raise AssertionError(f"could not connect twice to RESP worker {worker_id}")
+
+
+def wait_for_worker_stat(
+    client: RespConnection, field: str, target: int, *, timeout: float = 8
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    last: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        last = json.loads(client.command("STAT"))
+        if int(last[field]) >= target:
+            return last
+        time.sleep(0.01)
+    raise AssertionError(f"worker STAT {field} did not reach {target}: {last}")
+
+
+def test_relation_locked_mget_defers(table: str, scoped_table: str) -> None:
+    client = RespConnection(socket_timeout=15)
+    peer = same_worker_peer(client)
+    row_id = allocate_test_row_ids(table)[0]
+    key_a = crud_key(table, row_id)
+    key_b = crud_key(scoped_table, 1)
+    key_b_missing = crud_key(scoped_table, allocate_test_row_ids(scoped_table)[0])
+    expected_a = row_bytes(row_id, "deferred-result")
+    expected_b = row_bytes(1, "scope-only")
+    locker: subprocess.Popen[str] | None = None
+    try:
+        sql(
+            f"INSERT INTO public.{sql_identifier(table)} (id, value) "
+            f"VALUES ({row_id}, 'deferred-result')"
+        )
+        assert peer.command("MGET", crud_key(table, 1)) == [
+            row_bytes(1, "initial")
+        ]
+        assert peer.command("MGET", key_b) == [expected_b]
+        before = json.loads(peer.command("STAT"))
+        locker = start_table_locker(
+            table, application_name=f"pglc_deferred_order_{os.getpid()}"
+        )
+        client.socket.sendall(
+            client.encode("ECHO", "before")
+            + client.encode("MGET", key_a)
+            + client.encode("ECHO", "after")
+        )
+        assert client.read_response() == b"before"
+        wait_for_worker_stat(
+            peer,
+            "deferred_misses_current",
+            int(before["deferred_misses_current"]) + 1,
+        )
+
+        lock_timeout_ms = guc_number("pg_local_cache.lock_timeout_ms")
+        latency_limit = min(0.12, lock_timeout_ms / 2000)
+        for key, expected in (
+            (crud_key(table, 1), [row_bytes(1, "initial")]),
+            (key_b, [expected_b]),
+            (key_b_missing, [None]),
+        ):
+            started = time.monotonic()
+            assert peer.command("MGET", key) == expected
+            assert time.monotonic() - started < latency_limit
+
+        assert client.position == len(client.buffer)
+        assert select.select([client.socket], [], [], 0.05)[0] == [], (
+            "later pipelined response overtook deferred MGET"
+        )
+        finish_writer(locker, commit=True)
+        locker = None
+        assert client.read_response() == [expected_a]
+        assert client.read_response() == b"after"
+        after = json.loads(peer.command("STAT"))
+        assert after["deferred_misses_current"] == before[
+            "deferred_misses_current"
+        ]
+        assert after["deferred_misses_total"] >= before["deferred_misses_total"] + 1
+    finally:
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        peer.close()
+        client.close()
+
+
+def test_deferred_pipeline_backpressure_and_half_close(table: str) -> None:
+    client = RespConnection(socket_timeout=30, receive_buffer=4096)
+    peer = same_worker_peer(client)
+    client.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8192)
+    row_id = allocate_test_row_ids(table)[0]
+    key = crud_key(table, row_id)
+    value = "x" * 2048
+    encoded_echo = client.encode("ECHO", value)
+    echo_count = max(
+        2048, (MAX_PIPELINE_INPUT_BYTES // len(encoded_echo) + 1) * 128
+    )
+    payload = (
+        client.encode("MGET", key)
+        + encoded_echo * echo_count
+    )
+    assert len(payload) > MAX_PIPELINE_INPUT_BYTES * 8
+    before = json.loads(peer.command("STAT"))
+    locker: subprocess.Popen[str] | None = start_table_locker(
+        table, application_name=f"pglc_deferred_full_input_{os.getpid()}"
+    )
+    sender_error: list[BaseException] = []
+    reader_result: list[list[object]] = []
+    reader_error: list[BaseException] = []
+    sender: threading.Thread | None = None
+    reader: threading.Thread | None = None
+    try:
+        def send_pipeline() -> None:
+            try:
+                client.socket.sendall(payload)
+                client.socket.shutdown(socket.SHUT_WR)
+            except BaseException as error:
+                sender_error.append(error)
+
+        def read_pipeline() -> None:
+            try:
+                reader_result.append(
+                    [client.read_response() for _ in range(echo_count + 1)]
+                )
+            except BaseException as error:
+                reader_error.append(error)
+
+        sender = threading.Thread(
+            target=send_pipeline, name="deferred-pipeline-send", daemon=True
+        )
+        sender.start()
+        wait_for_worker_stat(
+            peer,
+            "deferred_misses_current",
+            int(before["deferred_misses_current"]) + 1,
+        )
+        # Let the worker fill its retained request buffer while the first MGET
+        # is still blocked by the relation lock.
+        time.sleep(0.1)
+        reader = threading.Thread(
+            target=read_pipeline, name="deferred-pipeline-read", daemon=True
+        )
+        reader.start()
+        finish_writer(locker, commit=True)
+        locker = None
+        sender.join(timeout=25)
+        reader.join(timeout=25)
+        assert not sender.is_alive(), "pipeline sender remained blocked"
+        assert not reader.is_alive(), "pipeline reader remained blocked"
+        assert not sender_error, sender_error
+        assert not reader_error, reader_error
+        assert len(reader_result) == 1
+        assert reader_result[0][0] == [None]
+        assert reader_result[0][1:] == [value.encode()] * echo_count
+        try:
+            client.read_response()
+            raise AssertionError("half-closed pipeline remained open after drain")
+        except (EOFError, ConnectionResetError):
+            pass
+    finally:
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        client.close()
+        peer.close()
+        if sender is not None:
+            sender.join(timeout=2)
+        if reader is not None:
+            reader.join(timeout=2)
+
+
+def test_deferred_queue_full_returns_busy(table: str) -> None:
+    reference = RespConnection(socket_timeout=15)
+    clients = [reference]
+    peer: RespConnection | None = None
+    overflow: RespConnection | None = None
+    locker: subprocess.Popen[str] | None = None
+    try:
+        clients.extend(same_worker_peer(reference) for _ in range(7))
+        peer = same_worker_peer(reference)
+        overflow = same_worker_peer(reference)
+        before = json.loads(peer.command("STAT"))
+        locker = start_table_locker(
+            table, application_name=f"pglc_deferred_full_{os.getpid()}"
+        )
+        for index, deferred_client in enumerate(clients):
+            deferred_client.socket.sendall(
+                deferred_client.encode(
+                    "MGET", crud_key(table, allocate_test_row_ids(table)[0])
+                )
+            )
+            wait_for_worker_stat(
+                peer,
+                "deferred_misses_current",
+                int(before["deferred_misses_current"]) + index + 1,
+            )
+
+        overflow.socket.sendall(
+            overflow.encode(
+                "MGET", crud_key(table, allocate_test_row_ids(table)[0])
+            )
+            + overflow.encode("ECHO", "after-busy")
+        )
+        try:
+            overflow.read_response()
+            raise AssertionError("full deferred queue did not return busy")
+        except RespError as error:
+            assert "ERR busy: relation locked, retry" in str(error)
+        assert overflow.read_response() == b"after-busy"
+        busy_attempts = 8
+        for index in range(busy_attempts - 1):
+            try:
+                overflow.command(
+                    "MGET",
+                    crud_key(table, allocate_test_row_ids(table)[0]),
+                )
+                raise AssertionError("full deferred queue did not return busy")
+            except RespError as error:
+                assert "ERR busy: relation locked, retry" in str(error)
+            assert overflow.command("ECHO", f"after-busy-{index}") == (
+                f"after-busy-{index}".encode()
+            )
+        after_rejection = json.loads(peer.command("STAT"))
+        assert after_rejection["deferred_rejections_total"] == (
+            before["deferred_rejections_total"] + busy_attempts
+        )
+
+        finish_writer(locker, commit=True)
+        locker = None
+        for deferred_client in clients:
+            assert deferred_client.read_response() == [None]
+    finally:
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        if peer is not None:
+            peer.close()
+        if overflow is not None:
+            overflow.close()
+        for deferred_client in clients:
+            deferred_client.close()
+
+
+def test_disconnect_clears_deferred_mget(table: str) -> None:
+    client = RespConnection(socket_timeout=10)
+    peer = same_worker_peer(client)
+    key = crud_key(table, allocate_test_row_ids(table)[0])
+    locker: subprocess.Popen[str] | None = None
+    try:
+        before = json.loads(peer.command("STAT"))
+        locker = start_table_locker(
+            table, application_name=f"pglc_deferred_disconnect_{os.getpid()}"
+        )
+        client.socket.sendall(client.encode("MGET", key))
+        deferred = wait_for_worker_stat(
+            peer,
+            "deferred_misses_current",
+            int(before["deferred_misses_current"]) + 1,
+        )
+        assert deferred["loading_entries"] == 0
+        client.socket.shutdown(socket.SHUT_WR)
+        client.close()
+        cleared = wait_for_worker_stat(
+            peer,
+            "deferred_misses_current",
+            int(before["deferred_misses_current"]),
+        )
+        assert cleared["loading_entries"] == 0
+        finish_writer(locker, commit=True)
+        locker = None
+        assert peer.command("MGET", key) == [None]
+    finally:
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        peer.close()
+        client.close()
+
+
+def test_ddl_lock_does_not_stall_other_relations(
+    table: str, scoped_table: str
+) -> None:
+    client = RespConnection(socket_timeout=15)
+    peer = same_worker_peer(client)
+    locker: subprocess.Popen[str] | None = None
+    try:
+        key_b = crud_key(scoped_table, 1)
+        assert client.command("MGET", key_b) == [row_bytes(1, "scope-only")]
+        assert peer.command("MGET", key_b) == [row_bytes(1, "scope-only")]
+        locker = start_idle_transaction(
+            f"ALTER TABLE public.{sql_identifier(table)} "
+            f"ADD COLUMN pglc_stall_{os.getpid()} integer",
+            application_name=f"pglc_ddl_stall_{os.getpid()}",
+            admin_connection=True,
+        )
+        samples: list[float] = []
+        for index, row_id in enumerate(allocate_test_row_ids(scoped_table, 100)):
+            reader = client if index % 2 == 0 else peer
+            key = crud_key(scoped_table, row_id)
+            started = time.monotonic()
+            assert reader.command("MGET", key) == [None]
+            samples.append(time.monotonic() - started)
+        samples.sort()
+        lock_timeout_ms = guc_number("pg_local_cache.lock_timeout_ms")
+        assert samples[98] < min(0.12, lock_timeout_ms / 2000), (
+            f"B miss p99 under DDL lock was {samples[98] * 1000:.1f} ms"
+        )
+        assert client.command("MGET", key_b) == [row_bytes(1, "scope-only")]
+    finally:
+        if locker is not None:
+            finish_writer(locker, commit=False)
+        peer.close()
+        client.close()
 
 
 def test_backpressure_preserves_every_response(table: str) -> None:
@@ -2308,12 +2611,7 @@ def test_reload_claim_keeps_truncated_payload_invalid(
     clients = distinct_worker_connections(2, socket_timeout=45)
     key = crud_key(table, 1)
     old_value = row_bytes(1, "before-truncate")
-    singleflight_wait_ms = int(
-        sql(
-            "SELECT setting FROM pg_catalog.pg_settings "
-            "WHERE name = 'pg_local_cache.singleflight_wait_ms'"
-        )
-    )
+    singleflight_wait_ms = guc_number("pg_local_cache.singleflight_wait_ms")
     follower_margin_seconds = 1.5
     locker: subprocess.Popen[str] | None = None
     thread: threading.Thread | None = None
@@ -3392,11 +3690,16 @@ def main() -> None:
                 test_fast_mget_hit_has_no_worker_palloc(table)
             test_hot_counter_shards_aggregate()
             test_mget(table, composite_table, scoped_table)
+            test_relation_locked_mget_defers(table, scoped_table)
+            test_deferred_queue_full_returns_busy(table)
+            test_disconnect_clears_deferred_mget(table)
             # Existing stale-read stress test covers the snapshot/store race statistically.
             test_mget_statement_timeout_cleanup(table)
             test_mget_mapping_reload_cleanup(table)
+            test_ddl_lock_does_not_stall_other_relations(table, scoped_table)
             test_pipeline_budget_is_a_fairness_yield()
             if not TLS_CA_FILE:
+                test_deferred_pipeline_backpressure_and_half_close(table)
                 test_half_close_drains_final_pipeline(table)
             test_backpressure_preserves_every_response(table)
             test_close_after_flush(table)
