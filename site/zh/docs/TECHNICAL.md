@@ -25,6 +25,21 @@ DDL 变更后必须重新协调映射。请参阅[安装指南](INSTALL_EXISTING
 
 每个 RESP `MGET` 键都会在查找前经过校验和规范化。符合条件的缓存命中会返回完整行的 JSON。未命中时，worker 会在一个简短事务中读取源表；只有读取屏障仍有效时才会发布缓存填充。不存在的行返回 `nil`。如果行的负载无法放入共享缓存，只要 JSON 未超过 RESP 值大小限制，仍可由 PostgreSQL 返回。
 
+对于受支持的整数或文本主键单键命中，快速路径不会进行分配。它直接读取请求缓冲区，
+并写入客户端输出缓冲区；其他键格式和多键请求使用通用路径。
+
+### 延迟处理未命中与锁期限 {#deferred-misses-and-lock-deadlines}
+
+进入 SPI 前，worker 会尝试不等待地获取源关系的 `AccessShareLock`。若锁被占用，worker
+会释放加载 claim、回滚事务，并将请求放入每个 worker 的有界队列：最多
+`pg_local_cache.max_deferred_misses` 个（默认 `8`），且每个 worker 保留的请求字节总量不
+超过 512 KiB。每个客户端最多有一个延迟请求。队列已满时按顺序返回
+`-ERR busy: relation locked, retry`。同一客户端的后续命令等待，其他客户端继续运行。
+重试会验证 mapping generation，并使用剩余的 `statement_timeout`；超时则按顺序返回
+`-ERR MGET deadline exceeded`。此机制只覆盖最初的关系锁。RESP `STAT` 会报告 worker 本地
+的 `deferred_misses_total`、`deferred_misses_current`、`deferred_timeouts_total` 和
+`deferred_rejections_total`。
+
 ## 事务一致性 {#transaction-consistency}
 
 ![写入失效：提交前的屏障保护已提交写入；仅在屏障发布前回滚才会保留原缓存项。](../../docs/diagrams/write-invalidation.svg)
@@ -33,9 +48,24 @@ DDL 变更后必须重新协调映射。请参阅[安装指南](INSTALL_EXISTING
 
 RESP 读取在独立的短事务中使用 `pg_local_cache.role`。它们不会共享客户端的 SQL 角色、事务、未提交写入或快照。
 
+缓存、索引、marker 和 arena 使用独立分区锁。写入会收集去重后的键；按键 fence 保护已有
+缓存项，独立 marker 保护没有缓存项的键，并在 writer 持有时阻止新填充。marker 或事务键
+容量耗尽时，fence 扩大到整个关系；关系状态不可用时扩大到全局范围。这是 generation
+fence，不是单一的全局缓存锁。
+
 ## 内存与设置 {#shared-memory-and-configuration}
 
 扩展会在 PostgreSQL 启动时预分配有界的共享缓存、映射以及 worker/客户端状态。`memory_budget_mb` 限制扩展可确定性分配的内存。准入失败和逐出都不会突破配置容量；读取会回退到 PostgreSQL。
+
+`cache_entries` 统计描述符，而非固定行槽位。键和行 JSON 位于各分区 arena；按需分配
+64 KiB 页面，块类别为 256 字节至 16 KiB。无可用块时，行仍由 PostgreSQL 返回，但不会
+进入缓存。`lock_partitions` 默认 `64`，范围为 `16` 至 `256` 的 2 次幂；小缓存会使用较少
+分区。Marker 自动上限为 `min(16384, max(1024, floor(cache_entries / 4)))` 个条目和
+`min(16, max(1, floor(memory_budget_mb / 25)))` MiB 键内存；`-1` 表示自动计算。内置
+`cache_entries` 默认值 `262144` 按 384 MiB 默认预算计算，并至少为 arena 预留一半；范围
+为 `128`–`16777216`。内存充足且行较小时可容纳数百万个键。所有组件都纳入预算检查。
+
+每个 RESP worker 的软 `RLIMIT_NOFILE` 至少为 `min(max_clients, max_clients_per_worker) + 33`；提高客户端槽位时，按需提高进程或容器的 `nofile` 限制。
 
 | 设置 | 默认值 | 范围 | 重载方式 |
 |---|---:|---|---|
@@ -48,15 +78,19 @@ RESP 读取在独立的短事务中使用 `pg_local_cache.role`。它们不会�
 | `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | `TLSv1.2` / `TLSv1.3` | 重启 |
 | `pg_local_cache.port` | `6380` | `0`–`65535`；`0` 表示禁用 RESP | 重启 |
 | `pg_local_cache.workers` | `4` | `1`–`32` | 重启 |
-| `pg_local_cache.cache_entries` | `16384` | `128`–`65536` | 重启 |
+| `pg_local_cache.cache_entries` | `262144` | `128`–`16777216` | 重启 |
+| `pg_local_cache.dirty_marker_entries` | `-1` | `-1` 或 `128`–`1048576` | 重启 |
+| `pg_local_cache.dirty_marker_memory_mb` | `-1` | `-1` 或 `1`–`1024` MiB | 重启 |
+| `pg_local_cache.lock_partitions` | `64` | `16`–`256` 的 2 次幂；小缓存使用较少 | 重启 |
 | `pg_local_cache.relation_states` | `1024` | `128`–`8192` | 重启 |
 | `pg_local_cache.max_clients` | `256` | `1`–`4096`；不得超过 worker 槽位数 | 重启 |
-| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`128` | 重启 |
+| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`4096` | 重启 |
 | `pg_local_cache.memory_budget_mb` | `384` | `64`–`8192` MB | 重启 |
 | `pg_local_cache.idle_timeout_ms` | `300000` | `1000`–`86400000` | 重启 |
 | `pg_local_cache.statement_timeout_ms` | `2000` | `100`–`60000` | 重启 |
 | `pg_local_cache.lock_timeout_ms` | `250` | `10`–`60000` | 重启 |
 | `pg_local_cache.singleflight_wait_ms` | `25` | `0`–`1000` | 重启 |
+| `pg_local_cache.max_deferred_misses` | `8` | `1`–`64` per worker | 重启 |
 | `pg_local_cache.max_pipeline_commands` | `256` | `1`–`4096` | 重启 |
 | `pg_local_cache.max_dirty_keys` | `4096` | `128`–`16384` | 重启 |
 | `pg_local_cache.bind_address` | `127.0.0.1` | IPv4 地址 | 重启 |
@@ -89,5 +123,11 @@ RESP 读取在独立的短事务中使用 `pg_local_cache.role`。它们不会�
 `local_cache.health()` 报告就绪状态、缓存状态和映射收敛情况。`local_cache.stats()` 返回 JSON 计数器；`local_cache.metrics()` 返回供 exporter 使用的类型化指标行。
 
 指标包括缓存命中、未命中和负缓存命中；源数据读写；失效和逐出；singleflight 的 leader、等待者、复用次数和超时；当前及峰值客户端数；连接数限制导致的拒绝；认证和协议错误；输出背压和慢客户端断开；worker 启动；脏键回退；映射重载失败和重试；TLS 握手及失败。Gauge 指标包括缓存项和关系容量、客户端和 worker 数量、映射收敛情况、共享/worker/估算内存以及配置的内存预算。
+
+
+`stats()` 新增快速路径计数器（`fast_path_hits`、`fast_path_fallbacks` 及原因）、
+`cache_memory_capacity_bytes`、`cache_memory_used_bytes`、`cache_fragmentation_bytes`、
+`arena_admission_rejections_total`、marker 容量/用量/高水位/回退计数器以及有效 marker
+限制。
 
 接下来请参阅[快速入门](QUICKSTART.md)、[安装指南](INSTALL_EXISTING.md)和[升级指南](UPGRADING.md)。

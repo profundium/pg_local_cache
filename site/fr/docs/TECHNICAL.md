@@ -7,7 +7,7 @@ seo_title: "API RESP de pg_local_cache, cohérence, mémoire et configuration"
 description: "Référence technique de pg_local_cache : lectures RESP, tables prises en charge, barrières transactionnelles, TLS, mémoire partagée, métriques et paramètres PostgreSQL."
 section: Technique
 permalink: /fr/docs/TECHNICAL.html
-last_modified_at: "2026-10-04"
+last_modified_at: "2026-10-06"
 ---
 
 # Référence technique de pg_local_cache {#pg_local_cache-technical-reference}
@@ -26,6 +26,12 @@ Les modifications DDL nécessitent une réconciliation des correspondances. Cons
 
 Chaque clé RESP `MGET` est validée et normalisée avant la recherche. En cas de cache hit admissible, le JSON de la ligne entière est renvoyé. En cas de miss, le worker lit la table source dans une transaction courte, puis publie le résultat dans le cache uniquement si sa barrière de lecture est toujours valide. Les lignes absentes renvoient nil. Les lignes dont la charge utile ne tient pas dans le cache partagé peuvent tout de même être renvoyées par PostgreSQL si leur JSON respecte la limite de taille des valeurs RESP.
 
+Les hits mono-clé avec clé primaire entière ou texte prise en charge utilisent un chemin rapide sans allocation. Il lit directement le buffer de requête et écrit dans le buffer de sortie client ; les autres formes et les requêtes multi-clés utilisent le chemin général.
+
+### Miss différés et délais de verrouillage {#deferred-misses-and-lock-deadlines}
+
+Avant SPI, le worker tente d’obtenir sans attente l’`AccessShareLock` de la relation source. Si le verrou est pris, il libère la réservation, annule la transaction et met la requête en file par worker : au plus `pg_local_cache.max_deferred_misses` (valeur par défaut `8`) et 512 Kio d’octets retenus par worker. Chaque client ne peut avoir qu’une requête différée. Si la file est pleine, la réponse ordonnée est `-ERR busy: relation locked, retry`. Les commandes suivantes de ce client attendent, les autres clients continuent. Le nouvel essai vérifie la génération du mapping et respecte le `statement_timeout` restant ; à l’expiration, il renvoie `-ERR MGET deadline exceeded`. Cela ne couvre que le verrou initial de la relation. RESP `STAT` expose les compteurs du worker `deferred_misses_total`, `deferred_misses_current`, `deferred_timeouts_total` et `deferred_rejections_total`.
+
 ## Cohérence transactionnelle {#transaction-consistency}
 
 ![Invalidation à l’écriture : les barrières avant commit protègent les écritures validées ; un rollback avant publication de la barrière préserve les anciennes entrées.](../../docs/diagrams/write-invalidation.svg)
@@ -34,9 +40,15 @@ Les triggers de ligne et d’instruction des tables mappées collectent les clé
 
 Les lectures RESP utilisent `pg_local_cache.role` dans des transactions courtes indépendantes. Elles ne partagent ni le rôle SQL du client, ni sa transaction, ses écritures non validées ou son snapshot.
 
+Cache, index, markers et arènes utilisent des verrous de partition indépendants. Les écritures collectent des clés dédupliquées ; une barrière par clé protège l’entrée existante, tandis qu’un marker protège la clé sans entrée et bloque les nouveaux fills tant qu’un writer le détient. Si les markers ou les limites transactionnelles sont épuisés, la barrière s’étend à la relation ; si son état manque, à la portée globale. Il s’agit d’une génération de fence, pas d’un verrou global unique du cache.
+
 ## Mémoire partagée et configuration {#shared-memory-and-configuration}
 
 Au démarrage de PostgreSQL, l’extension préalloue une mémoire partagée limitée pour le cache, les correspondances et l’état des workers et des clients. `memory_budget_mb` limite l’allocation déterministe de l’extension. Les refus d’admission et les évictions ne dépassent pas la capacité configurée ; les lectures se replient sur PostgreSQL.
+
+`cache_entries` compte les descripteurs, pas des emplacements de ligne fixes. Clés et JSON résident dans une arène par partition ; des pages de 64 Kio sont attribuées à la demande à des classes de 256 octets à 16 Kio. Sans bloc disponible, PostgreSQL renvoie la ligne sans admission dans le cache. `lock_partitions` vaut `64` par défaut et accepte des puissances de deux de `16` à `256` ; les petits caches utilisent moins de partitions. Les limites automatiques des markers sont `min(16384, max(1024, floor(cache_entries / 4)))` entrées et `min(16, max(1, floor(memory_budget_mb / 25)))` Mio de mémoire de clés ; `-1` active le calcul automatique. La valeur intégrée par défaut de `cache_entries` est `262144`, calculée avec 384 Mio et au moins la moitié réservée à l’arène ; plage `128`–`16777216`. Avec assez de mémoire et des lignes petites, le cache peut contenir des millions de clés. Tous les composants sont contrôlés par rapport au budget.
+
+La limite souple `RLIMIT_NOFILE` de chaque worker RESP doit atteindre au moins `min(max_clients, max_clients_per_worker) + 33` ; relevez le `nofile` du processus/conteneur si vous augmentez les slots clients.
 
 | Paramètre | Valeur par défaut | Plage | Application |
 |---|---:|---|---|
@@ -49,15 +61,19 @@ Au démarrage de PostgreSQL, l’extension préalloue une mémoire partagée lim
 | `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | `TLSv1.2` / `TLSv1.3` | Redémarrage |
 | `pg_local_cache.port` | `6380` | `0`–`65535` ; `0` désactive RESP | Redémarrage |
 | `pg_local_cache.workers` | `4` | `1`–`32` | Redémarrage |
-| `pg_local_cache.cache_entries` | `16384` | `128`–`65536` | Redémarrage |
+| `pg_local_cache.cache_entries` | `262144` | `128`–`16777216` | Redémarrage |
+| `pg_local_cache.dirty_marker_entries` | `-1` | `-1` ou `128`–`1048576` | Redémarrage |
+| `pg_local_cache.dirty_marker_memory_mb` | `-1` | `-1` ou `1`–`1024` Mio | Redémarrage |
+| `pg_local_cache.lock_partitions` | `64` | puissance de deux `16`–`256` ; moins pour petit cache | Redémarrage |
 | `pg_local_cache.relation_states` | `1024` | `128`–`8192` | Redémarrage |
 | `pg_local_cache.max_clients` | `256` | `1`–`4096` ; au plus le nombre de slots workers | Redémarrage |
-| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`128` | Redémarrage |
+| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`4096` | Redémarrage |
 | `pg_local_cache.memory_budget_mb` | `384` | `64`–`8192` Mo | Redémarrage |
 | `pg_local_cache.idle_timeout_ms` | `300000` | `1000`–`86400000` | Redémarrage |
 | `pg_local_cache.statement_timeout_ms` | `2000` | `100`–`60000` | Redémarrage |
 | `pg_local_cache.lock_timeout_ms` | `250` | `10`–`60000` | Redémarrage |
 | `pg_local_cache.singleflight_wait_ms` | `25` | `0`–`1000` | Redémarrage |
+| `pg_local_cache.max_deferred_misses` | `8` | `1`–`64` per worker | Redémarrage |
 | `pg_local_cache.max_pipeline_commands` | `256` | `1`–`4096` | Redémarrage |
 | `pg_local_cache.max_dirty_keys` | `4096` | `128`–`16384` | Redémarrage |
 | `pg_local_cache.bind_address` | `127.0.0.1` | adresse IPv4 | Redémarrage |
@@ -90,5 +106,8 @@ Sans TLS, les connexions en clair hors loopback exigent `allow_plaintext_network
 `local_cache.health()` indique l’état de préparation, l’état du cache et la convergence des correspondances. `local_cache.stats()` renvoie des compteurs JSON ; `local_cache.metrics()` renvoie la ligne de métriques typée destinée à l’exporteur.
 
 Les métriques couvrent les hits, misses et hits négatifs du cache ; les lectures et écritures dans la source ; les invalidations et évictions ; les leaders, les waiters, les réutilisations et les expirations de single-flight ; le nombre actuel et maximal de clients ; les rejets dus aux limites de connexion ; les erreurs d’authentification et de protocole ; la contre-pression à l’envoi et les déconnexions de clients lents ; les démarrages de workers ; les repliements dus aux clés modifiées ; les échecs et nouvelles tentatives de rechargement des correspondances ; les handshakes TLS et leurs échecs. Les jauges comprennent les capacités d’entrées et de relations, les nombres de clients et de workers, la convergence des correspondances, la mémoire partagée, celle des workers, la mémoire estimée et le budget configuré.
+
+
+Les nouveaux champs de `stats()` comprennent `fast_path_hits`, `fast_path_fallbacks` et leurs motifs ; `cache_memory_capacity_bytes`, `cache_memory_used_bytes`, `cache_fragmentation_bytes`, `arena_admission_rejections_total` ; capacité, usage, maximum et replis des markers, ainsi que leurs limites effectives.
 
 Suite : [guide de démarrage rapide](QUICKSTART.md), [installation](INSTALL_EXISTING.md) et [mise à niveau](UPGRADING.md).

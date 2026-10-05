@@ -4,47 +4,27 @@ All notable changes to pg_local_cache are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
 ## [3.1.0] - 2026-10-05
 
-### Fixed
+### Added
 
-- A reader that reclaimed an expired load lease no longer received an unusable claim
-  that blocked the key for another lease period.
-- RESP workers no longer leak memory on cache misses and writes (could grow by
-  ~2 KB per miss until the OOM killer restarted PostgreSQL).
+- Byte-sized slab storage with compact cache descriptors, partitioned locks, and bounded dirty-key markers.
+- `max_deferred_misses` and per-worker deferral for misses blocked by relation locks; `max_clients_per_worker` now supports up to 4096 slots.
+- `fast_path_*`, arena-capacity, dirty-marker, and deferred-miss statistics.
 
 ### Changed
 
-- Single-key RESP MGET hits scan simple integer/text primary-key JSON directly,
-  append the reply into the client output buffer, and skip request allocations;
-  uncertain spellings retain the JSONB parser fallback.
-- RESP workers support up to 4096 client slots per worker and allocate request
-  and response buffers only while a client is connected.
-- Cache entries now use compact descriptors, bounded open-addressed indexes,
-  and on-demand 64 KiB slab pages instead of fixed-width key/value slots.
-- Uncached dirty keys use a separate bounded marker table; marker exhaustion
-  widens relation/global fences without evicting cached values.
-- Dirty-marker entry and key-memory limits now auto-size from `cache_entries`
-  and `memory_budget_mb`; explicit limits remain available and budget-checked.
-- `cache_entries` now sizes the descriptor pool from the memory budget, with
-  arena capacity, class slack, admission rejection, and marker counters in
-  cache stats.
-- RESP row-cache payloads now store validated JSON only, with descriptor identity
-  and CRC32C; rows above the payload limit are returned uncached.
-- RESP `MGET` deduplicates cache misses, reads them in one snapshot, and defers
-  single-flight waits until it holds no load claims.
-- Cache misses blocked on a relation lock now use bounded per-worker deferral,
-  preserve client command order, and return retry or deadline errors at limits.
-- Evictions no longer rehash the relation key for every sampled candidate,
-  which serialized RESP workers when the cache was full.
-- Evictions free up to 8 entries per sample so full caches no longer scan on
-  every fill.
-- Cache locks are partitioned, and request counters are sharded to reduce
-  contention across concurrent clients.
-- Write transactions reuse a backend-local dirty-key table, compare only used
-  key bytes, and cache trigger key metadata to reduce invalidation CPU.
+- Single-key hits for supported integer/text keys parse and write RESP output in place; write tracking reuses backend-local state and deduplicates dirty keys.
+- `cache_entries` now controls descriptor count (128–16,777,216); marker limits default to automatic sizing from cache and memory settings.
+- `MGET` deduplicates misses, reads them in one snapshot, and waits for single-flight only after releasing load claims.
+- Cache eviction and admission use bounded work; rows that do not fit remain served from PostgreSQL without cache admission.
+
+### Fixed
+
+- RESP workers no longer leak memory on misses and writes.
+- Expired load-lease reclaim no longer leaves the key blocked for another lease period.
+- Writes no longer starve cache fills under contention; dirty-key limit checks deduplicate keys before falling back to relation-wide invalidation.
+- Pre-commit fences and fill-generation checks close stale-read races, including concurrent fills and invalidations.
 
 ## [3.0.0] - 2026-10-04
 

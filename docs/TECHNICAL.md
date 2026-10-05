@@ -23,9 +23,9 @@ DDL changes require mapping reconciliation. See [installation](INSTALL_EXISTING.
 
 ![RESP MGET read path: cache hit, fenced source fill, and kill-switch bypass.](diagrams/read-path.svg)
 
-Each RESP `MGET` key is validated and canonicalized before lookup. An eligible hit returns JSON for the complete row. On a miss, the worker reads the source table in a short transaction, then publishes a fill only if its read fence is still current. Missing rows return nil. Rows whose payload cannot fit shared cache may still return from PostgreSQL if their JSON fits the RESP value limit.
+Each RESP `MGET` key is validated and canonicalized before lookup. A single-key hit with a supported integer or text primary key uses a fast path: it parses from the request buffer and writes directly to the client output buffer without per-request allocation. Other key forms, multi-key requests, and unsupported cache states use the general path. On a miss, the worker reads the source table in a short transaction, then publishes a fill only if its read fence is still current. Missing rows return nil. Rows whose payload cannot fit shared cache may still return from PostgreSQL if their JSON fits the RESP value limit.
 
-### Deferred misses and lock deadlines
+### Deferred misses and lock deadlines {#deferred-misses-and-lock-deadlines}
 
 Before entering SPI for a cache miss, the worker tries to acquire the source
 relation's `AccessShareLock` without waiting. If the lock is unavailable, it
@@ -57,7 +57,7 @@ RESP `STAT` JSON reports `deferred_misses_total`,
 
 ![Write invalidation: pre-commit fences protect committed writes; rollback before fence publication preserves prior entries.](diagrams/write-invalidation.svg)
 
-Mapped-table row and statement triggers collect dirty keys or a relation in transaction-local state. The pre-commit callback publishes invalidation fences before the write becomes visible. After commit, readers cannot use an old entry; stale in-flight fills fail their generation check. A rollback before fence publication discards the dirty state and leaves the prior entry valid.
+Mapped-table row and statement triggers collect deduplicated dirty keys or a relation in transaction-local state. At pre-commit, keyed fences mark cached entries dirty; a separate marker protects a dirty key that has no cache entry and blocks a new fill while writers hold it. If marker or transaction-local key capacity is exhausted, fencing widens to the relation; if relation state is unavailable, it widens to a global fence. After commit, readers cannot use an old entry, and in-flight fills with stale generations are rejected. A rollback before fence publication discards the dirty state and leaves the prior entry valid. Cache entries, indexes, markers, and arenas use independent partition locks; global fences do not require a single global cache lock.
 
 RESP reads use `pg_local_cache.role` in independent short transactions. They do not share a client's SQL role, transaction, uncommitted writes, or snapshot.
 
@@ -65,60 +65,33 @@ RESP reads use `pg_local_cache.role` in independent short transactions. They do 
 
 The extension preallocates bounded shared cache, mapping, and worker/client state at PostgreSQL startup. `memory_budget_mb` limits the deterministic extension allocation. Admission failures and eviction do not allocate beyond configured capacity; reads fall back to PostgreSQL.
 
-Cache descriptors, indexes, dirty markers, relation states, counters, worker
-generations, and RESP client slots are allocated at postmaster startup.
-`cache_entries` is the hard global descriptor limit, split exactly across the
-active partitions. Each 120-byte descriptor holds fence/version/lease state,
-the key hash and length, and a 32-bit arena block reference; key and value
-bytes live in the partition arena. Each partition indexes descriptors with
-4-byte IDs in an open-addressed table sized to keep load at or below 0.5. A
-separate bucket-sized scratch array rebuilds tombstoned indexes. Probes stop at
-64 buckets; rebuild starts after tombstones exceed one eighth of the table.
+`cache_entries` is the global descriptor limit, divided across active
+partitions. Keys and row JSON live separately in each partition's arena;
+64 KiB pages are assigned on demand to block classes from 256 bytes through
+16 KiB. Positive entries store validated JSON with a descriptor fingerprint
+and CRC; negative entries store the key only. Eviction samples eligible entries
+from the needed class. If space is unavailable, the row still returns from
+PostgreSQL without cache admission.
 
-The partition-local arena assigns 64 KiB pages on demand to power-of-two block
-classes from 256 bytes through 16 KiB. Each positive block holds canonical key
-bytes and complete-row JSON wrapped in a versioned header with length,
-descriptor fingerprint, and CRC; no SQL tuple bytes are cached. Negative
-blocks hold only key bytes. Empty pages return to that
-partition's free-page pool and can be assigned to another class. Admission
-evicts eligible entries from the requested class using bounded sampling,
-skipping dirty entries and active loads. If the requested class remains
-unavailable, the row is served from PostgreSQL and is not cached. Index,
-descriptor, or arena pressure never turns a successful source read into an
-error.
+`lock_partitions` sets the maximum number of independent cache partitions
+(default `64`; power of two from `16` to `256`). Small caches use fewer
+partitions so each has at least 32 descriptors. Each partition owns its lock,
+index, dirty markers, and arena.
 
 Dirty keys without cache entries use a separate bounded marker table and key
-arena. Markers are split across partitions, cannot evict cached values, and
-block cache-entry creation for the same key while any writer holds the marker.
-Marker or transaction-local dirty-set exhaustion widens fencing to the
-relation, then global scope if relation state is unavailable.
-By default, marker capacity scales with the configured cache: the entry limit
-is `min(16384, max(1024, floor(cache_entries / 4)))`. The key-memory limit is
-`min(16 MiB, max(1 MiB, floor(memory_budget_mb / 25) MiB))`; the actual key
-arena also cannot exceed the marker entry limit. Set either marker option
-within its explicit supported range to override automatic sizing. Explicit
-limits remain part of the exact startup budget check.
+arena. Markers cannot evict cached values and block fills for their key while a
+writer holds them. Automatic marker limits are
+`min(16384, max(1024, floor(cache_entries / 4)))` entries and
+`min(16, max(1, floor(memory_budget_mb / 25)))` MiB of key memory; `-1` selects
+automatic sizing. Startup includes all components in the memory-budget check
+and reports a per-component breakdown on failure.
 
-The default `cache_entries` is derived at startup as the largest power of two
-that leaves at least half of the default 384 MiB budget for arena pages after
-exactly accounting for descriptors, both index arrays, markers and marker
-keys, registry, partition metadata, alignment, and worker buffers. With the
-default four workers and 64 client slots per worker, the result is 262,144:
-30 MiB of descriptors, 4 MiB of bucket and scratch IDs, about 17.2 MiB for
-markers and marker keys, about 122.2 MiB for worker memory, and at least 192
-MiB for the arena. With root, registry, locks, page descriptors, and alignment,
-that minimum layout uses about 366 MiB; the remaining roughly 18 MiB adds four
-64 KiB pages per partition, for about 208 MiB of page capacity. Doubling the
-descriptor count adds 34 MiB, exceeding the budget while preserving the 192
-MiB arena reserve. `cache_entries` can be
-raised to 16,777,216 when the configured budget and other components fit.
-Startup reports a per-component breakdown and fails if they do not fit.
-
-With 100,000 rows whose key plus approximately 150-byte JSON payload fits a
-256-byte class, the arena needs about 24.4 MiB plus page slack. One million
-such rows need about 244.2 MiB; a 512 MiB budget fits this with a smaller
-worker configuration such as one RESP worker. The exact startup estimate is
-authoritative for each configuration.
+The built-in default is `262144` descriptors, derived against the default
+384 MiB budget while reserving at least half for arena pages. The supported
+range is `128`–`16777216`; the configured budget and worker/client settings
+must still fit. `cache_entries` counts descriptors, not fixed byte-sized row
+slots: actual row capacity depends on arena bytes and row size. With suitable
+memory and small rows, the arena can hold millions of keys.
 
 | Setting | Default | Range | Reload |
 |---|---:|---|---|
@@ -155,6 +128,10 @@ authoritative for each configuration.
 
 All settings except `enabled` are postmaster settings and require restart. Client slots require `max_clients <= workers × max_clients_per_worker`.
 
+Each RESP worker also checks its soft `RLIMIT_NOFILE`. It must be at least
+`min(max_clients, max_clients_per_worker) + 33`; raise the process or container
+`nofile` limit when increasing client capacity.
+
 ## RESP2 endpoint {#optional-resp2-endpoint}
 
 The endpoint accepts RESP2. Keys use `CRUD:<db>.<schema>.<table>:<json pk>`. `MGET` preserves request order and duplicates; a missing row is a nil element. Each request accepts at most 1,024 keys, each JSON row is limited to 65,536 bytes, and the encoded reply is limited to 66,560 bytes.
@@ -181,22 +158,31 @@ TLS counters `tls_handshakes_total` and `tls_handshake_failures_total` are
 exposed in `stats()` and `metrics()`.
 
 Database reads, invalidations, admission rejection, dirty-key fallback,
-singleflight, worker, and RESP counters remain available. RESP fast-path stats
-include `fast_path_hits`, `fast_path_fallbacks` (total), and per-reason counters
+singleflight, worker, and RESP counters remain available. New `stats()` fields
+include `fast_path_hits`, `fast_path_fallbacks`,
 `fast_path_fallback_key_form`, `fast_path_fallback_mapping_shape`,
-`fast_path_fallback_multi_key`, and `fast_path_fallback_cache_state`. The four
-counters for the removed SQL read API were removed in 3.0.0.
+`fast_path_fallback_multi_key`, and `fast_path_fallback_cache_state`;
+`cache_memory_capacity_bytes`, `cache_memory_used_bytes`,
+`cache_fragmentation_bytes`, and `arena_admission_rejections_total`;
+`dirty_marker_capacity`, `dirty_marker_entries`, `dirty_marker_highwater`,
+`dirty_marker_fallbacks_total`, `dirty_marker_entries_effective`,
+`dirty_marker_memory_mb_effective`, `dirty_marker_memory_capacity_bytes`, and
+`dirty_key_limit_fallbacks`; plus `lock_partitions`, `max_clients_per_worker`,
+and `client_slots`. RESP `STAT` adds worker-local `deferred_misses_total`,
+`deferred_misses_current`, `deferred_timeouts_total`, and
+`deferred_rejections_total`.
 
-The arena counters report its configured page capacity, live requested bytes,
-and class slack. `arena_admission_rejections_total` counts rows left uncached
-when no eligible block can be admitted. `dirty_marker_entries` is the active
-marker count; `dirty_marker_highwater` records its peak, and
+`cache_memory_capacity_bytes` reports arena page capacity,
+`cache_memory_used_bytes` live requested bytes, and
+`cache_fragmentation_bytes` class slack. `arena_admission_rejections_total`
+counts rows left uncached when no eligible block can be admitted.
+`dirty_marker_entries` is the active marker count;
+`dirty_marker_highwater` records its peak, and
 `dirty_marker_fallbacks_total` counts keyed publications widened to relation
-or global fences because marker admission failed. `dirty_marker_entries_effective`
-and `dirty_marker_memory_mb_effective` report resolved marker limits after
-automatic sizing; `dirty_marker_memory_capacity_bytes` reports allocated key
-storage, which can be lower when the entry limit is binding.
+or global fences because marker admission failed. Effective marker fields
+report resolved automatic limits; allocated key storage can be lower when the
+entry limit binds.
 
 Next: [quickstart](QUICKSTART.md), [installation](INSTALL_EXISTING.md), and
-[upgrading](UPGRADING.md). For breaking changes and rollback steps, see the
-[2.x to 3.0 upgrade guide](UPGRADING.md).
+[upgrading](UPGRADING.md). The upgrade guide covers settings and restart steps
+for 3.0.0 to 3.1.0, plus the earlier 2.x migration.

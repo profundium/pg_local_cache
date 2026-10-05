@@ -24,6 +24,7 @@ permalink: /zh/
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">与 SQL 比较 <span aria-hidden="true">→</span></a>
       </div>
       <p class="hero-note">经过身份验证的 RESP API · PostgreSQL 14–18 · 开源</p>
+      <p class="hero-note">3.1.0 按字节管理 arena 容量；预算允许时可容纳数百万个小键。新增分区锁、单键命中零分配路径、更低开销的写入跟踪，以及关系锁阻塞时的延迟未命中处理。<a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">升级指南</a>。</p>
     </div>
     <figure class="hero-benchmark" aria-label="本地单键基准测试：RESP 与 SQL 比较">
       <p class="benchmark-label">本地测量 · 2026 年 9 月 15 日</p>
@@ -125,7 +126,7 @@ docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build
       <details><summary>这会替代 shared_buffers 吗？</summary><p>不会。PostgreSQL 缓存数据库页，此扩展则单独按主键缓存序列化整行。参阅<a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">读取路径比较</a>.</p></details>
       <details><summary>它会缓存普通 SELECT 查询吗？</summary><p>不会。只有经过身份验证的 RESP MGET 会使用共享行缓存。现有查询仍按 PostgreSQL 的正常路径执行。</p></details>
       <details><summary>它能替代 Redis 吗？</summary><p>不能。RESP2 接口功能有限，不提供通用 Redis 命令集、TTL、发布订阅或分布式协调。请比较<a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">PostgreSQL 与 Redis cache-aside 路径</a>.</p></details>
-      <details><summary>如何检查更新与回滚？</summary><p><a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">失效指南</a>介绍写入时的行为。<a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">升级指南</a>说明从 2.x 升级到 3.0.0。</p></details>
+      <details><summary>如何检查更新与回滚？</summary><p><a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">失效指南</a>介绍写入时的行为。<a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">升级指南</a>说明从 3.0.0 升级到 3.1.0，以及此前从 2.x 升级的步骤。</p></details>
     </div>
   </section>
 </main>
