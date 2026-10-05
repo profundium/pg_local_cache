@@ -30,6 +30,7 @@
 #include "utils/rel.h"
 #include "utils/timestamp.h"
 
+#include "dirty_key_limit.h"
 #include "key_codec.h"
 #include "pg_local_cache.h"
 
@@ -83,6 +84,7 @@ static char *pglc_binary_build_id = NULL;
 static char *pglc_test_pause_point = NULL;
 static int pglc_test_barrier_relation_oid = 0;
 static int pglc_test_dirty_marker_limit = 0;
+static int pglc_test_max_dirty_keys = 0;
 static int pglc_test_occupied_entry_free_head = 0;
 static int pglc_test_occupied_marker_free_head = 0;
 static bool pglc_test_abort_after_reservation = false;
@@ -114,6 +116,9 @@ typedef struct PgLocalCacheLocalDirtyKey
 {
 	uint8		kind;
 	Oid			database_oid;
+	Oid			relation_oid;
+	uint16		nspace_len;
+	uint16		key_len;
 	char		nspace[PGLC_NAMESPACE_MAX];
 	char		key[PGLC_KEY_MAX];
 } PgLocalCacheLocalDirtyKey;
@@ -121,6 +126,9 @@ typedef struct PgLocalCacheLocalDirtyKey
 typedef struct PgLocalCacheLocalDirtyEntry
 {
 	PgLocalCacheLocalDirtyKey key;
+	uint64		cache_key_hash;
+	uint32		dirty_hash;
+	uint32		partition;
 	Oid			relation_oid;
 	bool		shared_marker_reserved;
 	bool		shared_entry_reserved;
@@ -135,12 +143,31 @@ typedef struct PgLocalCacheLocalDirtyEntry
 	uint64		shared_marker_generation;
 } PgLocalCacheLocalDirtyEntry;
 
+typedef struct PgLocalCacheTriggerKeyMetadata
+{
+	Oid			trigger_oid;
+	Oid			relation_oid;
+	TupleDesc	descriptor;
+	Oid			descriptor_type;
+	int32		descriptor_typmod;
+	int16		descriptor_natts;
+	int16		key_count;
+	AttrNumber	attribute_numbers[PGLC_MAX_KEY_COLUMNS];
+	Oid			key_types[PGLC_MAX_KEY_COLUMNS];
+	FmgrInfo	output_functions[PGLC_MAX_KEY_COLUMNS];
+} PgLocalCacheTriggerKeyMetadata;
+
 static HTAB *local_dirty_hash = NULL;
 static PgLocalCacheLocalDirtyEntry **local_dirty_ordered = NULL;
 static Size local_dirty_ordered_count = 0;
+static Size local_dirty_ordered_capacity = 0;
+static Size local_dirty_count = 0;
+static Size local_dirty_key_count = 0;
 static bool local_dirty_published = false;
 static bool local_global_fallback = false;
 static bool local_bump_config = false;
+static bool local_attached_table_touched = false;
+static bool local_has_global_dirty_record = false;
 
 void		_PG_init(void);
 
@@ -616,6 +643,19 @@ pglc_define_gucs(void)
 							0,
 							0,
 							16777216,
+							PGC_SIGHUP,
+							GUC_SUPERUSER_ONLY,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_local_cache.test_max_dirty_keys",
+							"Test-only transaction dirty-key cap; zero uses max_dirty_keys.",
+							NULL,
+							&pglc_test_max_dirty_keys,
+							0,
+							0,
+							16384,
 							PGC_SIGHUP,
 							GUC_SUPERUSER_ONLY,
 							NULL,
@@ -1530,9 +1570,8 @@ cache_key_hash64(Oid database_oid, const char *nspace,
 }
 
 static uint32
-pglc_cache_partition(const PgLocalCacheCacheKey *key)
+pglc_cache_partition_for_hash(uint64 hash)
 {
-	uint64		hash;
 	uint32		partition_bits = 0;
 	uint32		partition_count = (uint32) pglc_cache_partition_count();
 
@@ -1544,10 +1583,18 @@ pglc_cache_partition(const PgLocalCacheCacheKey *key)
 		partition_count >>= 1;
 	}
 	/* Keep partition routing on high hash bits to distribute related hash lanes. */
-	hash = cache_key_hash64(key->database_oid, key->nspace,
-						 key->key, (uint16) strnlen(key->key,
-															 sizeof(key->key)));
 	return (uint32) (hash >> (64 - partition_bits));
+}
+
+static uint32
+pglc_cache_partition(const PgLocalCacheCacheKey *key)
+{
+	uint64		hash = cache_key_hash64(key->database_oid, key->nspace,
+										  key->key,
+										  (uint16) strnlen(key->key,
+													   sizeof(key->key)));
+
+	return pglc_cache_partition_for_hash(hash);
 }
 
 static void
@@ -2270,9 +2317,10 @@ static PgLocalCacheCacheEntry *
 get_cache_entry_internal(Oid database_oid, Oid relation_oid,
 						 const char *nspace, const char *key,
 						 uint32 relation_slot, uint64 slot_generation,
-						 bool create, uint32 *corrupt_entry_id)
+						 bool create, uint32 *corrupt_entry_id,
+						 bool have_cached_hash, uint16 cached_key_len,
+						 uint64 cached_hash, uint32 cached_partition)
 {
-	PgLocalCacheCacheKey cache_key;
 	PgLocalCacheCacheEntry *entry;
 	PgLocalCachePartition *cache_partition;
 	PgLocalCacheEntryQuery query;
@@ -2290,13 +2338,21 @@ get_cache_entry_internal(Oid database_oid, Oid relation_oid,
 
 	if (corrupt_entry_id != NULL)
 		*corrupt_entry_id = 0;
-	key_len = (uint16) strnlen(key, PGLC_KEY_MAX);
-	if (key_len == PGLC_KEY_MAX)
-		return NULL;
-	make_cache_key(&cache_key, database_oid, nspace, key, false);
-	partition = pglc_cache_partition(&cache_key);
+	if (have_cached_hash)
+	{
+		key_len = cached_key_len;
+		hash = cached_hash;
+		partition = cached_partition;
+	}
+	else
+	{
+		key_len = (uint16) strnlen(key, PGLC_KEY_MAX);
+		if (key_len == PGLC_KEY_MAX)
+			return NULL;
+		hash = cache_key_hash64(database_oid, nspace, key, key_len);
+		partition = pglc_cache_partition_for_hash(hash);
+	}
 	cache_partition = &pglc_shared->partitions[partition];
-	hash = cache_key_hash64(database_oid, nspace, key, key_len);
 	memset(&query, 0, sizeof(query));
 	query.partition = cache_partition;
 	query.hash = hash;
@@ -2483,7 +2539,21 @@ get_cache_entry(Oid database_oid, Oid relation_oid,
 				uint32 relation_slot, uint64 slot_generation, bool create)
 {
 	return get_cache_entry_internal(database_oid, relation_oid, nspace, key,
-									relation_slot, slot_generation, create, NULL);
+									relation_slot, slot_generation, create, NULL,
+									false, 0, 0, 0);
+}
+
+static PgLocalCacheCacheEntry *
+get_cache_entry_with_cached_hash(Oid database_oid, Oid relation_oid,
+								 const char *nspace, const char *key,
+								 uint32 relation_slot,
+								 uint64 slot_generation, bool create,
+								 uint16 key_len, uint64 hash,
+								 uint32 partition)
+{
+	return get_cache_entry_internal(database_oid, relation_oid, nspace, key,
+									relation_slot, slot_generation, create, NULL,
+									true, key_len, hash, partition);
 }
 
 typedef struct PgLocalCacheMarkerQuery
@@ -2635,9 +2705,8 @@ reserve_cache_marker(uint32 partition,
 	PgLocalCachePartition *cache_partition =
 		&pglc_shared->partitions[partition];
 	PgLocalCacheMarkerQuery query;
-	uint16		key_len = (uint16) strnlen(local->key.key,
-												 sizeof(local->key.key));
-	uint64		hash;
+	uint16		key_len = local->key.key_len;
+	uint64		hash = local->cache_key_hash;
 	uint32		found_id;
 	uint32		id;
 	uint32		key_slot;
@@ -2651,10 +2720,9 @@ reserve_cache_marker(uint32 partition,
 	uint32		test_saved_free_head = 0;
 #endif
 
-	if ((Size) key_len == sizeof(local->key.key))
+	if (local->key.kind != PGLC_DIRTY_KEY ||
+		(Size) key_len >= sizeof(local->key.key))
 		return false;
-	hash = cache_key_hash64(local->key.database_oid, local->key.nspace,
-						local->key.key, key_len);
 	memset(&query, 0, sizeof(query));
 	query.partition = cache_partition;
 	query.hash = hash;
@@ -2919,7 +2987,7 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 									 mapping->nspace, canonical_key,
 									 mapping->relation_slot,
 									 mapping->relation_slot_generation,
-									 create, corrupt_entry_id);
+									 create, corrupt_entry_id, false, 0, 0, 0);
 	if (*corrupt_entry_id != 0)
 		*malformed = true;
 	mapping_matches = entry != NULL &&
@@ -3571,7 +3639,8 @@ pglc_note_singleflight_timeout(void)
 bool
 pglc_current_transaction_is_dirty(void)
 {
-	return local_dirty_hash != NULL || local_global_fallback;
+	return local_attached_table_touched || local_dirty_count > 0 ||
+		local_global_fallback;
 }
 
 uint64
@@ -3944,6 +4013,57 @@ pglc_workers_without_current_mappings(void)
 	return workers;
 }
 
+static uint32
+pglc_local_dirty_hash_value(const void *key, Size keysize)
+{
+	const PgLocalCacheLocalDirtyKey *dirty_key = key;
+	struct
+	{
+		Oid			database_oid;
+		Oid			relation_oid;
+		uint16		nspace_len;
+		uint16		key_len;
+		uint8		kind;
+	} hash_header;
+	uint64		hash;
+
+	(void) keysize;
+	MemSet(&hash_header, 0, sizeof(hash_header));
+	hash_header.database_oid = dirty_key->database_oid;
+	hash_header.relation_oid = dirty_key->relation_oid;
+	hash_header.nspace_len = dirty_key->nspace_len;
+	hash_header.key_len = dirty_key->key_len;
+	hash_header.kind = dirty_key->kind;
+	hash = hash_bytes_extended((const unsigned char *) &hash_header,
+								 sizeof(hash_header), 0);
+	if (dirty_key->nspace_len > 0)
+		hash = hash_bytes_extended((const unsigned char *) dirty_key->nspace,
+								dirty_key->nspace_len, hash);
+	if (dirty_key->key_len > 0)
+		hash = hash_bytes_extended((const unsigned char *) dirty_key->key,
+								dirty_key->key_len, hash);
+	return (uint32) (hash ^ (hash >> 32));
+}
+
+static int
+pglc_local_dirty_key_matches(const void *left, const void *right,
+							 Size keysize)
+{
+	const PgLocalCacheLocalDirtyKey *l = left;
+	const PgLocalCacheLocalDirtyKey *r = right;
+
+	(void) keysize;
+	return l->kind != r->kind ||
+		l->database_oid != r->database_oid ||
+		l->relation_oid != r->relation_oid ||
+		l->nspace_len != r->nspace_len ||
+		l->key_len != r->key_len ||
+		(l->nspace_len > 0 &&
+		 memcmp(l->nspace, r->nspace, l->nspace_len) != 0) ||
+		(l->key_len > 0 &&
+		 memcmp(l->key, r->key, l->key_len) != 0);
+}
+
 static HTAB *
 get_local_dirty_hash(void)
 {
@@ -3955,12 +4075,38 @@ get_local_dirty_hash(void)
 	memset(&control, 0, sizeof(control));
 	control.keysize = sizeof(PgLocalCacheLocalDirtyKey);
 	control.entrysize = sizeof(PgLocalCacheLocalDirtyEntry);
-	control.hcxt = TopTransactionContext;
+	control.hash = pglc_local_dirty_hash_value;
+	control.match = pglc_local_dirty_key_matches;
+	control.hcxt = TopMemoryContext;
 	local_dirty_hash = hash_create("pg_local_cache transaction dirty keys",
 								   64,
 								   &control,
-								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+								   HASH_ELEM | HASH_FUNCTION | HASH_COMPARE |
+								   HASH_CONTEXT);
 	return local_dirty_hash;
+}
+
+static void
+make_local_dirty_key(PgLocalCacheLocalDirtyKey *dirty_key,
+					 PgLocalCacheDirtyKind kind, Oid database_oid,
+					 Oid relation_oid, const char *nspace, const char *key)
+{
+	memset(dirty_key, 0, sizeof(*dirty_key));
+	dirty_key->kind = (uint8) kind;
+	dirty_key->database_oid = database_oid;
+	dirty_key->relation_oid = relation_oid;
+	if (nspace)
+	{
+		strlcpy(dirty_key->nspace, nspace, sizeof(dirty_key->nspace));
+		dirty_key->nspace_len = (uint16) strnlen(
+			dirty_key->nspace, sizeof(dirty_key->nspace));
+	}
+	if (key)
+	{
+		strlcpy(dirty_key->key, key, sizeof(dirty_key->key));
+		dirty_key->key_len = (uint16) strnlen(
+			dirty_key->key, sizeof(dirty_key->key));
+	}
 }
 
 static PgLocalCacheLocalDirtyEntry *
@@ -3969,20 +4115,30 @@ collect_dirty(PgLocalCacheDirtyKind kind, Oid database_oid, Oid relation_oid,
 {
 	PgLocalCacheLocalDirtyKey dirty_key;
 	PgLocalCacheLocalDirtyEntry *entry;
+	uint32		dirty_hash;
 	bool		found;
 
 	pglc_require_preload();
-	memset(&dirty_key, 0, sizeof(dirty_key));
-	dirty_key.kind = (uint8) kind;
-	dirty_key.database_oid = database_oid;
-	if (nspace)
-		strlcpy(dirty_key.nspace, nspace, sizeof(dirty_key.nspace));
-	if (key)
-		strlcpy(dirty_key.key, key, sizeof(dirty_key.key));
+	make_local_dirty_key(&dirty_key, kind, database_oid, relation_oid,
+						 nspace, key);
 
-	entry = hash_search(get_local_dirty_hash(), &dirty_key, HASH_ENTER, &found);
+	dirty_hash = pglc_local_dirty_hash_value(&dirty_key, sizeof(dirty_key));
+	entry = hash_search_with_hash_value(get_local_dirty_hash(), &dirty_key,
+										dirty_hash,
+										HASH_ENTER, &found);
 	if (!found)
 	{
+		entry->dirty_hash = dirty_hash;
+		entry->cache_key_hash = 0;
+		entry->partition = UINT32_MAX;
+		if (kind == PGLC_DIRTY_KEY)
+		{
+			entry->cache_key_hash = cache_key_hash64(
+				database_oid, entry->key.nspace, entry->key.key,
+				entry->key.key_len);
+			entry->partition = pglc_cache_partition_for_hash(
+				entry->cache_key_hash);
+		}
 		entry->relation_oid = relation_oid;
 		entry->shared_marker_reserved = false;
 		entry->shared_entry_reserved = false;
@@ -3995,8 +4151,23 @@ collect_dirty(PgLocalCacheDirtyKind kind, Oid database_oid, Oid relation_oid,
 		entry->target_relation_incarnation = 0;
 		entry->shared_marker_id = 0;
 		entry->shared_marker_generation = 0;
+		local_dirty_count++;
+		local_dirty_key_count = pglc_dirty_key_count_after_entry(
+			local_dirty_key_count, kind == PGLC_DIRTY_KEY);
+		if (kind == PGLC_DIRTY_GLOBAL)
+			local_has_global_dirty_record = true;
 	}
 	return entry;
+}
+
+static int
+pglc_effective_max_dirty_keys(void)
+{
+#ifdef PGLC_TEST_HOOKS
+	if (pglc_test_max_dirty_keys > 0)
+		return pglc_test_max_dirty_keys;
+#endif
+	return pglc_max_dirty_keys;
 }
 
 static void
@@ -4004,27 +4175,47 @@ pglc_collect_key(Oid database_oid, Oid relation_oid,
 				const char *nspace, const char *key)
 {
 	PgLocalCacheLocalDirtyKey relation_key;
+	PgLocalCacheLocalDirtyKey dirty_key;
+	bool		key_already_collected;
 	HTAB	   *dirty = get_local_dirty_hash();
 
 	memset(&relation_key, 0, sizeof(relation_key));
 	relation_key.kind = (uint8) PGLC_DIRTY_RELATION;
 	relation_key.database_oid = database_oid;
+	relation_key.relation_oid = relation_oid;
 	strlcpy(relation_key.nspace, nspace, sizeof(relation_key.nspace));
-	if (hash_search(dirty, &relation_key, HASH_FIND, NULL) != NULL)
+	relation_key.nspace_len = (uint16) strnlen(
+		relation_key.nspace, sizeof(relation_key.nspace));
+	if (hash_search_with_hash_value(
+			dirty, &relation_key,
+			pglc_local_dirty_hash_value(&relation_key, sizeof(relation_key)),
+			HASH_FIND, NULL) != NULL)
 		return;
 
 	relation_key.kind = (uint8) PGLC_DIRTY_FORGET_RELATION;
-	if (hash_search(dirty, &relation_key, HASH_FIND, NULL) != NULL)
+	if (hash_search_with_hash_value(
+			dirty, &relation_key,
+			pglc_local_dirty_hash_value(&relation_key, sizeof(relation_key)),
+			HASH_FIND, NULL) != NULL)
 		return;
 
-	if (hash_get_num_entries(dirty) >= pglc_max_dirty_keys)
+	make_local_dirty_key(&dirty_key, PGLC_DIRTY_KEY, database_oid,
+						 relation_oid, nspace, key);
+	key_already_collected = hash_search_with_hash_value(
+		dirty, &dirty_key,
+		pglc_local_dirty_hash_value(&dirty_key, sizeof(dirty_key)),
+		HASH_FIND, NULL) != NULL;
+	if (pglc_dirty_key_limit_requires_fallback(
+			key_already_collected, local_dirty_key_count,
+			(Size) pglc_effective_max_dirty_keys()))
 	{
 		pg_atomic_fetch_add_u64(&pglc_shared->dirty_key_limit_fallbacks, 1);
 		pglc_collect_relation(database_oid, relation_oid, nspace);
 		return;
 	}
-	(void) collect_dirty(PGLC_DIRTY_KEY, database_oid, relation_oid,
-						 nspace, key);
+	if (!key_already_collected)
+		(void) collect_dirty(PGLC_DIRTY_KEY, database_oid, relation_oid,
+							 nspace, key);
 }
 
 #ifdef PGLC_TEST_HOOKS
@@ -4236,31 +4427,13 @@ pglc_collect_global(bool bump_config)
 static bool
 local_has_global_dirty(void)
 {
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheLocalDirtyEntry *entry;
-
-	hash_seq_init(&sequence, local_dirty_hash);
-	while ((entry = hash_seq_search(&sequence)) != NULL)
-	{
-		if (entry->key.kind == PGLC_DIRTY_GLOBAL)
-		{
-			hash_seq_term(&sequence);
-			return true;
-		}
-	}
-	return false;
+	return local_has_global_dirty_record;
 }
 
 static uint32
 local_dirty_partition(const PgLocalCacheLocalDirtyEntry *local)
 {
-	PgLocalCacheCacheKey key;
-
-	if (local->key.kind != PGLC_DIRTY_KEY)
-		return UINT32_MAX;
-	make_cache_key(&key, local->key.database_oid, local->key.nspace,
-				   local->key.key, false);
-	return pglc_cache_partition(&key);
+	return local->partition;
 }
 
 static int
@@ -4270,8 +4443,8 @@ compare_local_dirty_partitions(const void *left, const void *right)
 		*(PgLocalCacheLocalDirtyEntry *const *) left;
 	const PgLocalCacheLocalDirtyEntry *r =
 		*(PgLocalCacheLocalDirtyEntry *const *) right;
-	uint32		lp = local_dirty_partition(l);
-	uint32		rp = local_dirty_partition(r);
+	uint32		lp = l->partition;
+	uint32		rp = r->partition;
 
 	return lp < rp ? -1 : lp > rp ? 1 : 0;
 }
@@ -4283,12 +4456,28 @@ ordered_local_dirty_entries(Size *count)
 	PgLocalCacheLocalDirtyEntry *local;
 	Size		index = 0;
 
-	if (local_dirty_ordered == NULL)
+	if (local_dirty_ordered_count == 0 && local_dirty_count > 0)
 	{
-		Size		capacity = (Size) hash_get_num_entries(local_dirty_hash);
+		MemoryContext old_context;
+		Size		capacity;
 
-		local_dirty_ordered =
-			palloc(sizeof(*local_dirty_ordered) * Max(capacity, (Size) 1));
+		if (local_dirty_count > local_dirty_ordered_capacity)
+		{
+			capacity = Max(local_dirty_ordered_capacity, (Size) 64);
+			while (capacity < local_dirty_count)
+				capacity *= 2;
+			old_context = MemoryContextSwitchTo(TopMemoryContext);
+			if (local_dirty_ordered == NULL)
+				local_dirty_ordered = palloc(
+					capacity * sizeof(*local_dirty_ordered));
+			else
+				local_dirty_ordered = repalloc(
+					local_dirty_ordered,
+					capacity * sizeof(*local_dirty_ordered));
+			MemoryContextSwitchTo(old_context);
+			local_dirty_ordered_capacity = capacity;
+		}
+
 		hash_seq_init(&sequence, local_dirty_hash);
 		while ((local = hash_seq_search(&sequence)) != NULL)
 			local_dirty_ordered[index++] = local;
@@ -4298,6 +4487,40 @@ ordered_local_dirty_entries(Size *count)
 	}
 	*count = local_dirty_ordered_count;
 	return local_dirty_ordered;
+}
+
+static void
+reset_local_dirty(void)
+{
+	Size		count;
+	Size		index;
+
+	if (local_dirty_count > 0)
+	{
+		PgLocalCacheLocalDirtyEntry **ordered =
+			ordered_local_dirty_entries(&count);
+
+		for (index = 0; index < count; index++)
+		{
+			PgLocalCacheLocalDirtyEntry *local = ordered[index];
+			void	   *removed;
+
+			removed = hash_search_with_hash_value(local_dirty_hash, &local->key,
+												 local->dirty_hash,
+												 HASH_REMOVE, NULL);
+			Assert(removed != NULL);
+			if (removed == NULL)
+				elog(ERROR, "pg_local_cache dirty-key reset lost an entry");
+		}
+	}
+	local_dirty_count = 0;
+	local_dirty_key_count = 0;
+	local_dirty_ordered_count = 0;
+	local_dirty_published = false;
+	local_global_fallback = false;
+	local_bump_config = false;
+	local_attached_table_touched = false;
+	local_has_global_dirty_record = false;
 }
 
 static PgLocalCacheRelationState *
@@ -4505,10 +4728,12 @@ reserve_key_entries(PgLocalCacheLocalDirtyEntry **ordered, Size count)
 		for (; index < end; index++)
 		{
 			PgLocalCacheLocalDirtyEntry *local = ordered[index];
-			PgLocalCacheCacheEntry *entry = get_cache_entry(
+			PgLocalCacheCacheEntry *entry = get_cache_entry_with_cached_hash(
 				local->key.database_oid, local->relation_oid,
 				local->key.nspace, local->key.key,
-				local->shared_slot, local->shared_slot_generation, false);
+				local->shared_slot, local->shared_slot_generation, false,
+				local->key.key_len, local->cache_key_hash,
+				local->partition);
 
 			if (entry == NULL)
 			{
@@ -4602,8 +4827,7 @@ pglc_publish_dirty(void)
 	uint64		table_invalidated = 0;
 	bool		global_fallback;
 
-	if (local_dirty_hash == NULL || local_dirty_published ||
-		hash_get_num_entries(local_dirty_hash) == 0)
+	if (local_dirty_count == 0 || local_dirty_published)
 		return;
 	ordered = ordered_local_dirty_entries(&count);
 	global_fallback = local_has_global_dirty();
@@ -4662,13 +4886,16 @@ pglc_publish_dirty(void)
 
 				if (!local->shared_entry_reserved)
 					continue;
-				entry = get_cache_entry(local->key.database_oid,
-										local->relation_oid,
-										local->key.nspace,
-										local->key.key,
-										local->shared_slot,
+				entry = get_cache_entry_with_cached_hash(local->key.database_oid,
+											local->relation_oid,
+											local->key.nspace,
+											local->key.key,
+											local->shared_slot,
 											local->shared_slot_generation,
-											false);
+											false,
+											local->key.key_len,
+											local->cache_key_hash,
+											local->partition);
 				Assert(entry != NULL && entry->dirty_writers > 0);
 				if (entry != NULL)
 				{
@@ -4713,8 +4940,11 @@ pglc_finish_dirty(bool committed)
 	Size		index;
 	bool		bump_config = committed && local_bump_config;
 
-	if (local_dirty_hash == NULL)
+	if (local_dirty_count == 0 && !local_global_fallback && !local_bump_config)
+	{
+		reset_local_dirty();
 		return;
+	}
 	if (local_dirty_published || !committed)
 	{
 		ordered = ordered_local_dirty_entries(&count);
@@ -4766,13 +4996,17 @@ pglc_finish_dirty(bool committed)
 					continue;
 				if (local->shared_entry_reserved)
 				{
-					entry = get_cache_entry(local->key.database_oid,
+					entry = get_cache_entry_with_cached_hash(
+											local->key.database_oid,
 											local->relation_oid,
 											local->key.nspace,
 											local->key.key,
 											local->shared_slot,
 											local->shared_slot_generation,
-											false);
+											false,
+											local->key.key_len,
+											local->cache_key_hash,
+											local->partition);
 					if (entry != NULL && entry->dirty_writers > 0)
 					{
 						entry->valid = false;
@@ -4798,12 +5032,7 @@ pglc_finish_dirty(bool committed)
 		(void) pglc_atomic_fetch_add_checked(
 			&pglc_shared->config_generation, 1);
 
-	local_dirty_hash = NULL;
-	local_dirty_ordered = NULL;
-	local_dirty_ordered_count = 0;
-	local_dirty_published = false;
-	local_global_fallback = false;
-	local_bump_config = false;
+	reset_local_dirty();
 }
 
 static void
@@ -4818,6 +5047,9 @@ pglc_xact_callback(XactEvent event, void *arg)
 		pglc_test_partition_lock_depth = 0;
 	}
 #endif
+	if (!local_attached_table_touched && local_dirty_count == 0 &&
+		!local_global_fallback && !local_bump_config)
+		return;
 	switch (event)
 	{
 		case XACT_EVENT_PRE_COMMIT:
@@ -4833,7 +5065,7 @@ pglc_xact_callback(XactEvent event, void *arg)
 			pglc_finish_dirty(false);
 			break;
 		case XACT_EVENT_PRE_PREPARE:
-			if (local_dirty_hash != NULL)
+			if (local_attached_table_touched || local_dirty_count > 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("PREPARE TRANSACTION is not supported after modifying a pg_local_cache mapping")));
@@ -4846,25 +5078,48 @@ pglc_xact_callback(XactEvent event, void *arg)
 static void
 pglc_backend_exit(int code, Datum arg)
 {
-	if (local_dirty_hash != NULL && pglc_shared != NULL)
+	if ((local_dirty_count > 0 || local_global_fallback) &&
+		pglc_shared != NULL)
 		pglc_finish_dirty(false);
 }
 
-static void
-collect_tuple_key(TriggerData *trigger_data, HeapTuple tuple,
-				  const char *nspace, int key_count, char **column_names)
+static PgLocalCacheTriggerKeyMetadata *
+trigger_key_metadata(FunctionCallInfo fcinfo, TriggerData *trigger_data,
+					 int key_count, char **column_names)
 {
 	TupleDesc	descriptor = RelationGetDescr(trigger_data->tg_relation);
-	char		canonical[PGLC_KEY_MAX];
-	Datum		key_values[PGLC_MAX_KEY_COLUMNS];
-	bool		key_nulls[PGLC_MAX_KEY_COLUMNS];
-	FmgrInfo	key_outputs[PGLC_MAX_KEY_COLUMNS];
-	Size		canonical_len;
+	Oid			relation_oid = RelationGetRelid(trigger_data->tg_relation);
+	PgLocalCacheTriggerKeyMetadata *metadata = fcinfo->flinfo->fn_extra;
+	MemoryContext old_context;
+	bool		rebuild;
 	int			key_index;
 
-	MemSet(key_values, 0, sizeof(key_values));
-	MemSet(key_nulls, 0, sizeof(key_nulls));
-	MemSet(key_outputs, 0, sizeof(key_outputs));
+	rebuild = metadata == NULL ||
+		metadata->trigger_oid != trigger_data->tg_trigger->tgoid ||
+		metadata->relation_oid != relation_oid ||
+		metadata->descriptor != descriptor ||
+		metadata->descriptor_type != descriptor->tdtypeid ||
+		metadata->descriptor_typmod != descriptor->tdtypmod ||
+		metadata->descriptor_natts != descriptor->natts ||
+		metadata->key_count != key_count;
+	if (!rebuild)
+		return metadata;
+
+	old_context = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+	if (metadata == NULL)
+	{
+		metadata = palloc0(sizeof(*metadata));
+		fcinfo->flinfo->fn_extra = metadata;
+	}
+	else
+		MemSet(metadata, 0, sizeof(*metadata));
+	metadata->trigger_oid = trigger_data->tg_trigger->tgoid;
+	metadata->relation_oid = relation_oid;
+	metadata->descriptor = descriptor;
+	metadata->descriptor_type = descriptor->tdtypeid;
+	metadata->descriptor_typmod = descriptor->tdtypmod;
+	metadata->descriptor_natts = descriptor->natts;
+	metadata->key_count = (int16) key_count;
 	for (key_index = 0; key_index < key_count; key_index++)
 	{
 		AttrNumber	attribute_number;
@@ -4873,37 +5128,64 @@ collect_tuple_key(TriggerData *trigger_data, HeapTuple tuple,
 		bool		type_is_varlena;
 
 		attribute_number = get_attnum(
-			RelationGetRelid(trigger_data->tg_relation),
-			column_names[key_index]);
+			relation_oid, column_names[key_index]);
 		if (attribute_number == InvalidAttrNumber)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_COLUMN),
-					 errmsg("pg_local_cache key column \"%s\" no longer exists",
+						 errmsg("pg_local_cache key column \"%s\" no longer exists",
 							column_names[key_index])));
 
 		attribute = TupleDescAttr(descriptor, attribute_number - 1);
-		key_values[key_index] = heap_getattr(
-			tuple, attribute_number, descriptor, &key_nulls[key_index]);
-		if (key_nulls[key_index])
-			goto relation_fallback;
-
+		metadata->attribute_numbers[key_index] = attribute_number;
+		metadata->key_types[key_index] = attribute->atttypid;
+		if (attribute->atttypid == INT2OID ||
+			attribute->atttypid == INT4OID ||
+			attribute->atttypid == INT8OID)
+			continue;
 		getTypeOutputInfo(attribute->atttypid, &output_function,
 						  &type_is_varlena);
-		fmgr_info(output_function, &key_outputs[key_index]);
+		fmgr_info(output_function, &metadata->output_functions[key_index]);
 	}
-	if (!pglc_canonical_key(key_values, key_nulls, key_count, key_outputs,
-							canonical, sizeof(canonical), &canonical_len))
+	MemoryContextSwitchTo(old_context);
+	return metadata;
+}
+
+static void
+collect_tuple_key(FunctionCallInfo fcinfo, TriggerData *trigger_data,
+				  HeapTuple tuple, const char *nspace, int key_count,
+				  char **column_names)
+{
+	TupleDesc	descriptor = RelationGetDescr(trigger_data->tg_relation);
+	PgLocalCacheTriggerKeyMetadata *metadata = trigger_key_metadata(
+		fcinfo, trigger_data, key_count, column_names);
+	char		canonical[PGLC_KEY_MAX];
+	Datum		key_values[PGLC_MAX_KEY_COLUMNS];
+	bool		key_nulls[PGLC_MAX_KEY_COLUMNS];
+	Size		canonical_len;
+	int			key_index;
+	Oid			relation_oid = RelationGetRelid(trigger_data->tg_relation);
+
+	MemSet(key_values, 0, sizeof(key_values));
+	MemSet(key_nulls, 0, sizeof(key_nulls));
+	for (key_index = 0; key_index < key_count; key_index++)
+	{
+		AttrNumber attribute_number = metadata->attribute_numbers[key_index];
+
+		key_values[key_index] = heap_getattr(
+			tuple, attribute_number, descriptor, &key_nulls[key_index]);
+	}
+	if (!pglc_canonical_key_typed(key_values, key_nulls, key_count,
+								  metadata->key_types,
+								  metadata->output_functions,
+								  canonical, sizeof(canonical), &canonical_len))
 		goto relation_fallback;
 
 	pglc_collect_key(MyDatabaseId,
-					RelationGetRelid(trigger_data->tg_relation),
-					nspace, canonical);
+					relation_oid, nspace, canonical);
 	return;
 
 relation_fallback:
-	pglc_collect_relation(MyDatabaseId,
-						 RelationGetRelid(trigger_data->tg_relation),
-						 nspace);
+	pglc_collect_relation(MyDatabaseId, relation_oid, nspace);
 }
 
 Datum
@@ -4928,12 +5210,8 @@ pg_local_cache_statement_guard(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
 				 errmsg("invalid pg_local_cache statement guard definition")));
 
-	/*
-	 * The empty transaction-local hash is a read-your-writes and 2PC fence.
-	 * Exact keys remain the responsibility of the AFTER invalidators, so this
-	 * does not invalidate shared entries or broaden commit invalidation.
-	 */
-	(void) get_local_dirty_hash();
+	/* Track attached-table statements without allocating transaction state. */
+	local_attached_table_touched = true;
 	PG_RETURN_POINTER(NULL);
 }
 
@@ -4964,16 +5242,16 @@ pg_local_cache_row_invalidate(PG_FUNCTION_ARGS)
 	column_names = &trigger_data->tg_trigger->tgargs[1];
 
 	if (TRIGGER_FIRED_BY_INSERT(trigger_data->tg_event))
-		collect_tuple_key(trigger_data, trigger_data->tg_trigtuple,
+		collect_tuple_key(fcinfo, trigger_data, trigger_data->tg_trigtuple,
 						  nspace, key_count, column_names);
 	else if (TRIGGER_FIRED_BY_DELETE(trigger_data->tg_event))
-		collect_tuple_key(trigger_data, trigger_data->tg_trigtuple,
+		collect_tuple_key(fcinfo, trigger_data, trigger_data->tg_trigtuple,
 						  nspace, key_count, column_names);
 	else if (TRIGGER_FIRED_BY_UPDATE(trigger_data->tg_event))
 	{
-		collect_tuple_key(trigger_data, trigger_data->tg_trigtuple,
+		collect_tuple_key(fcinfo, trigger_data, trigger_data->tg_trigtuple,
 						  nspace, key_count, column_names);
-		collect_tuple_key(trigger_data, trigger_data->tg_newtuple,
+		collect_tuple_key(fcinfo, trigger_data, trigger_data->tg_newtuple,
 						  nspace, key_count, column_names);
 	}
 

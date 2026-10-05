@@ -18,11 +18,13 @@ ROW_PAYLOAD_SOURCES = row_payload_test.c ../../src/row_payload.c
 CACHE_STORAGE_SOURCES = cache_arena_test.c ../../src/cache_arena.c ../../src/cache_index.c
 CACHE_INDEX_SOURCES = cache_index_test.c ../../src/cache_index.c
 CACHE_CODEC_SOURCES = key_codec_test.c ../../src/key_codec.c
+DIRTY_KEY_LIMIT_SOURCES = dirty_key_limit_test.c
 TARGET = resp_test
 SANITIZED_TARGET = resp_test_sanitized
-TARGETS = $(TARGET) row_payload_test cache_arena_test cache_index_test key_codec_test
+TARGETS = $(TARGET) row_payload_test cache_arena_test cache_index_test key_codec_test dirty_key_limit_test
 SANITIZED_TARGETS = $(SANITIZED_TARGET) row_payload_test_sanitized \
-	cache_arena_test_sanitized cache_index_test_sanitized key_codec_test_sanitized
+	cache_arena_test_sanitized cache_index_test_sanitized key_codec_test_sanitized \
+	dirty_key_limit_test_sanitized
 FUZZ_REPLAY_TARGET = resp_parse_replay
 FUZZ_REPLAY_SANITIZED_TARGET = resp_parse_replay_sanitized
 
@@ -51,6 +53,15 @@ cache_index_test: $(CACHE_INDEX_SOURCES) ../../src/cache_index.h
 key_codec_test: $(CACHE_CODEC_SOURCES) ../../src/key_codec.h
 	$(CC) $(CPPFLAGS) -DPGLC_KEY_CODEC_STANDALONE $(COMMON_CFLAGS) $(CFLAGS) \
 		$(CACHE_CODEC_SOURCES) $(LDFLAGS) -o $@
+
+dirty_key_limit_test: $(DIRTY_KEY_LIMIT_SOURCES) ../../src/dirty_key_limit.h
+	$(CC) $(CPPFLAGS) $(COMMON_CFLAGS) $(CFLAGS) \
+		$(DIRTY_KEY_LIMIT_SOURCES) $(LDFLAGS) -o $@
+
+dirty_key_limit_test_sanitized: $(DIRTY_KEY_LIMIT_SOURCES) ../../src/dirty_key_limit.h
+	$(CC) $(CPPFLAGS) $(COMMON_CFLAGS) -O1 -fsanitize=address,undefined \
+		-fno-omit-frame-pointer $(CFLAGS) $(DIRTY_KEY_LIMIT_SOURCES) $(LDFLAGS) \
+		-fsanitize=address,undefined -o $@
 
 key_codec_test_sanitized: $(CACHE_CODEC_SOURCES) ../../src/key_codec.h
 	$(CC) $(CPPFLAGS) -DPGLC_KEY_CODEC_STANDALONE $(COMMON_CFLAGS) -O1 \
@@ -92,6 +103,7 @@ check: $(TARGETS) $(FUZZ_REPLAY_TARGET)
 	./cache_arena_test
 	./cache_index_test
 	./key_codec_test
+	./dirty_key_limit_test
 	./$(FUZZ_REPLAY_TARGET) $(FUZZ_CORPUS)
 
 sanitize: $(SANITIZED_TARGETS) $(FUZZ_REPLAY_SANITIZED_TARGET)
@@ -110,6 +122,9 @@ sanitize: $(SANITIZED_TARGETS) $(FUZZ_REPLAY_SANITIZED_TARGET)
 	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=0:strict_string_checks=1} \
 	UBSAN_OPTIONS=$${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1} \
 	./key_codec_test_sanitized
+	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=0:strict_string_checks=1} \
+	UBSAN_OPTIONS=$${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1} \
+	./dirty_key_limit_test_sanitized
 	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=0:strict_string_checks=1} \
 	UBSAN_OPTIONS=$${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1} \
 	./$(FUZZ_REPLAY_SANITIZED_TARGET) $(FUZZ_CORPUS)
