@@ -207,6 +207,7 @@ pg_local_cache_worker_main(Datum main_arg)
 		ereport(FATAL,
 				(errmsg("invalid pg_local_cache worker slot %d", requested_slot)));
 	worker_slot = requested_slot;
+	pglc_set_worker_slot(worker_slot);
 
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
@@ -1599,7 +1600,7 @@ process_client(PgLocalCacheClient *client)
 
 				pg_atomic_fetch_add_u64(&pglc_shared->protocol_errors, 1);
 				pg_atomic_fetch_add_u64(
-					&pglc_shared->client_request_errors, 1);
+					&pglc_shared->stats_shards[worker_slot].client_request_errors, 1);
 				error_response = pglc_resp_error(protocol_error, &error_length);
 				queued = queue_response(client, error_response,
 										error_length, true);
@@ -1611,11 +1612,13 @@ process_client(PgLocalCacheClient *client)
 			}
 
 			previous_context = MemoryContextSwitchTo(command_context);
-			pg_atomic_fetch_add_u64(&pglc_shared->client_requests, 1);
+			pg_atomic_fetch_add_u64(
+				&pglc_shared->stats_shards[worker_slot].client_requests, 1);
 			response = execute_command(client, args, argc,
 								   &response_length, &close_after);
 			if (response_length > 0 && response[0] == '-')
-				pg_atomic_fetch_add_u64(&pglc_shared->client_request_errors, 1);
+				pg_atomic_fetch_add_u64(
+					&pglc_shared->stats_shards[worker_slot].client_request_errors, 1);
 			queued = queue_response(client, response, response_length,
 								close_after);
 			if (queued)
@@ -1827,10 +1830,12 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 			return pglc_resp_error(key_error, response_length);
 		if (is_set)
 		{
-			pg_atomic_fetch_add_u64(&pglc_shared->client_sets, 1);
+			pg_atomic_fetch_add_u64(
+				&pglc_shared->stats_shards[worker_slot].client_sets, 1);
 			return command_set(mapping, raw_key, &args[2], response_length);
 		}
-		pg_atomic_fetch_add_u64(&pglc_shared->client_dels, 1);
+		pg_atomic_fetch_add_u64(
+			&pglc_shared->stats_shards[worker_slot].client_dels, 1);
 		return command_delete(mapping, raw_key, response_length);
 	}
 	if (pglc_resp_arg_equals(&args[0], "MGET"))
@@ -2411,12 +2416,15 @@ note_resp_cache_lookup(bool hit, bool negative)
 {
 	if (hit)
 	{
-		pg_atomic_fetch_add_u64(&pglc_shared->cache_hits, 1);
+		pg_atomic_fetch_add_u64(
+			&pglc_shared->stats_shards[worker_slot].cache_hits, 1);
 		if (negative)
-			pg_atomic_fetch_add_u64(&pglc_shared->negative_hits, 1);
+			pg_atomic_fetch_add_u64(
+				&pglc_shared->stats_shards[worker_slot].negative_hits, 1);
 	}
 	else
-		pg_atomic_fetch_add_u64(&pglc_shared->cache_misses, 1);
+		pg_atomic_fetch_add_u64(
+			&pglc_shared->stats_shards[worker_slot].cache_misses, 1);
 }
 
 static bool
@@ -2530,7 +2538,8 @@ mget_read_one(PgLocalCacheMgetItem *item, MemoryContext result_context)
 	bool		database_payload_cacheable = false;
 
 	ensure_mapping_current(item->mapping);
-	pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
+	pg_atomic_fetch_add_u64(
+		&pglc_shared->stats_shards[worker_slot].pass_to_main, 1);
 	if (SPI_execute_plan(item->mapping->get_plan, item->key_values,
 						 NULL, true, 1) != SPI_OK_SELECT)
 		elog(ERROR, "pg_local_cache MGET plan failed");
@@ -2745,7 +2754,8 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 	{
 		transaction_context = begin_spi_transaction(statement_timeout_ms);
 		ensure_mapping_current(mapping);
-		pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
+		pg_atomic_fetch_add_u64(
+			&pglc_shared->stats_shards[worker_slot].pass_to_main, 1);
 		if (SPI_execute_plan(mapping->get_plan, key_values, NULL, true, 1) !=
 			SPI_OK_SELECT)
 			elog(ERROR, "pg_local_cache MGET plan failed");
@@ -2890,7 +2900,9 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 		items[item_index].response_slots++;
 	}
 
-	pg_atomic_fetch_add_u64(&pglc_shared->client_mget_keys, (uint64) key_count);
+	pg_atomic_fetch_add_u64(
+		&pglc_shared->stats_shards[worker_slot].client_mget_keys,
+		(uint64) key_count);
 	response_size = 1 + mget_decimal_digits((Size) key_count) + 2;
 	for (key_index = 0; key_index < item_count; key_index++)
 	{
@@ -3178,8 +3190,9 @@ command_set(PgLocalCacheMapping *mapping, const char *raw_key,
 							 key_error + 4 : key_error)));
 	values[mapping->key_count] = JsonbPGetDatum(row);
 
-	pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
-	pg_atomic_fetch_add_u64(&pglc_shared->sql_sets, 1);
+	pg_atomic_fetch_add_u64(
+		&pglc_shared->stats_shards[worker_slot].pass_to_main, 1);
+	pg_atomic_fetch_add_u64(&pglc_shared->stats_shards[worker_slot].sql_sets, 1);
 	if (SPI_execute_plan(mapping->set_plan, values, NULL, false, 0) !=
 		SPI_OK_INSERT)
 		elog(ERROR, "pg_local_cache SET plan failed");
@@ -3208,8 +3221,9 @@ command_delete(PgLocalCacheMapping *mapping, const char *raw_key,
 
 	transaction_context = begin_spi_transaction(pglc_statement_timeout_ms);
 	ensure_mapping_current(mapping);
-	pg_atomic_fetch_add_u64(&pglc_shared->pass_to_main, 1);
-	pg_atomic_fetch_add_u64(&pglc_shared->sql_dels, 1);
+	pg_atomic_fetch_add_u64(
+		&pglc_shared->stats_shards[worker_slot].pass_to_main, 1);
+	pg_atomic_fetch_add_u64(&pglc_shared->stats_shards[worker_slot].sql_dels, 1);
 	if (SPI_execute_plan(mapping->delete_plan, values, NULL, false, 0) !=
 		SPI_OK_DELETE)
 		elog(ERROR, "pg_local_cache DEL plan failed");
@@ -3224,9 +3238,18 @@ static void
 maybe_reload_mappings(void)
 {
 	uint64		generation = pglc_config_generation();
+	int			mapping_index;
 
 	if (generation == worker_mapping_generation && !worker_mappings_incomplete)
+	{
+		/* Keep serviceable mappings uncached while relation-slot pressure clears. */
+		for (mapping_index = 0; mapping_index < worker_mapping_count;
+			 mapping_index++)
+			if (!pglc_mapping_slot_is_current(&worker_mappings[mapping_index]))
+				(void) pglc_resolve_mapping_slot(
+					&worker_mappings[mapping_index]);
 		return;
+	}
 	if (worker_next_mapping_retry != 0 &&
 		generation == worker_retry_generation &&
 		GetCurrentTimestamp() < worker_next_mapping_retry)
@@ -3590,6 +3613,8 @@ reload_mappings(uint64 target_generation)
 				DatumGetBool(SPI_getbinval(tuple, desc, 6, &is_null));
 			Assert(!is_null);
 			mapping->config_generation = target_generation;
+			/* Slot pressure disables caching for this mapping, not SQL service. */
+			(void) pglc_resolve_mapping_slot(mapping);
 
 			mapping_old_context = MemoryContextSwitchTo(mapping_context);
 			relation_lockmode = mapping->writable ? RowExclusiveLock : AccessShareLock;

@@ -295,6 +295,10 @@ def main() -> None:
     enum_namespace = f"rowenum{suffix}"
     quoted_app_role = sql_identifier(APP_ROLE)
     key_one = crud_key(table, 7, 1)
+    # Typed int8 components use length:value; in primary-key order.
+    canonical_key_one = "".join(
+        f"{len(str(value))}:{value};" for value in (7, 1)
+    )
     missing_key = crud_key(table, 7, 9_000_000_000 + os.getpid())
     moved_key = crud_key(table, 8, 11)
     client: RespClient | None = None
@@ -344,7 +348,7 @@ def main() -> None:
         if corrupt_hook:
             corrupted = admin_sql(
                 "SELECT public.pglc_test_corrupt_value_len("
-                f"'{relation}'::regclass, '{namespace}', '{key_one}')"
+                f"'{relation}'::regclass, '{namespace}', '{canonical_key_one}')"
             )
             assert corrupted == "t", corrupted
             before_corruption_read = stat(client)

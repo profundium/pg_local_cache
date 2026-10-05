@@ -27,6 +27,8 @@
 #define PGLC_RESPONSE_VALUE_MAX (64 * 1024)
 #define PGLC_MAX_MAPPINGS 128
 #define PGLC_MAX_WORKERS 32
+#define PGLC_MAX_STATS_SHARDS (PGLC_MAX_WORKERS + 1)
+#define PGLC_MAX_LOCK_PARTITIONS 256
 #define PGLC_MAX_CLIENTS_PER_WORKER 128
 #define PGLC_RESPONSE_MAX (PGLC_RESPONSE_VALUE_MAX + 1024)
 #define PGLC_AUTH_TOKEN_MAX 1024
@@ -45,6 +47,8 @@ typedef struct PgLocalCacheCacheEntry
 {
 	PgLocalCacheCacheKey key;
 	Oid			relation_oid;
+	uint32		relation_slot;
+	uint64		slot_generation;
 	uint64		global_epoch;
 	uint64		relation_version;
 	uint64		relation_incarnation;
@@ -77,25 +81,67 @@ typedef struct PgLocalCacheRelationState
 {
 	PgLocalCacheRelationKey key;
 	Oid			relation_oid;
-	uint64		relation_incarnation;
-	uint64		version;
-	uint32		dirty_writers;
 	uint64		identity_pins;
+	uint32		slot;
+	uint64		slot_generation;
 	bool		pending_forget;
 } PgLocalCacheRelationState;
 
-typedef struct PgLocalCacheSharedState
+typedef struct PgLocalCacheRelationSlot
+{
+	pg_atomic_uint64 generation;
+	pg_atomic_uint64 incarnation;
+	pg_atomic_uint64 version;
+	pg_atomic_uint64 dirty_writers;
+	bool		in_use;
+} PgLocalCacheRelationSlot;
+
+typedef struct PgLocalCachePartition
 {
 	LWLock	   *lock;
-	pg_atomic_uint64 clock;
-	pg_atomic_uint64 entry_generation;
-	/* Last relation incarnation issued; mutated only under lock. */
-	uint64		relation_incarnation_counter;
-	uint64		global_version;
-	uint64		global_epoch;
-	uint32		global_dirty_writers;
-	/* Next dynahash bucket for the bounded eviction sample. */
+	uint64		entry_generation;
 	uint32		eviction_bucket_cursor;
+	uint32		entry_count;
+	uint32		capacity;
+} PgLocalCachePartition;
+
+typedef struct PgLocalCacheWorkerStats
+{
+	pg_atomic_uint64 cache_hits;
+	pg_atomic_uint64 cache_misses;
+	pg_atomic_uint64 negative_hits;
+	pg_atomic_uint64 negative_writes;
+	pg_atomic_uint64 database_reads;
+	pg_atomic_uint64 client_requests;
+	pg_atomic_uint64 client_request_errors;
+	pg_atomic_uint64 client_mget_keys;
+	pg_atomic_uint64 client_sets;
+	pg_atomic_uint64 client_dels;
+	pg_atomic_uint64 pass_to_main;
+	pg_atomic_uint64 database_writes;
+	pg_atomic_uint64 sql_sets;
+	pg_atomic_uint64 sql_dels;
+	pg_atomic_uint64 cache_admission_rejections;
+	pg_atomic_uint64 invalidations;
+	pg_atomic_uint64 key_invalidations;
+	pg_atomic_uint64 table_invalidations;
+	pg_atomic_uint64 evictions;
+	pg_atomic_uint64 singleflight_leaders;
+	pg_atomic_uint64 singleflight_waiters;
+	pg_atomic_uint64 singleflight_reuses;
+	pg_atomic_uint64 singleflight_timeouts;
+} PgLocalCacheWorkerStats;
+
+typedef struct PgLocalCacheSharedState
+{
+	LWLock	   *registry_lock;
+	PgLocalCachePartition partitions[PGLC_MAX_LOCK_PARTITIONS];
+	pg_atomic_uint64 clock;
+	pg_atomic_uint64 relation_incarnation_counter;
+	pg_atomic_uint64 global_version;
+	pg_atomic_uint64 global_epoch;
+	pg_atomic_uint64 global_dirty_writers;
+	pg_atomic_uint64 cache_entry_count;
 	pg_atomic_uint64 config_generation;
 	pg_atomic_uint64 cache_hits;
 	pg_atomic_uint64 cache_misses;
@@ -141,14 +187,21 @@ typedef struct PgLocalCacheSharedState
 	pg_atomic_uint64 pass_to_main;
 	pg_atomic_uint64 sql_sets;
 	pg_atomic_uint64 sql_dels;
+	PgLocalCacheWorkerStats stats_shards[PGLC_MAX_STATS_SHARDS];
+#ifdef PGLC_TEST_HOOKS
+	pg_atomic_uint64 test_partition_lock_violations;
+#endif
 } PgLocalCacheSharedState;
 
 typedef struct PgLocalCacheReadToken
 {
 	uint64		config_generation;
 	uint64		global_version;
+	uint64		global_epoch;
 	uint64		relation_version;
 	uint64		relation_incarnation;
+	uint64		slot_generation;
+	uint32		relation_slot;
 	uint64		key_version;
 	uint64		source_observed_full_xid;
 	bool		cacheable;
@@ -180,6 +233,8 @@ typedef struct PgLocalCacheMapping
 	int			row_natts;
 	uint64		row_descriptor_fingerprint;
 	uint64		config_generation;
+	uint64		relation_slot_generation;
+	uint32		relation_slot;
 	bool		writable;
 	FmgrInfo	key_inputs[PGLC_MAX_KEY_COLUMNS];
 	FmgrInfo	key_outputs[PGLC_MAX_KEY_COLUMNS];
@@ -192,6 +247,7 @@ typedef struct PgLocalCacheMapping
 extern int	pglc_port;
 extern int	pglc_worker_count;
 extern int	pglc_cache_entries;
+extern int	pglc_lock_partitions;
 extern int	pglc_relation_states;
 extern int	pglc_max_clients;
 extern int	pglc_max_clients_per_worker;
@@ -217,7 +273,6 @@ extern char *pglc_tls_key_file;
 extern char *pglc_tls_ca_file;
 
 extern PgLocalCacheSharedState *pglc_shared;
-extern HTAB *pglc_cache_hash;
 extern HTAB *pglc_relation_hash;
 
 extern void pglc_require_preload(void);
@@ -271,6 +326,9 @@ extern char *pglc_metrics_json(void);
 extern bool pglc_cache_is_enabled(void);
 extern void pglc_sync_cache_enabled(void);
 extern void pglc_note_database_read(void);
+extern void pglc_set_worker_slot(int worker_slot);
+extern bool pglc_resolve_mapping_slot(PgLocalCacheMapping *mapping);
+extern bool pglc_mapping_slot_is_current(const PgLocalCacheMapping *mapping);
 extern void pglc_note_database_write(void);
 extern bool pglc_try_reserve_client(void);
 extern void pglc_release_clients(uint64 count);

@@ -69,14 +69,21 @@ share its snapshot, or participate in its transaction. Setting
 ## Shared memory and configuration {#shared-memory-and-configuration}
 
 Cache entries, relation states, counters, worker generations, and RESP client
-slots are allocated at postmaster startup. Capacity is bounded. Eviction samples
-a bounded rotating set and prefers stale entries; admission failure returns to
-the source table instead of allocating unbounded memory.
+slots are allocated at postmaster startup. `cache_entries` is the hard global
+maximum. Each partition has a 25% headroom cap to absorb hash variance below
+that maximum. Eviction scans rotating buckets, finishes each sampled collision
+chain so its tail is visited, and prefers stale entries; admission failure
+returns to the source table.
+Each active partition cap is `ceil(1.25 * cache_entries / active_partitions)`;
+small caches reduce the active partition count to avoid dynahash's minimum
+allocation per table. Headroom and per-partition rounding are included in the
+startup memory estimate.
 
 | Setting | Default | Meaning |
 |---|---:|---|
 | `pg_local_cache.database` | `postgres` | database served by the extension |
-| `pg_local_cache.cache_entries` | `16384` | shared row capacity |
+| `pg_local_cache.cache_entries` | `16384` | hard global maximum number of shared row-cache entries |
+| `pg_local_cache.lock_partitions` | `64` | maximum cache lock partitions; small caches may use fewer; power of two from `16` to `256`; requires restart (`PGC_POSTMASTER`) |
 | `pg_local_cache.relation_states` | `1024` | shared mapping-state capacity |
 | `pg_local_cache.memory_budget_mb` | `384` | extension startup budget |
 | `pg_local_cache.port` | `6380` | RESP port; `0` is for regression tests and diagnostics only, and serves no reads |
