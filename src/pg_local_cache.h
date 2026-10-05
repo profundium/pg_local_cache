@@ -31,7 +31,7 @@
 #define PGLC_MAX_WORKERS 32
 #define PGLC_MAX_STATS_SHARDS (PGLC_MAX_WORKERS + 1)
 #define PGLC_MAX_LOCK_PARTITIONS 256
-#define PGLC_MAX_CLIENTS_PER_WORKER 128
+#define PGLC_MAX_CLIENTS_PER_WORKER 4096
 #define PGLC_RESPONSE_MAX (PGLC_RESPONSE_VALUE_MAX + 1024)
 #define PGLC_AUTH_TOKEN_MAX 1024
 #define PGLC_MAX_AUTH_FAILURES 5
@@ -147,6 +147,11 @@ typedef struct PgLocalCacheWorkerStats
 	pg_atomic_uint64 client_requests;
 	pg_atomic_uint64 client_request_errors;
 	pg_atomic_uint64 client_mget_keys;
+	pg_atomic_uint64 fast_path_hits;
+	pg_atomic_uint64 fast_path_fallback_key_form;
+	pg_atomic_uint64 fast_path_fallback_mapping_shape;
+	pg_atomic_uint64 fast_path_fallback_multi_key;
+	pg_atomic_uint64 fast_path_fallback_cache_state;
 	pg_atomic_uint64 client_sets;
 	pg_atomic_uint64 client_dels;
 	pg_atomic_uint64 pass_to_main;

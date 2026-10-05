@@ -83,6 +83,8 @@ static char *pglc_binary_build_id = NULL;
 static char *pglc_test_pause_point = NULL;
 static int pglc_test_barrier_relation_oid = 0;
 static int pglc_test_dirty_marker_limit = 0;
+static int pglc_test_occupied_entry_free_head = 0;
+static int pglc_test_occupied_marker_free_head = 0;
 static bool pglc_test_abort_after_reservation = false;
 static int pglc_test_partition_lock_depth = 0;
 #endif
@@ -619,6 +621,32 @@ pglc_define_gucs(void)
 							NULL,
 							NULL,
 							NULL);
+
+	DefineCustomIntVariable("pg_local_cache.test_occupied_entry_free_head",
+							"Test-only cache descriptor free-list corruption injection.",
+							NULL,
+							&pglc_test_occupied_entry_free_head,
+							0,
+							0,
+							1,
+							PGC_SIGHUP,
+							GUC_SUPERUSER_ONLY,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_local_cache.test_occupied_marker_free_head",
+							"Test-only dirty marker free-list corruption injection.",
+							NULL,
+							&pglc_test_occupied_marker_free_head,
+							0,
+							0,
+							1,
+							PGC_SIGHUP,
+							GUC_SUPERUSER_ONLY,
+							NULL,
+							NULL,
+							NULL);
 #endif
 
 #if PG_VERSION_NUM >= 150000
@@ -814,6 +842,17 @@ pglc_index_buckets_for(uint32 capacity)
 	uint32		minimum = Max(16U, capacity * 2U);
 
 	return pglc_next_power_of_two(minimum);
+}
+
+static bool
+pglc_partition_index_valid(PgLocalCachePartition *partition, bool markers)
+{
+	PglcCacheIndex *index = markers ? &partition->marker_index :
+		&partition->index;
+	uint32		capacity = markers ? partition->marker_capacity :
+			partition->capacity;
+
+	return pglc_index_valid(index, pglc_index_buckets_for(capacity));
 }
 
 static int
@@ -1067,11 +1106,16 @@ pglc_derive_default_cache_entries(void)
 	{
 		int			previous_entries = pglc_cache_entries;
 		int			previous_partitions = pglc_active_lock_partitions;
-			Size		need;
-			Size		arena_bytes;
+		int			previous_marker_entries =
+				pglc_effective_dirty_marker_entries;
+		int			previous_marker_memory_mb =
+				pglc_effective_dirty_marker_memory_mb;
+		Size		need;
+		Size		arena_bytes;
 
 		pglc_cache_entries = candidate;
 		pglc_active_lock_partitions = 0;
+		pglc_resolve_dirty_marker_settings();
 		need = add_size(pglc_common_memory_bytes(), pglc_worker_memory_bytes());
 		need = add_size(need, pglc_cache_storage_bytes(minimum_pages));
 		arena_bytes = mul_size(
@@ -1079,6 +1123,8 @@ pglc_derive_default_cache_entries(void)
 			PGLC_ARENA_PAGE_SIZE);
 		pglc_cache_entries = previous_entries;
 		pglc_active_lock_partitions = previous_partitions;
+		pglc_effective_dirty_marker_entries = previous_marker_entries;
+		pglc_effective_dirty_marker_memory_mb = previous_marker_memory_mb;
 		if (need > budget || arena_bytes < budget / 2)
 			break;
 		best = candidate;
@@ -1265,6 +1311,11 @@ pglc_shmem_startup(void)
 			pg_atomic_init_u64(&stats->client_requests, 0);
 			pg_atomic_init_u64(&stats->client_request_errors, 0);
 			pg_atomic_init_u64(&stats->client_mget_keys, 0);
+			pg_atomic_init_u64(&stats->fast_path_hits, 0);
+			pg_atomic_init_u64(&stats->fast_path_fallback_key_form, 0);
+			pg_atomic_init_u64(&stats->fast_path_fallback_mapping_shape, 0);
+			pg_atomic_init_u64(&stats->fast_path_fallback_multi_key, 0);
+			pg_atomic_init_u64(&stats->fast_path_fallback_cache_state, 0);
 			pg_atomic_init_u64(&stats->client_sets, 0);
 			pg_atomic_init_u64(&stats->client_dels, 0);
 			pg_atomic_init_u64(&stats->pass_to_main, 0);
@@ -2046,6 +2097,8 @@ rebuild_cache_index(uint32 partition)
 
 	memset(&query, 0, sizeof(query));
 	query.partition = cache_partition;
+	if (!pglc_partition_index_valid(cache_partition, false))
+		return false;
 	ok = pglc_index_rebuild_existing(&cache_partition->index,
 									 cache_entry_hash_by_id, &query);
 	return ok && !query.corrupt;
@@ -2077,7 +2130,8 @@ cache_entry_remove_locked(uint32 partition, uint32 entry_id)
 	entry = &cache_partition->entries[entry_id - 1];
 	if (!entry->in_use)
 		return false;
-	if (cache_partition->free_entry_head > cache_partition->capacity ||
+	if (!pglc_partition_index_valid(cache_partition, false) ||
+		cache_partition->free_entry_head > cache_partition->capacity ||
 		!cache_entry_block(cache_partition, entry, NULL))
 		return false;
 	memset(&query, 0, sizeof(query));
@@ -2229,6 +2283,10 @@ get_cache_entry_internal(Oid database_oid, Oid relation_oid,
 	uint32		block_ref;
 	uint32		class_size;
 	PglcIndexInsertResult insert_result;
+#ifdef PGLC_TEST_HOOKS
+	bool		test_occupied_head_injected = false;
+	uint32		test_saved_free_head = 0;
+#endif
 
 	if (corrupt_entry_id != NULL)
 		*corrupt_entry_id = 0;
@@ -2248,13 +2306,20 @@ get_cache_entry_internal(Oid database_oid, Oid relation_oid,
 	query.relation_oid = relation_oid;
 	query.relation_slot = relation_slot;
 	query.slot_generation = slot_generation;
-	entry_id = pglc_index_find(&cache_partition->index, hash,
-							   cache_entry_hash_by_id,
-							   cache_entry_matches_query, &query);
+	if (!pglc_partition_index_valid(cache_partition, false))
+	{
+		query.corrupt = true;
+		entry_id = PGLC_INDEX_TOMBSTONE;
+	}
+	else
+		entry_id = pglc_index_find(&cache_partition->index, hash,
+								   cache_entry_hash_by_id,
+								   cache_entry_matches_query, &query);
 	if (query.corrupt || entry_id > cache_partition->capacity)
 	{
 		if (corrupt_entry_id != NULL)
-			*corrupt_entry_id = query.corrupt_entry_id;
+			*corrupt_entry_id = query.corrupt_entry_id != 0 ?
+				query.corrupt_entry_id : PGLC_INDEX_TOMBSTONE;
 		return NULL;
 	}
 	entry = entry_id == 0 ? NULL :
@@ -2301,6 +2366,24 @@ get_cache_entry_internal(Oid database_oid, Oid relation_oid,
 				return NULL;
 			}
 		}
+#ifdef PGLC_TEST_HOOKS
+		if (pglc_test_occupied_entry_free_head > 0 &&
+			cache_partition->entry_count > 0)
+		{
+			uint32		candidate_id;
+
+			for (candidate_id = 1; candidate_id <= cache_partition->capacity;
+				 candidate_id++)
+				if (cache_partition->entries[candidate_id - 1].in_use)
+				{
+					test_saved_free_head = cache_partition->free_entry_head;
+					cache_partition->free_entry_head = candidate_id;
+					pglc_test_occupied_entry_free_head = 0;
+					test_occupied_head_injected = true;
+					break;
+				}
+		}
+#endif
 		entry_id = cache_partition->free_entry_head;
 		if (entry_id == 0 || entry_id > cache_partition->capacity)
 		{
@@ -2310,8 +2393,13 @@ get_cache_entry_internal(Oid database_oid, Oid relation_oid,
 			return NULL;
 		}
 		entry = &cache_partition->entries[entry_id - 1];
-		if (entry->free_next > cache_partition->capacity)
+		if (entry->in_use ||
+			entry->free_next > cache_partition->capacity)
 		{
+#ifdef PGLC_TEST_HOOKS
+			if (test_occupied_head_injected)
+				cache_partition->free_entry_head = test_saved_free_head;
+#endif
 			(void) pglc_arena_free(&cache_partition->arena, block_ref, key_len);
 			release_cache_entry();
 			cache_admission_rejected(false);
@@ -2503,6 +2591,8 @@ rebuild_marker_index(uint32 partition)
 
 	memset(&query, 0, sizeof(query));
 	query.partition = cache_partition;
+	if (!pglc_partition_index_valid(cache_partition, true))
+		return false;
 	ok = pglc_index_rebuild_existing(&cache_partition->marker_index,
 									 marker_hash_by_id, &query);
 	return ok && !query.corrupt;
@@ -2524,6 +2614,10 @@ cache_marker_find(uint32 partition, uint64 hash, const char *key,
 	query.key_len = key_len;
 	query.relation_slot = relation_slot;
 	query.relation_slot_generation = relation_slot_generation;
+	if (!pglc_partition_index_valid(cache_partition, true))
+		query.corrupt = true;
+	if (query.corrupt)
+		return PGLC_INDEX_TOMBSTONE;
 	{
 		uint32		marker_id = pglc_index_find(&cache_partition->marker_index,
 										 hash, marker_hash_by_id,
@@ -2552,6 +2646,10 @@ reserve_cache_marker(uint32 partition,
 	PglcIndexInsertResult insert_result;
 	uint64		observed;
 	uint64		current_count;
+#ifdef PGLC_TEST_HOOKS
+	bool		test_occupied_head_injected = false;
+	uint32		test_saved_free_head = 0;
+#endif
 
 	if ((Size) key_len == sizeof(local->key.key))
 		return false;
@@ -2564,6 +2662,8 @@ reserve_cache_marker(uint32 partition,
 	query.key_len = key_len;
 	query.relation_slot = local->shared_slot;
 	query.relation_slot_generation = local->shared_slot_generation;
+	if (!pglc_partition_index_valid(cache_partition, true))
+		return false;
 	found_id = pglc_index_find(&cache_partition->marker_index, hash,
 							  marker_hash_by_id, marker_matches_query, &query);
 	if (query.corrupt || found_id > cache_partition->marker_capacity)
@@ -2596,10 +2696,35 @@ reserve_cache_marker(uint32 partition,
 	if (pglc_index_needs_rebuild(&cache_partition->marker_index) &&
 		!rebuild_marker_index(partition))
 		return false;
+#ifdef PGLC_TEST_HOOKS
+	if (pglc_test_occupied_marker_free_head > 0 &&
+		cache_partition->marker_count > 0)
+	{
+		uint32		candidate_id;
+
+		for (candidate_id = 1;
+			 candidate_id <= cache_partition->marker_capacity; candidate_id++)
+			if (cache_partition->markers[candidate_id - 1].in_use)
+			{
+				test_saved_free_head = cache_partition->marker_free_head;
+				cache_partition->marker_free_head = candidate_id;
+				pglc_test_occupied_marker_free_head = 0;
+				test_occupied_head_injected = true;
+				break;
+			}
+	}
+#endif
 	id = cache_partition->marker_free_head;
 	marker = &cache_partition->markers[id - 1];
-	if (marker->free_next > cache_partition->marker_capacity)
+	if (marker->in_use ||
+		marker->free_next > cache_partition->marker_capacity)
+	{
+#ifdef PGLC_TEST_HOOKS
+		if (test_occupied_head_injected)
+			cache_partition->marker_free_head = test_saved_free_head;
+#endif
 		return false;
+	}
 	cache_partition->marker_free_head = marker->free_next;
 	key_slot = cache_partition->marker_key_free_head;
 	if (!marker_key_offset(cache_partition, key_slot, &key_offset))
@@ -2680,6 +2805,7 @@ release_cache_marker(uint32 partition, uint32 marker_id, uint64 generation)
 		marker->key_slot > cache_partition->marker_key_capacity ||
 		marker->key_len > PGLC_KEY_MAX ||
 		cache_partition->marker_key_free_next == NULL ||
+		!pglc_partition_index_valid(cache_partition, true) ||
 		cache_partition->marker_free_head > cache_partition->marker_capacity ||
 		cache_partition->marker_key_free_head >
 		cache_partition->marker_key_capacity)
@@ -5036,7 +5162,7 @@ pg_local_cache_invalidate(PG_FUNCTION_ARGS)
 static uint64
 pglc_worker_stat_total(pg_atomic_uint64 *fallback, Size offset)
 {
-	uint64		total = pg_atomic_read_u64(fallback);
+	uint64		total = fallback != NULL ? pg_atomic_read_u64(fallback) : 0;
 	int			worker_index;
 
 	for (worker_index = 0; worker_index < PGLC_MAX_STATS_SHARDS;
@@ -5075,6 +5201,12 @@ pglc_stats_json(void)
 	uint64		singleflight_waiters;
 	uint64		singleflight_reuses;
 	uint64		singleflight_timeouts;
+	uint64		fast_path_hits;
+	uint64		fast_path_fallback_key_form;
+	uint64		fast_path_fallback_mapping_shape;
+	uint64		fast_path_fallback_multi_key;
+	uint64		fast_path_fallback_cache_state;
+	uint64		fast_path_fallbacks;
 	uint64		active_clients;
 	uint64		rejected_connections;
 	uint64		authentication_failures;
@@ -5185,6 +5317,28 @@ pglc_stats_json(void)
 		pglc_worker_stat_total(&pglc_shared->singleflight_timeouts,
 							  offsetof(PgLocalCacheWorkerStats,
 								   singleflight_timeouts));
+	fast_path_hits =
+		pglc_worker_stat_total(NULL,
+							  offsetof(PgLocalCacheWorkerStats, fast_path_hits));
+	fast_path_fallback_key_form =
+		pglc_worker_stat_total(NULL,
+							  offsetof(PgLocalCacheWorkerStats,
+								   fast_path_fallback_key_form));
+	fast_path_fallback_mapping_shape =
+		pglc_worker_stat_total(NULL,
+							  offsetof(PgLocalCacheWorkerStats,
+								   fast_path_fallback_mapping_shape));
+	fast_path_fallback_multi_key =
+		pglc_worker_stat_total(NULL,
+							  offsetof(PgLocalCacheWorkerStats,
+								   fast_path_fallback_multi_key));
+	fast_path_fallback_cache_state =
+		pglc_worker_stat_total(NULL,
+							  offsetof(PgLocalCacheWorkerStats,
+								   fast_path_fallback_cache_state));
+	fast_path_fallbacks = fast_path_fallback_key_form +
+		fast_path_fallback_mapping_shape + fast_path_fallback_multi_key +
+		fast_path_fallback_cache_state;
 	active_clients = pg_atomic_read_u64(&pglc_shared->active_clients);
 	rejected_connections =
 		pg_atomic_read_u64(&pglc_shared->rejected_connections);
@@ -5304,6 +5458,12 @@ pglc_stats_json(void)
 		",\"client_requests\":" UINT64_FORMAT
 		",\"client_request_errors\":" UINT64_FORMAT
 		",\"client_mget_keys\":" UINT64_FORMAT
+		",\"fast_path_hits\":" UINT64_FORMAT
+		",\"fast_path_fallbacks\":" UINT64_FORMAT
+		",\"fast_path_fallback_key_form\":" UINT64_FORMAT
+		",\"fast_path_fallback_mapping_shape\":" UINT64_FORMAT
+		",\"fast_path_fallback_multi_key\":" UINT64_FORMAT
+		",\"fast_path_fallback_cache_state\":" UINT64_FORMAT
 		",\"client_sets\":" UINT64_FORMAT
 		",\"client_dels\":" UINT64_FORMAT
 		",\"cache_hit_in_main\":" UINT64_FORMAT
@@ -5357,6 +5517,10 @@ pglc_stats_json(void)
 								   client_request_errors)),
 		pglc_worker_stat_total(&pglc_shared->client_mget_keys,
 							  offsetof(PgLocalCacheWorkerStats, client_mget_keys)),
+		fast_path_hits, fast_path_fallbacks,
+		fast_path_fallback_key_form,
+		fast_path_fallback_mapping_shape, fast_path_fallback_multi_key,
+		fast_path_fallback_cache_state,
 		pglc_worker_stat_total(&pglc_shared->client_sets,
 							  offsetof(PgLocalCacheWorkerStats, client_sets)),
 		pglc_worker_stat_total(&pglc_shared->client_dels,

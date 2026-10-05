@@ -21,6 +21,9 @@ typedef uint64_t uint64;
 #include "postgres.h"
 
 #include "pg_local_cache.h"
+#ifdef PGLC_TEST_HOOKS
+extern void pglc_test_record_palloc(void);
+#endif
 #endif
 
 typedef struct PgLocalCacheRespArg
@@ -43,5 +46,12 @@ extern char *pglc_resp_error(const char *message, Size *length);
 extern char *pglc_resp_integer(int64 value, Size *length);
 extern char *pglc_resp_bulk(const char *value, Size value_len, Size *length);
 extern char *pglc_resp_null(Size *length);
+extern bool pglc_resp_write_array(char *destination, Size capacity,
+								  Size *length, Size count, Size response_max);
+extern bool pglc_resp_write_bulk(char *destination, Size capacity,
+								 Size *length, const char *value,
+								 Size value_len, Size response_max);
+extern bool pglc_resp_write_null(char *destination, Size capacity,
+								 Size *length, Size response_max);
 
 #endif

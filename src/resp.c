@@ -23,15 +23,8 @@ palloc(size_t size)
 	return result;
 }
 
-static char *
-pstrdup(const char *value)
-{
-	size_t		length = strlen(value) + 1;
-	char	   *result = palloc(length);
+#define PGLC_RESP_PALLOC(size) palloc(size)
 
-	memcpy(result, value, length);
-	return result;
-}
 #else
 #include "postgres.h"
 
@@ -39,6 +32,13 @@ pstrdup(const char *value)
 #include <limits.h>
 
 #include "utils/builtins.h"
+
+#ifdef PGLC_TEST_HOOKS
+#define PGLC_RESP_PALLOC(size) \
+	(pglc_test_record_palloc(), palloc(size))
+#else
+#define PGLC_RESP_PALLOC(size) palloc(size)
+#endif
 #endif
 
 #include "resp.h"
@@ -186,7 +186,7 @@ static char *
 line_response(char prefix, const char *message, Size *length)
 {
 	Size		message_length = strlen(message);
-	char	   *response = palloc(message_length + 4);
+	char	   *response = PGLC_RESP_PALLOC(message_length + 4);
 	Size		i;
 
 	response[0] = prefix;
@@ -223,7 +223,7 @@ pglc_resp_integer(int64 value, Size *length)
 	char	   *response;
 
 	number_length = snprintf(number, sizeof(number), INT64_FORMAT, value);
-	response = palloc((Size) number_length + 4);
+	response = PGLC_RESP_PALLOC((Size) number_length + 4);
 	response[0] = ':';
 	memcpy(response + 1, number, number_length);
 	response[number_length + 1] = '\r';
@@ -241,7 +241,7 @@ pglc_resp_bulk(const char *value, Size value_len, Size *length)
 	char	   *response;
 
 	header_length = snprintf(header, sizeof(header), "$%zu\r\n", value_len);
-	response = palloc((Size) header_length + value_len + 3);
+	response = PGLC_RESP_PALLOC((Size) header_length + value_len + 3);
 	memcpy(response, header, header_length);
 	if (value_len > 0)
 		memcpy(response + header_length, value, value_len);
@@ -255,8 +255,81 @@ pglc_resp_bulk(const char *value, Size value_len, Size *length)
 char *
 pglc_resp_null(Size *length)
 {
-	char	   *response = pstrdup("$-1\r\n");
+	char	   *response = PGLC_RESP_PALLOC(6);
 
+	memcpy(response, "$-1\r\n", 6);
 	*length = 5;
 	return response;
+}
+
+bool
+pglc_resp_write_array(char *destination, Size capacity, Size *length,
+					  Size count, Size response_max)
+{
+	char		header[3 * sizeof(Size) + 4];
+	int			header_length;
+
+	if (destination == NULL || length == NULL || *length > capacity ||
+		*length > response_max)
+		return false;
+	header_length = snprintf(header, sizeof(header), "*%zu\r\n", count);
+	if (header_length < 0 || (Size) header_length > capacity - *length ||
+		(Size) header_length > response_max - *length)
+		return false;
+	memcpy(destination + *length, header, (Size) header_length);
+	*length += (Size) header_length;
+	return true;
+}
+
+bool
+pglc_resp_write_bulk(char *destination, Size capacity, Size *length,
+					 const char *value, Size value_len,
+					 Size response_max)
+{
+	char		header[3 * sizeof(Size) + 4];
+	int			header_length;
+	Size		remaining;
+	Size		needed;
+
+	if (destination == NULL || length == NULL ||
+		(value == NULL && value_len != 0) || *length > capacity ||
+		*length > response_max)
+		return false;
+	header_length = snprintf(header, sizeof(header), "$%zu\r\n", value_len);
+	if (header_length < 0)
+		return false;
+	remaining = capacity - *length;
+	if (remaining > response_max - *length)
+		remaining = response_max - *length;
+	if ((Size) header_length > remaining || remaining - header_length < 2 ||
+		value_len > remaining - (Size) header_length - 2)
+		return false;
+	needed = (Size) header_length + value_len + 2;
+	memcpy(destination + *length, header, (Size) header_length);
+	if (value_len > 0)
+		memcpy(destination + *length + (Size) header_length, value, value_len);
+	destination[*length + (Size) header_length + value_len] = '\r';
+	destination[*length + (Size) header_length + value_len + 1] = '\n';
+	*length += needed;
+	return true;
+}
+
+bool
+pglc_resp_write_null(char *destination, Size capacity, Size *length,
+					 Size response_max)
+{
+	static const char null_bulk[] = "$-1\r\n";
+	Size		remaining;
+
+	if (destination == NULL || length == NULL || *length > capacity ||
+		*length > response_max)
+		return false;
+	remaining = capacity - *length;
+	if (remaining > response_max - *length)
+		remaining = response_max - *length;
+	if (remaining < sizeof(null_bulk) - 1)
+		return false;
+	memcpy(destination + *length, null_bulk, sizeof(null_bulk) - 1);
+	*length += sizeof(null_bulk) - 1;
+	return true;
 }

@@ -58,6 +58,45 @@
 #include "resp.h"
 #include "row_payload.h"
 
+#ifdef PGLC_TEST_HOOKS
+/* Request-scoped test probe; worker maintenance stays outside this window. */
+static uint64 pglc_test_current_request_palloc_count = 0;
+static bool pglc_test_tracking_request_palloc = false;
+
+void
+pglc_test_record_palloc(void)
+{
+	if (pglc_test_tracking_request_palloc)
+		pglc_test_current_request_palloc_count++;
+}
+
+static void *
+pglc_test_count_palloc(Size size)
+{
+	pglc_test_record_palloc();
+	return MemoryContextAlloc(CurrentMemoryContext, size);
+}
+
+static void
+pglc_test_begin_request_palloc_count(void)
+{
+	pglc_test_current_request_palloc_count = 0;
+	pglc_test_tracking_request_palloc = true;
+}
+
+static uint64
+pglc_test_end_request_palloc_count(bool complete_request)
+{
+	pglc_test_tracking_request_palloc = false;
+	return complete_request ? pglc_test_current_request_palloc_count : 0;
+}
+
+#undef palloc
+#define palloc(size) pglc_test_count_palloc(size)
+
+PG_FUNCTION_INFO_V1(pg_local_cache_test_key_scan_matches);
+#endif
+
 #define PGLC_OUTPUT_BATCH_BYTES (16 * 1024)
 #define PGLC_OUTPUT_BUFFER_MAX \
 	(PGLC_RESPONSE_MAX + PGLC_OUTPUT_BATCH_BYTES)
@@ -77,6 +116,9 @@ typedef struct PgLocalCacheClient
 	Size		used;
 	Size		output_used;
 	Size		output_sent;
+#ifdef PGLC_TEST_HOOKS
+	uint64		test_last_request_palloc_count;
+#endif
 	TimestampTz last_activity;
 #ifdef USE_OPENSSL
 	SSL		   *ssl;
@@ -91,8 +133,8 @@ typedef struct PgLocalCacheClient
 	Size		tls_write_retry_offset;
 	Size		tls_write_retry_length;
 #endif
-	char		input[PGLC_REQUEST_MAX];
-	char		output[PGLC_OUTPUT_BUFFER_MAX];
+	char	   *input;
+	char	   *output;
 } PgLocalCacheClient;
 
 static MemoryContext mapping_context = NULL;
@@ -126,6 +168,9 @@ static bool queue_response(PgLocalCacheClient *client,
 						   const char *response, Size response_length,
 						   bool close_after);
 static bool process_client(PgLocalCacheClient *client);
+static bool try_fast_mget_hit(PgLocalCacheClient *client,
+							  PgLocalCacheRespArg *args, int argc);
+static void note_resp_cache_lookup(bool hit, bool negative);
 #ifdef USE_OPENSSL
 static bool drive_tls_handshake(PgLocalCacheClient *client);
 static bool client_has_tls_input(PgLocalCacheClient *client);
@@ -190,6 +235,24 @@ typedef struct PgLocalCacheMgetItem
 	bool		payload_cacheable;
 	bool		database_read;
 } PgLocalCacheMgetItem;
+
+typedef struct PgLocalCacheHitScratch
+{
+	PgLocalCacheMapping *mapping;
+	PgLocalCacheReadToken token;
+	char		canonical[PGLC_KEY_MAX];
+	char		value[PGLC_VALUE_MAX];
+} PgLocalCacheHitScratch;
+
+typedef enum PgLocalCacheFastPathFallbackReason
+{
+	PGLC_FAST_PATH_FALLBACK_KEY_FORM,
+	PGLC_FAST_PATH_FALLBACK_MAPPING_SHAPE,
+	PGLC_FAST_PATH_FALLBACK_MULTI_KEY,
+	PGLC_FAST_PATH_FALLBACK_CACHE_STATE
+} PgLocalCacheFastPathFallbackReason;
+
+static PgLocalCacheHitScratch worker_hit_scratch;
 
 static char *command_set(PgLocalCacheMapping *mapping, const char *raw_key,
 							 const PgLocalCacheRespArg *value_arg,
@@ -296,10 +359,22 @@ pglc_worker_memory_bytes_per_worker(void)
 Size
 pglc_worker_memory_bytes(void)
 {
+	Size		total_slots;
+	Size		active_clients;
+	Size		worker_bytes;
+	Size		client_buffer_bytes;
+
 	if (pglc_port == 0)
 		return 0;
-	return mul_size((Size) pglc_worker_count,
-					pglc_worker_memory_bytes_per_worker());
+	total_slots = mul_size((Size) pglc_worker_count,
+						   (Size) pglc_max_clients_per_worker);
+	active_clients = Min((Size) pglc_max_clients, total_slots);
+	worker_bytes = mul_size((Size) pglc_worker_count,
+							pglc_worker_memory_bytes_per_worker());
+	client_buffer_bytes = mul_size(active_clients,
+									 (Size) PGLC_REQUEST_MAX +
+									 PGLC_OUTPUT_BUFFER_MAX);
+	return add_size(worker_bytes, client_buffer_bytes);
 }
 
 static void
@@ -323,7 +398,8 @@ static void
 validate_file_descriptor_limit(void)
 {
 	struct rlimit descriptor_limit;
-	rlim_t		required = (rlim_t) pglc_max_clients_per_worker + 33;
+	rlim_t		required = (rlim_t) Min(pglc_max_clients_per_worker,
+										pglc_max_clients) + 33;
 
 	if (getrlimit(RLIMIT_NOFILE, &descriptor_limit) != 0)
 		ereport(FATAL,
@@ -335,7 +411,7 @@ validate_file_descriptor_limit(void)
 				 errdetail("Each RESP worker needs at least %llu descriptors; the soft RLIMIT_NOFILE is %llu.",
 						   (unsigned long long) required,
 						   (unsigned long long) descriptor_limit.rlim_cur),
-				 errhint("Raise the container/process nofile limit or lower pg_local_cache.max_clients_per_worker.")));
+					 errhint("Raise the container/process nofile limit or lower pg_local_cache.max_clients or pg_local_cache.max_clients_per_worker.")));
 }
 
 static bool
@@ -1143,6 +1219,10 @@ run_server(int listener)
 				}
 #endif
 
+				clients[slot].input = MemoryContextAlloc(
+					TopMemoryContext, PGLC_REQUEST_MAX);
+				clients[slot].output = MemoryContextAlloc(
+					TopMemoryContext, PGLC_OUTPUT_BUFFER_MAX);
 				clients[slot].fd = client_fd;
 				clients[slot].input_start = 0;
 				clients[slot].used = 0;
@@ -1170,6 +1250,9 @@ run_server(int listener)
 #endif
 				clients[slot].authenticated =
 					worker_auth_token == NULL || worker_auth_token[0] == '\0';
+#ifdef PGLC_TEST_HOOKS
+				clients[slot].test_last_request_palloc_count = 0;
+#endif
 				pg_atomic_fetch_add_u64(&pglc_shared->client_connects, 1);
 			}
 		}
@@ -1409,6 +1492,16 @@ close_client(PgLocalCacheClient *client)
 		Assert(worker_client_reservations > 0);
 		worker_client_reservations--;
 	}
+	if (client->input != NULL)
+	{
+		pfree(client->input);
+		client->input = NULL;
+	}
+	if (client->output != NULL)
+	{
+		pfree(client->output);
+		client->output = NULL;
+	}
 	client->fd = -1;
 	client->input_start = 0;
 	client->used = 0;
@@ -1489,7 +1582,7 @@ queue_response(PgLocalCacheClient *client,
 			   bool close_after)
 {
 	if (client->output_sent != 0 ||
-		response_length > sizeof(client->output) - client->output_used)
+		response_length > PGLC_OUTPUT_BUFFER_MAX - client->output_used)
 		return false;
 	memcpy(client->output + client->output_used, response, response_length);
 	client->output_used += response_length;
@@ -1559,7 +1652,7 @@ process_client(PgLocalCacheClient *client)
 			 * command.  SET and DEL must never be replayed merely because a
 			 * nonblocking send could not accept their response.
 			 */
-			if (sizeof(client->output) - client->output_used <
+			if (PGLC_OUTPUT_BUFFER_MAX - client->output_used <
 				PGLC_RESPONSE_MAX)
 			{
 #ifdef USE_OPENSSL
@@ -1580,14 +1673,20 @@ process_client(PgLocalCacheClient *client)
 
 			worker_process_config_reload();
 			CHECK_FOR_INTERRUPTS();
+#ifdef PGLC_TEST_HOOKS
+			pglc_test_begin_request_palloc_count();
+#endif
 			parse_result = pglc_resp_parse(
 				client->input + client->input_start,
 				client->used - client->input_start,
 				args, &argc, &consumed, &protocol_error);
 			if (parse_result == 0)
 			{
+#ifdef PGLC_TEST_HOOKS
+				(void) pglc_test_end_request_palloc_count(false);
+#endif
 				compact_client_input(client);
-				if (client->used == sizeof(client->input))
+				if (client->used == PGLC_REQUEST_MAX)
 				{
 					client->close_after_flush = true;
 					return finish_client_turn(client);
@@ -1607,14 +1706,39 @@ process_client(PgLocalCacheClient *client)
 										error_length, true);
 				pfree(error_response);
 				if (!queued)
+				{
+#ifdef PGLC_TEST_HOOKS
+					client->test_last_request_palloc_count =
+						pglc_test_end_request_palloc_count(true);
+#endif
 					return false;
+				}
+#ifdef PGLC_TEST_HOOKS
+				client->test_last_request_palloc_count =
+					pglc_test_end_request_palloc_count(true);
+#endif
 				client->input_start = client->used;
 				return finish_client_turn(client);
 			}
 
-			previous_context = MemoryContextSwitchTo(command_context);
 			pg_atomic_fetch_add_u64(
 				&pglc_shared->stats_shards[worker_slot].client_requests, 1);
+			if (try_fast_mget_hit(client, args, argc))
+			{
+#ifdef PGLC_TEST_HOOKS
+				client->test_last_request_palloc_count =
+					pglc_test_end_request_palloc_count(true);
+#endif
+				client->input_start += consumed;
+				commands_processed++;
+				if (commands_processed >= pglc_max_pipeline_commands)
+				{
+					client->input_ready = client->input_start < client->used;
+					return finish_client_turn(client);
+				}
+				continue;
+			}
+			previous_context = MemoryContextSwitchTo(command_context);
 			response = execute_command(client, args, argc,
 								   &response_length, &close_after);
 			if (response_length > 0 && response[0] == '-')
@@ -1622,6 +1746,10 @@ process_client(PgLocalCacheClient *client)
 					&pglc_shared->stats_shards[worker_slot].client_request_errors, 1);
 			queued = queue_response(client, response, response_length,
 								close_after);
+#ifdef PGLC_TEST_HOOKS
+			client->test_last_request_palloc_count =
+				pglc_test_end_request_palloc_count(true);
+#endif
 			if (queued)
 				client->input_start += consumed;
 			Assert(CurrentMemoryContext == command_context);
@@ -1673,7 +1801,7 @@ process_client(PgLocalCacheClient *client)
 				   client->output_used || client->tls_read_wait != 0);
 #endif
 			received = client_recv(client, client->input + client->used,
-							   sizeof(client->input) - client->used);
+							   PGLC_REQUEST_MAX - client->used);
 			if (received < 0 && errno == EINTR)
 				continue;
 			read_attempted = true;
@@ -1816,7 +1944,15 @@ execute_command_inner(PgLocalCacheClient *client, PgLocalCacheRespArg *args, int
 
 	if (!client->authenticated)
 		return pglc_resp_error("NOAUTH Authentication required",
-								  response_length);
+							  response_length);
+
+#ifdef PGLC_TEST_HOOKS
+	if (argc == 1 &&
+		pglc_resp_arg_equals(&args[0],
+							 "PGLC_TEST_LAST_REQUEST_PALLOC_COUNT"))
+		return pglc_resp_integer((int64) client->test_last_request_palloc_count,
+							 response_length);
+#endif
 
 	/* Keep the dominant cache commands at the front of the dispatch path. */
 	is_set = pglc_resp_arg_equals(&args[0], "SET");
@@ -2160,6 +2296,93 @@ canonicalize_key(PgLocalCacheMapping *mapping, const char *raw_key,
 	return true;
 }
 
+#ifdef PGLC_TEST_HOOKS
+static bool
+pglc_test_key_parse(PgLocalCacheMapping *mapping, const char *input,
+					Size input_length, char *canonical, Size *canonical_length)
+{
+	MemoryContext old_context = CurrentMemoryContext;
+	volatile bool accepted = false;
+	char	   *raw_key;
+
+	*canonical_length = 0;
+	if (memchr(input, '\0', input_length) != NULL)
+		return false;
+	raw_key = pnstrdup(input, input_length);
+	PG_TRY();
+	{
+		Datum		values[PGLC_MAX_KEY_COLUMNS];
+		char	   *parsed_key = NULL;
+		char	   *error = NULL;
+
+		pg_verifymbstr(input, input_length, false);
+		if (canonicalize_key(mapping, raw_key, values, &parsed_key, &error))
+		{
+			*canonical_length = strlen(parsed_key);
+			memcpy(canonical, parsed_key, *canonical_length + 1);
+			accepted = true;
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(old_context);
+		FlushErrorState();
+	}
+	PG_END_TRY();
+	MemoryContextSwitchTo(old_context);
+	return accepted;
+}
+
+Datum
+pg_local_cache_test_key_scan_matches(PG_FUNCTION_ARGS)
+{
+	bytea	   *raw = PG_GETARG_BYTEA_PP(0);
+	text	   *column_text = PG_GETARG_TEXT_PP(1);
+	Oid			key_type = PG_GETARG_OID(2);
+	int32		typmod = PG_GETARG_INT32(3);
+	const char *input = VARDATA_ANY(raw);
+	Size		input_length = VARSIZE_ANY_EXHDR(raw);
+	char	   *column = text_to_cstring(column_text);
+	Size		column_length = strlen(column);
+	PgLocalCacheMapping mapping;
+	Oid			input_function;
+	Oid			output_function;
+	bool		output_is_varlena;
+	char		reference[PGLC_KEY_MAX];
+	char		optimized[PGLC_KEY_MAX];
+	Size		reference_length = 0;
+	Size		optimized_length = 0;
+	bool		reference_accepted;
+	bool		optimized_accepted;
+
+	if (column_length == 0 || column_length >= NAMEDATALEN)
+		PG_RETURN_BOOL(false);
+	memset(&mapping, 0, sizeof(mapping));
+	mapping.key_count = 1;
+	strlcpy(mapping.key_columns[0], column, sizeof(mapping.key_columns[0]));
+	mapping.key_types[0] = key_type;
+	mapping.key_typmods[0] = typmod;
+	getTypeInputInfo(key_type, &input_function, &mapping.key_ioparams[0]);
+	fmgr_info(input_function, &mapping.key_inputs[0]);
+	getTypeOutputInfo(key_type, &output_function, &output_is_varlena);
+	fmgr_info(output_function, &mapping.key_outputs[0]);
+
+	reference_accepted = pglc_test_key_parse(&mapping, input, input_length,
+											reference, &reference_length);
+	optimized_accepted = pglc_key_scan_json_single(
+		input, input_length, column, column_length, key_type, typmod,
+		GetDatabaseEncoding() == PG_UTF8, optimized, sizeof(optimized),
+		&optimized_length);
+	if (!optimized_accepted)
+		optimized_accepted = pglc_test_key_parse(&mapping, input, input_length,
+												optimized, &optimized_length);
+	PG_RETURN_BOOL(reference_accepted == optimized_accepted &&
+		(!reference_accepted ||
+		 (reference_length == optimized_length &&
+		  memcmp(reference, optimized, reference_length + 1) == 0)));
+}
+#endif
+
 static bool
 row_json_validate(PgLocalCacheMapping *mapping, Jsonb *row,
 				  Datum *key_values, char **error)
@@ -2252,6 +2475,213 @@ cached_row_json(PgLocalCacheMapping *mapping,
 		return false;
 	*json = (char *) cached_json;
 	return true;
+}
+
+static void
+note_fast_path_fallback(PgLocalCacheFastPathFallbackReason reason)
+{
+	PgLocalCacheWorkerStats *stats =
+		&pglc_shared->stats_shards[worker_slot];
+	pg_atomic_uint64 *counter;
+
+	switch (reason)
+	{
+		case PGLC_FAST_PATH_FALLBACK_KEY_FORM:
+			counter = &stats->fast_path_fallback_key_form;
+			break;
+		case PGLC_FAST_PATH_FALLBACK_MAPPING_SHAPE:
+			counter = &stats->fast_path_fallback_mapping_shape;
+			break;
+		case PGLC_FAST_PATH_FALLBACK_MULTI_KEY:
+			counter = &stats->fast_path_fallback_multi_key;
+			break;
+		case PGLC_FAST_PATH_FALLBACK_CACHE_STATE:
+		default:
+			counter = &stats->fast_path_fallback_cache_state;
+			break;
+	}
+	pg_atomic_fetch_add_u64(counter, 1);
+}
+
+static bool
+fast_path_mapping_shape_supported(const PgLocalCacheMapping *mapping)
+{
+	Oid			key_type;
+
+	if (mapping->key_count != 1 || mapping->key_typmods[0] != -1)
+		return false;
+	key_type = mapping->key_types[0];
+	return key_type == PGLC_KEY_SCAN_INT2OID ||
+		key_type == PGLC_KEY_SCAN_INT4OID ||
+		key_type == PGLC_KEY_SCAN_INT8OID ||
+		key_type == PGLC_KEY_SCAN_TEXTOID ||
+		key_type == PGLC_KEY_SCAN_VARCHAROID;
+}
+
+static bool
+try_fast_mget_hit(PgLocalCacheClient *client, PgLocalCacheRespArg *args,
+				  int argc)
+{
+	const PgLocalCacheRespArg *wire_key;
+	Size		database_length;
+	Size		database_prefix_length;
+	bool		database_prefix_matches;
+	int			i;
+
+	if (argc <= 0 || !pglc_resp_arg_equals(&args[0], "MGET"))
+		return false;
+	if (argc != 2)
+	{
+		note_fast_path_fallback(PGLC_FAST_PATH_FALLBACK_MULTI_KEY);
+		return false;
+	}
+	if (!client->authenticated || !pglc_cache_is_enabled() ||
+		pglc_database == NULL)
+	{
+		note_fast_path_fallback(PGLC_FAST_PATH_FALLBACK_CACHE_STATE);
+		return false;
+	}
+	wire_key = &args[1];
+	if (wire_key->len == 0 || wire_key->len >= PGLC_REQUEST_MAX ||
+		memchr(wire_key->data, '\0', wire_key->len) != NULL)
+	{
+		note_fast_path_fallback(PGLC_FAST_PATH_FALLBACK_KEY_FORM);
+		return false;
+	}
+	database_length = strlen(pglc_database);
+	database_prefix_length = 5 + database_length + 1;
+	database_prefix_matches = wire_key->len >= database_prefix_length &&
+		memcmp(wire_key->data, "CRUD:", 5) == 0 &&
+		memcmp(wire_key->data + 5, pglc_database, database_length) == 0 &&
+		wire_key->data[5 + database_length] == '.';
+
+	for (i = 0; i < worker_mapping_count; i++)
+	{
+		PgLocalCacheMapping *mapping = &worker_mappings[i];
+		Size		schema_length = strlen(mapping->schema_name);
+		Size		relation_length = strlen(mapping->relation_name);
+		Size		prefix_length = 5 + database_length + 1 + schema_length +
+			1 + relation_length + 1;
+		Size		position = 0;
+		const char *raw_json;
+		Size		raw_json_length;
+		char		prefix[PGLC_NAMESPACE_MAX + 3 * NAMEDATALEN + 8];
+		Size		prefix_used = 0;
+		char	   *json = NULL;
+		Size		json_length = 0;
+		Size		cached_length;
+		bool		negative;
+		TransactionId source_xmin;
+		bool		hit;
+		Size		response_length = 0;
+		Size		available;
+
+		if (wire_key->len < prefix_length)
+			continue;
+		memcpy(prefix + prefix_used, "CRUD:", 5);
+		prefix_used += 5;
+		memcpy(prefix + prefix_used, pglc_database, database_length);
+		prefix_used += database_length;
+		prefix[prefix_used++] = '.';
+		memcpy(prefix + prefix_used, mapping->schema_name, schema_length);
+		prefix_used += schema_length;
+		prefix[prefix_used++] = '.';
+		memcpy(prefix + prefix_used, mapping->relation_name, relation_length);
+		prefix_used += relation_length;
+		prefix[prefix_used++] = ':';
+		Assert(prefix_used == prefix_length);
+		if (memcmp(wire_key->data, prefix, prefix_length) != 0)
+			continue;
+		if (!fast_path_mapping_shape_supported(mapping))
+		{
+			note_fast_path_fallback(
+				PGLC_FAST_PATH_FALLBACK_MAPPING_SHAPE);
+			return false;
+		}
+		if (wire_key->len <= prefix_length)
+		{
+			note_fast_path_fallback(PGLC_FAST_PATH_FALLBACK_KEY_FORM);
+			return false;
+		}
+		raw_json = wire_key->data + prefix_length;
+		raw_json_length = wire_key->len - prefix_length;
+		if (raw_json_length < 2 || raw_json[0] != '{' ||
+			raw_json[raw_json_length - 1] != '}')
+		{
+			note_fast_path_fallback(PGLC_FAST_PATH_FALLBACK_KEY_FORM);
+			return false;
+		}
+		if (!pglc_key_scan_json_single(raw_json, raw_json_length,
+									   mapping->key_columns[0],
+									   strlen(mapping->key_columns[0]),
+									   mapping->key_types[0],
+									   mapping->key_typmods[0],
+									   GetDatabaseEncoding() == PG_UTF8,
+									   worker_hit_scratch.canonical,
+									   sizeof(worker_hit_scratch.canonical),
+									   &position))
+		{
+			note_fast_path_fallback(PGLC_FAST_PATH_FALLBACK_KEY_FORM);
+			return false;
+		}
+
+		worker_hit_scratch.mapping = mapping;
+		hit = pglc_cache_lookup_quiet(mapping,
+									 worker_hit_scratch.canonical,
+									 worker_hit_scratch.value,
+									 sizeof(worker_hit_scratch.value),
+									 &cached_length, &negative,
+									 &source_xmin,
+									 &worker_hit_scratch.token);
+		if (!hit)
+		{
+			note_fast_path_fallback(
+				PGLC_FAST_PATH_FALLBACK_CACHE_STATE);
+			return false;
+		}
+		if (!negative && !cached_row_json(mapping, worker_hit_scratch.value,
+										 cached_length, &json, &json_length))
+		{
+			(void) pglc_cache_invalidate_key(mapping,
+											 worker_hit_scratch.canonical);
+			note_fast_path_fallback(
+				PGLC_FAST_PATH_FALLBACK_CACHE_STATE);
+			return false;
+		}
+		if (client->output_sent != 0 ||
+			client->output_used > PGLC_OUTPUT_BUFFER_MAX)
+		{
+			note_fast_path_fallback(
+				PGLC_FAST_PATH_FALLBACK_CACHE_STATE);
+			return false;
+		}
+		available = PGLC_OUTPUT_BUFFER_MAX - client->output_used;
+		if (!pglc_resp_write_array(client->output + client->output_used,
+								   available, &response_length, 1,
+								   PGLC_RESPONSE_MAX) ||
+			(negative ? !pglc_resp_write_null(
+				 client->output + client->output_used, available,
+				 &response_length, PGLC_RESPONSE_MAX) :
+			 !pglc_resp_write_bulk(client->output + client->output_used,
+								available, &response_length, json,
+								json_length, PGLC_RESPONSE_MAX)))
+		{
+			note_fast_path_fallback(
+				PGLC_FAST_PATH_FALLBACK_CACHE_STATE);
+			return false;
+		}
+		client->output_used += response_length;
+		pg_atomic_fetch_add_u64(
+			&pglc_shared->stats_shards[worker_slot].fast_path_hits, 1);
+		pg_atomic_fetch_add_u64(
+			&pglc_shared->stats_shards[worker_slot].client_mget_keys, 1);
+		note_resp_cache_lookup(true, negative);
+		return true;
+	}
+	note_fast_path_fallback(database_prefix_matches ?
+		PGLC_FAST_PATH_FALLBACK_MAPPING_SHAPE :
+		PGLC_FAST_PATH_FALLBACK_KEY_FORM);
+	return false;
 }
 
 /*

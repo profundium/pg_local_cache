@@ -17,6 +17,11 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ### Changed
 
+- Single-key RESP MGET hits scan simple integer/text primary-key JSON directly,
+  append the reply into the client output buffer, and skip request allocations;
+  uncertain spellings retain the JSONB parser fallback.
+- RESP workers support up to 4096 client slots per worker and allocate request
+  and response buffers only while a client is connected.
 - Cache entries now use compact descriptors, bounded open-addressed indexes,
   and on-demand 64 KiB slab pages instead of fixed-width key/value slots.
 - Uncached dirty keys use a separate bounded marker table; marker exhaustion

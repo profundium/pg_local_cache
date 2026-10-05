@@ -4,3 +4,9 @@ row_payload_test
 row_payload_test_sanitized
 resp_parse_replay
 resp_parse_replay_sanitized
+cache_arena_test
+cache_arena_test_sanitized
+cache_index_test
+cache_index_test_sanitized
+key_codec_test
+key_codec_test_sanitized

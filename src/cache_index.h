@@ -14,6 +14,7 @@ typedef struct PglcCacheIndex
 	uint32_t   *buckets;
 	uint32_t   *scratch;
 	uint32_t	bucket_count;
+	uint32_t	allocated_bucket_count;
 	uint32_t	tombstones;
 	uint64_t	probe_rejections;
 } PglcCacheIndex;
@@ -25,11 +26,14 @@ typedef enum PglcIndexInsertResult
 {
 	PGLC_INDEX_INSERTED = 1,
 	PGLC_INDEX_EXISTS = 2,
-	PGLC_INDEX_PROBE_LIMIT = 3
+	PGLC_INDEX_PROBE_LIMIT = 3,
+	PGLC_INDEX_CORRUPT = 4
 } PglcIndexInsertResult;
 
 void pglc_index_init(PglcCacheIndex *index, uint32_t *buckets,
 					 uint32_t *scratch, uint32_t bucket_count);
+bool pglc_index_valid(const PglcCacheIndex *index,
+				  uint32_t allocated_bucket_count);
 uint32_t pglc_index_find(const PglcCacheIndex *index, uint64_t hash,
 						PglcIndexEntryHash entry_hash,
 						PglcIndexEntryMatches matches, void *context);

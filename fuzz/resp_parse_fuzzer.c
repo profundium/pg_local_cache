@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "resp.h"
+#include "key_codec.h"
 
 #include <dirent.h>
 #include <stdint.h>
@@ -45,6 +46,51 @@ validate_success(const uint8_t *data, size_t size,
 				"argument length extends past consumed input");
 		require(args[i].len <= PGLC_REQUEST_MAX,
 				"argument length exceeds request limit");
+	}
+}
+
+static void
+check_embedded_key_scanner(const PgLocalCacheRespArg *arg)
+{
+	static const Oid types[] = {
+		PGLC_KEY_SCAN_INT2OID,
+		PGLC_KEY_SCAN_INT4OID,
+		PGLC_KEY_SCAN_INT8OID,
+		PGLC_KEY_SCAN_TEXTOID,
+		PGLC_KEY_SCAN_VARCHAROID
+	};
+	const char *json = memchr(arg->data, '{', arg->len);
+	Size		json_length;
+
+	if (json == NULL)
+		return;
+	json_length = arg->len - (Size) (json - arg->data);
+	if (json_length == 0 || json[json_length - 1] != '}')
+		return;
+	for (Size i = 0; i < sizeof(types) / sizeof(types[0]); i++)
+	{
+		char		first[1024];
+		char		second[1024];
+		Size		first_length = 0;
+		Size		second_length = 0;
+		bool		first_result;
+		bool		second_result;
+
+		first_result = pglc_key_scan_json_single(json, json_length, "id", 2,
+											 types[i], -1, true, first,
+											 sizeof(first), &first_length);
+		second_result = pglc_key_scan_json_single(json, json_length, "id", 2,
+											  types[i], -1, true, second,
+											  sizeof(second), &second_length);
+		require(first_result == second_result,
+				"key scanner result is not deterministic");
+		if (first_result)
+		{
+			require(first_length == second_length,
+					"key scanner length is not deterministic");
+			require(memcmp(first, second, first_length + 1) == 0,
+					"key scanner bytes are not deterministic");
+		}
 	}
 }
 
@@ -115,6 +161,8 @@ check_input(const uint8_t *data, size_t size, int exhaustive_prefixes)
 		return;
 
 	validate_success(data, size, args, argc, consumed);
+	for (int i = 1; i < argc; i++)
+		check_embedded_key_scanner(&args[i]);
 	{
 		PgLocalCacheRespArg exact_args[PGLC_RESP_MAX_ARGS];
 		int			exact_argc = 0;

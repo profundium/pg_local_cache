@@ -212,8 +212,11 @@ TLS counters `tls_handshakes_total` and `tls_handshake_failures_total` are
 exposed in `stats()` and `metrics()`.
 
 Database reads, invalidations, admission rejection, dirty-key fallback,
-singleflight, worker, and RESP counters remain available. The four counters for
-the removed SQL read API were removed in 3.0.0.
+singleflight, worker, and RESP counters remain available. RESP fast-path stats
+include `fast_path_hits`, `fast_path_fallbacks` (total), and per-reason counters
+`fast_path_fallback_key_form`, `fast_path_fallback_mapping_shape`,
+`fast_path_fallback_multi_key`, and `fast_path_fallback_cache_state`. The four
+counters for the removed SQL read API were removed in 3.0.0.
 
 The arena counters report its configured page capacity, live requested bytes,
 and class slack. `arena_admission_rejections_total` counts rows left uncached
