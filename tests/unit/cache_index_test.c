@@ -134,6 +134,56 @@ test_failed_rebuild_preserves_index(void)
 	return 0;
 }
 
+static int
+test_corrupt_bucket_count_blocks_index_operations(void)
+{
+	uint32_t	buckets[8];
+	uint32_t	scratch[8];
+	uint32_t	original_buckets[8];
+	uint32_t	original_scratch[8];
+	uint32_t	entry_ids[] = {1};
+	PglcCacheIndex index;
+	TestContext context = {0};
+
+	pglc_index_init(&index, buckets, scratch, 8);
+	context.entries[0].hash = 3;
+	context.entries[0].key = 1;
+	if (!pglc_index_valid(&index, 8))
+		return 1;
+	memset(buckets, 0xA5, sizeof(buckets));
+	memcpy(scratch, buckets, sizeof(scratch));
+	memcpy(original_buckets, buckets, sizeof(buckets));
+	memcpy(original_scratch, scratch, sizeof(scratch));
+
+	index.bucket_count = 0;
+	if (pglc_index_valid(&index, 8) ||
+		pglc_index_find(&index, 3, test_entry_hash,
+						test_entry_matches, &context) != PGLC_INDEX_TOMBSTONE ||
+		pglc_index_insert(&index, 3, 1, test_entry_hash,
+					   test_entry_matches, &context) != PGLC_INDEX_CORRUPT ||
+		pglc_index_remove(&index, 3, test_entry_hash,
+					   test_entry_matches, &context) != PGLC_INDEX_TOMBSTONE ||
+		pglc_index_rebuild(&index, entry_ids, 1, test_entry_hash, &context) ||
+		pglc_index_rebuild_existing(&index, test_entry_hash, &context) ||
+		!pglc_index_needs_rebuild(&index) ||
+		memcmp(buckets, original_buckets, sizeof(buckets)) != 0 ||
+		memcmp(scratch, original_scratch, sizeof(scratch)) != 0)
+		return 2;
+
+	index.bucket_count = 16;
+	if (pglc_index_valid(&index, 8) ||
+		pglc_index_find(&index, 3, test_entry_hash,
+						test_entry_matches, &context) != PGLC_INDEX_TOMBSTONE ||
+		pglc_index_insert(&index, 3, 1, test_entry_hash,
+					   test_entry_matches, &context) != PGLC_INDEX_CORRUPT ||
+		pglc_index_rebuild(&index, entry_ids, 1, test_entry_hash, &context) ||
+		pglc_index_rebuild_existing(&index, test_entry_hash, &context) ||
+		memcmp(buckets, original_buckets, sizeof(buckets)) != 0 ||
+		memcmp(scratch, original_scratch, sizeof(scratch)) != 0)
+		return 3;
+	return 0;
+}
+
 int
 main(void)
 {
@@ -145,5 +195,8 @@ main(void)
 	result = test_failed_rebuild_preserves_index();
 	if (result != 0)
 		return 20 + result;
+	result = test_corrupt_bucket_count_blocks_index_operations();
+	if (result != 0)
+		return 30 + result;
 	return 0;
 }

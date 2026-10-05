@@ -385,6 +385,33 @@ test_deterministic_fuzz_inputs(void)
 	}
 }
 
+static void
+test_resp_buffer_writer(void)
+{
+	char		buffer[32];
+	Size		length = 0;
+
+	CHECK(pglc_resp_write_array(buffer, sizeof(buffer), &length, 1,
+								sizeof(buffer)));
+	CHECK(pglc_resp_write_bulk(buffer, sizeof(buffer), &length, "json", 4,
+								sizeof(buffer)));
+	CHECK(length == 14);
+	CHECK(memcmp(buffer, "*1\r\n$4\r\njson\r\n", length) == 0);
+
+	length = 0;
+	CHECK(pglc_resp_write_array(buffer, sizeof(buffer), &length, 1, 9));
+	CHECK(!pglc_resp_write_bulk(buffer, sizeof(buffer), &length, "json", 4, 9));
+	CHECK(length == 4);
+
+	length = 0;
+	CHECK(pglc_resp_write_array(buffer, sizeof(buffer), &length, 1,
+								sizeof(buffer)));
+	CHECK(pglc_resp_write_null(buffer, sizeof(buffer), &length,
+								sizeof(buffer)));
+	CHECK(length == 9);
+	CHECK(memcmp(buffer, "*1\r\n$-1\r\n", length) == 0);
+}
+
 int
 main(void)
 {
@@ -394,6 +421,7 @@ main(void)
 	test_malformed_requests();
 	test_argument_boundaries();
 	test_responses();
+	test_resp_buffer_writer();
 	test_deterministic_fuzz_inputs();
 
 	printf("resp source tests: %u assertions passed\n", assertions);

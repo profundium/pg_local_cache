@@ -351,6 +351,13 @@ def crud_key(
     )
 
 
+def crud_key_json_number(table: str, row_id: int) -> str:
+    return (
+        f"CRUD:{PGDATABASE}.public.{table}:"
+        + json.dumps({"id": row_id}, separators=(",", ":"))
+    )
+
+
 def canonical_int8_key(value: int) -> str:
     decimal = str(value)
     return f"{len(decimal)}:{decimal};"
@@ -531,6 +538,73 @@ def test_warm_pipeline_has_no_sql_reads(table: str) -> None:
         assert after["cache_misses"] - before["cache_misses"] == 0
         assert after["database_reads"] - before["database_reads"] == 0
         assert after["cache_hits"] - before["cache_hits"] == count
+    finally:
+        client.close()
+
+
+def test_fast_mget_hit_has_no_worker_palloc(table: str) -> None:
+    client = RespConnection()
+    try:
+        expected = row_bytes(1, "initial")
+        keys = (
+            ("quoted decimal", crud_key(table, 1)),
+            ("JSON number", crud_key_json_number(table, 1)),
+        )
+
+        for key_form, key in keys:
+            for _ in range(8):
+                assert mget_one(client, key) == expected
+
+            def measure_allocations(hit_count: int) -> int:
+                before = json.loads(client.command("STAT"))
+                total = 0
+                for _ in range(hit_count):
+                    assert mget_one(client, key) == expected
+                    total += int(
+                        client.command("PGLC_TEST_LAST_REQUEST_PALLOC_COUNT")
+                    )
+                after = json.loads(client.command("STAT"))
+                observed_hits = int(after["fast_path_hits"]) - int(
+                    before["fast_path_hits"]
+                )
+                fallback_reasons = {
+                    reason: int(after[f"fast_path_fallback_{reason}"])
+                    - int(before[f"fast_path_fallback_{reason}"])
+                    for reason in (
+                        "key_form",
+                        "mapping_shape",
+                        "multi_key",
+                        "cache_state",
+                    )
+                }
+                fallback_total = int(after["fast_path_fallbacks"]) - int(
+                    before["fast_path_fallbacks"]
+                )
+                assert fallback_total == sum(fallback_reasons.values()), (
+                    "fast-path fallback total differs from reason counters: "
+                    f"total={fallback_total}, reasons={fallback_reasons}"
+                )
+                assert observed_hits == hit_count, (
+                    f"warm single-key MGET fast-path hits for {key_form}: "
+                    f"expected {hit_count}, observed {observed_hits}; "
+                    f"fallback reasons={fallback_reasons}"
+                )
+                return total
+
+            short_run_hits = 64
+            long_run_hits = 256
+            short_run_allocations = measure_allocations(short_run_hits)
+            long_run_allocations = measure_allocations(long_run_hits)
+            assert long_run_allocations <= short_run_allocations, (
+                "warm single-key MGET allocations grew with hit count "
+                f"for {key_form}: {short_run_allocations} for "
+                f"{short_run_hits}, {long_run_allocations} for {long_run_hits}"
+            )
+            assert max(short_run_allocations, long_run_allocations) <= 4, (
+                "warm single-key MGET has too many constant allocations "
+                f"for {key_form}: {short_run_allocations} for "
+                f"{short_run_hits}, {long_run_allocations} for {long_run_hits}"
+            )
     finally:
         client.close()
 
@@ -848,6 +922,77 @@ def test_collect_key_sql(table: str, namespace: str, key: str) -> str:
     )
 
 
+def test_key_scanner_differential() -> None:
+    domain = f"pglc_scan_domain_{os.getpid()}"
+    cases: list[tuple[bytes, str, int]] = []
+
+    def add(raw: bytes | str, type_name: str, typmod: int = -1) -> None:
+        cases.append((raw.encode() if isinstance(raw, str) else raw, type_name, typmod))
+
+    for type_name, minimum, maximum in (
+        ("pg_catalog.int2", -32768, 32767),
+        ("pg_catalog.int4", -2147483648, 2147483647),
+        ("pg_catalog.int8", -9223372036854775808, 9223372036854775807),
+    ):
+        add(f'{{"id":{minimum}}}', type_name)
+        add(f'{{"id":{maximum}}}', type_name)
+        for value in range(-128, 129):
+            add(f'{{ "id" : {value} }}', type_name)
+        for spelling in (
+            '1e2', '1.0', '-0', '01', '999999999999999999999999999999999999999999',
+            'null', 'true', '[]',
+        ):
+            add(f'{{"id":{spelling}}}', type_name)
+    add('{"id":32768}', "pg_catalog.int2")
+    add('{"id":-32769}', "pg_catalog.int2")
+    add('{"id":2147483648}', "pg_catalog.int4")
+    add('{"id":-2147483649}', "pg_catalog.int4")
+    add('{"id":9223372036854775808}', "pg_catalog.int8")
+    add('{"id":-9223372036854775809}', "pg_catalog.int8")
+
+    for raw in (
+        '{"id":"plain"}',
+        '{ "id" : "a:b;c" }',
+        '{"id":""}',
+        '{"id":"é"}',
+        '{"id":"quote \\" mark"}',
+        '{"id":"escaped \\\\ slash"}',
+        '{"id":"\\u0061"}',
+        '{"i\\u0064":"x"}',
+        '{"id":"\\u0000"}',
+        '{"id":"\\ud83d\\ude00"}',
+        '{"id":"x","id":"y"}',
+        '{"id":"x","extra":1}',
+        '{"other":"x"}',
+        '{"id":}',
+        '{"id":"x"} trailing',
+    ):
+        add(raw, "pg_catalog.text")
+    add('{"id":"bounded"}', "pg_catalog.varchar", 12)
+    add('{"id":"trim  "}', "pg_catalog.bpchar", 8)
+    add('{"id":7}', f"public.{domain}")
+    add('{"id":1}', "pg_catalog.int4", 4)
+    add(b'{"id":"\xc0\xaf"}', "pg_catalog.text")
+    add(b'{"id":"\xed\xa0\x80"}', "pg_catalog.text")
+    add(b'{"id":"x\x00y"}', "pg_catalog.text")
+
+    values = ",\n".join(
+        "(decode('%s', 'hex'), 'id'::text, '%s'::regtype, %d)"
+        % (raw.hex(), type_name, typmod)
+        for raw, type_name, typmod in cases
+    )
+    sql_commands(f"CREATE DOMAIN public.{domain} AS integer")
+    try:
+        matched = sql(
+            "SELECT bool_and(public.pglc_test_key_scan_matches("
+            "raw, column_name, key_type, typmod)) "
+            f"FROM (VALUES {values}) AS cases(raw, column_name, key_type, typmod)"
+        )
+        assert matched == "t", "fast scanner differs from jsonb/type parser"
+    finally:
+        sql_commands(f"DROP DOMAIN IF EXISTS public.{domain}")
+
+
 def install_test_hook_functions(table: str, namespace: str) -> bool:
     relation = f"public.{sql_identifier(table)}"
     definitions = (
@@ -878,6 +1023,9 @@ def install_test_hook_functions(table: str, namespace: str) -> bool:
         "CREATE OR REPLACE FUNCTION public.pglc_test_abort_after_reservation() "
         "RETURNS void AS '$libdir/pg_local_cache', "
         "'pg_local_cache_test_abort_after_reservation' LANGUAGE C",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_key_scan_matches(bytea, text, regtype, integer) "
+        "RETURNS boolean AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_key_scan_matches' LANGUAGE C STRICT",
     )
     try:
         sql_commands(*definitions)
@@ -909,6 +1057,7 @@ def drop_test_hook_functions() -> None:
         "DROP FUNCTION IF EXISTS public.pglc_test_recreate_relation_state(regclass, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_collect_global()",
         "DROP FUNCTION IF EXISTS public.pglc_test_abort_after_reservation()",
+        "DROP FUNCTION IF EXISTS public.pglc_test_key_scan_matches(bytea, text, regtype, integer)",
     )
 
 
@@ -3107,6 +3256,8 @@ def main() -> None:
         incarnation_table, incarnation_namespace
     )
     try:
+        if hooks_available:
+            test_key_scanner_differential()
         bootstrap = RespConnection()
         try:
             assert wait_for_mapping(
@@ -3142,6 +3293,8 @@ def main() -> None:
             test_fragmented_suffix_and_order(table)
             test_command_error_does_not_poison_batch(table)
             test_warm_pipeline_has_no_sql_reads(table)
+            if hooks_available:
+                test_fast_mget_hit_has_no_worker_palloc(table)
             test_hot_counter_shards_aggregate()
             test_mget(table, composite_table, scoped_table)
             # Existing stale-read stress test covers the snapshot/store race statistically.

@@ -15,6 +15,7 @@ EXTRA_CLEAN = tests/unit/resp_test tests/unit/resp_test_sanitized \
 	tests/unit/row_payload_test tests/unit/row_payload_test_sanitized \
 	tests/unit/cache_arena_test tests/unit/cache_arena_test_sanitized \
 	tests/unit/cache_index_test tests/unit/cache_index_test_sanitized \
+	tests/unit/key_codec_test tests/unit/key_codec_test_sanitized \
 	tests/unit/resp_parse_replay tests/unit/resp_parse_replay_sanitized
 
 PG_CPPFLAGS = -I$(srcdir)/src

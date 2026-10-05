@@ -10,6 +10,23 @@ index_start(const PglcCacheIndex *index, uint64_t hash)
 	return (uint32_t) hash & (index->bucket_count - 1U);
 }
 
+bool
+pglc_index_valid(const PglcCacheIndex *index, uint32_t allocated_bucket_count)
+{
+	return index != NULL && index->buckets != NULL && index->scratch != NULL &&
+		allocated_bucket_count != 0 &&
+		(allocated_bucket_count & (allocated_bucket_count - 1U)) == 0 &&
+		index->allocated_bucket_count == allocated_bucket_count &&
+		index->bucket_count == allocated_bucket_count;
+}
+
+static bool
+index_dimensions_valid(const PglcCacheIndex *index)
+{
+	return index != NULL &&
+		pglc_index_valid(index, index->allocated_bucket_count);
+}
+
 void
 pglc_index_init(PglcCacheIndex *index, uint32_t *buckets, uint32_t *scratch,
 				uint32_t bucket_count)
@@ -17,8 +34,12 @@ pglc_index_init(PglcCacheIndex *index, uint32_t *buckets, uint32_t *scratch,
 	index->buckets = buckets;
 	index->scratch = scratch;
 	index->bucket_count = bucket_count;
+	index->allocated_bucket_count = bucket_count;
 	index->tombstones = 0;
 	index->probe_rejections = 0;
+	if (buckets == NULL || scratch == NULL || bucket_count == 0 ||
+		(bucket_count & (bucket_count - 1U)) != 0)
+		return;
 	memset(buckets, 0, (size_t) bucket_count * sizeof(*buckets));
 	memset(scratch, 0, (size_t) bucket_count * sizeof(*scratch));
 }
@@ -28,8 +49,12 @@ pglc_index_find(const PglcCacheIndex *index, uint64_t hash,
 				PglcIndexEntryHash entry_hash,
 				PglcIndexEntryMatches matches, void *context)
 {
-	uint32_t	start = index_start(index, hash);
+	uint32_t	start;
 	uint32_t	probe;
+
+	if (!index_dimensions_valid(index))
+		return PGLC_INDEX_TOMBSTONE;
+	start = index_start(index, hash);
 
 	for (probe = 0; probe < PGLC_INDEX_MAX_PROBES; probe++)
 	{
@@ -51,9 +76,13 @@ pglc_index_insert(PglcCacheIndex *index, uint64_t hash, uint32_t entry_id,
 				  PglcIndexEntryHash entry_hash,
 				  PglcIndexEntryMatches matches, void *context)
 {
-	uint32_t	start = index_start(index, hash);
+	uint32_t	start;
 	uint32_t	first_tombstone = PGLC_INDEX_TOMBSTONE;
 	uint32_t	probe;
+
+	if (!index_dimensions_valid(index))
+		return PGLC_INDEX_CORRUPT;
+	start = index_start(index, hash);
 
 	for (probe = 0; probe < PGLC_INDEX_MAX_PROBES; probe++)
 	{
@@ -95,8 +124,12 @@ pglc_index_remove(PglcCacheIndex *index, uint64_t hash,
 				   PglcIndexEntryHash entry_hash,
 				   PglcIndexEntryMatches matches, void *context)
 {
-	uint32_t	start = index_start(index, hash);
+	uint32_t	start;
 	uint32_t	probe;
+
+	if (!index_dimensions_valid(index))
+		return PGLC_INDEX_TOMBSTONE;
+	start = index_start(index, hash);
 
 	for (probe = 0; probe < PGLC_INDEX_MAX_PROBES; probe++)
 	{
@@ -124,6 +157,8 @@ pglc_index_rebuild(PglcCacheIndex *index, const uint32_t *entry_ids,
 {
 	uint32_t	index_no;
 
+	if (!index_dimensions_valid(index))
+		return false;
 	memset(index->scratch, 0,
 		   (size_t) index->bucket_count * sizeof(*index->scratch));
 	for (index_no = 0; index_no < entry_count; index_no++)
@@ -162,6 +197,8 @@ pglc_index_rebuild(PglcCacheIndex *index, const uint32_t *entry_ids,
 bool
 pglc_index_needs_rebuild(const PglcCacheIndex *index)
 {
+	if (!index_dimensions_valid(index))
+		return true;
 	return index->tombstones > index->bucket_count / 8U;
 }
 
@@ -171,6 +208,8 @@ pglc_index_rebuild_existing(PglcCacheIndex *index,
 {
 	uint32_t	bucket_no;
 
+	if (!index_dimensions_valid(index))
+		return false;
 	memset(index->scratch, 0,
 		   (size_t) index->bucket_count * sizeof(*index->scratch));
 	for (bucket_no = 0; bucket_no < index->bucket_count; bucket_no++)
