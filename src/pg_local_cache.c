@@ -51,6 +51,7 @@ static int	pglc_effective_dirty_marker_memory_mb = 0;
 int			pglc_relation_states = 1024;
 int			pglc_max_clients = 256;
 int			pglc_max_clients_per_worker = 64;
+int			pglc_max_deferred_misses = PGLC_DEFERRED_MISSES_DEFAULT;
 int			pglc_memory_budget_mb = 384;
 int			pglc_idle_timeout_ms = 300000;
 int			pglc_statement_timeout_ms = 2000;
@@ -161,6 +162,7 @@ static HTAB *local_dirty_hash = NULL;
 static PgLocalCacheLocalDirtyEntry **local_dirty_ordered = NULL;
 static Size local_dirty_ordered_count = 0;
 static Size local_dirty_ordered_capacity = 0;
+static bool local_dirty_ordered_sorted = true;
 static Size local_dirty_count = 0;
 static Size local_dirty_key_count = 0;
 static bool local_dirty_published = false;
@@ -168,6 +170,10 @@ static bool local_global_fallback = false;
 static bool local_bump_config = false;
 static bool local_attached_table_touched = false;
 static bool local_has_global_dirty_record = false;
+
+#define PGLC_LOCAL_DIRTY_HASH_INITIAL_SIZE 64
+#define PGLC_LOCAL_DIRTY_HASH_RECREATE_ENTRY_THRESHOLD \
+	(4 * PGLC_LOCAL_DIRTY_HASH_INITIAL_SIZE)
 
 void		_PG_init(void);
 
@@ -526,6 +532,19 @@ pglc_define_gucs(void)
 							256,
 							1,
 							4096,
+							PGC_POSTMASTER,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_local_cache.max_deferred_misses",
+							"Maximum relation-locked MGET requests deferred per RESP worker.",
+							NULL,
+							&pglc_max_deferred_misses,
+							PGLC_DEFERRED_MISSES_DEFAULT,
+							1,
+							PGLC_DEFERRED_MISSES_MAX,
 							PGC_POSTMASTER,
 							0,
 							NULL,
@@ -4079,11 +4098,32 @@ get_local_dirty_hash(void)
 	control.match = pglc_local_dirty_key_matches;
 	control.hcxt = TopMemoryContext;
 	local_dirty_hash = hash_create("pg_local_cache transaction dirty keys",
-								   64,
+								   PGLC_LOCAL_DIRTY_HASH_INITIAL_SIZE,
 								   &control,
 								   HASH_ELEM | HASH_FUNCTION | HASH_COMPARE |
 								   HASH_CONTEXT);
 	return local_dirty_hash;
+}
+
+static void
+ensure_local_dirty_vector_capacity(Size required)
+{
+	MemoryContext old_context;
+	Size		capacity;
+
+	if (required <= local_dirty_ordered_capacity)
+		return;
+	capacity = Max(local_dirty_ordered_capacity, (Size) 64);
+	while (capacity < required)
+		capacity *= 2;
+	old_context = MemoryContextSwitchTo(TopMemoryContext);
+	if (local_dirty_ordered == NULL)
+		local_dirty_ordered = palloc(capacity * sizeof(*local_dirty_ordered));
+	else
+		local_dirty_ordered = repalloc(local_dirty_ordered,
+									   capacity * sizeof(*local_dirty_ordered));
+	MemoryContextSwitchTo(old_context);
+	local_dirty_ordered_capacity = capacity;
 }
 
 static void
@@ -4121,6 +4161,7 @@ collect_dirty(PgLocalCacheDirtyKind kind, Oid database_oid, Oid relation_oid,
 	pglc_require_preload();
 	make_local_dirty_key(&dirty_key, kind, database_oid, relation_oid,
 						 nspace, key);
+	ensure_local_dirty_vector_capacity(local_dirty_count + 1);
 
 	dirty_hash = pglc_local_dirty_hash_value(&dirty_key, sizeof(dirty_key));
 	entry = hash_search_with_hash_value(get_local_dirty_hash(), &dirty_key,
@@ -4152,6 +4193,8 @@ collect_dirty(PgLocalCacheDirtyKind kind, Oid database_oid, Oid relation_oid,
 		entry->shared_marker_id = 0;
 		entry->shared_marker_generation = 0;
 		local_dirty_count++;
+		local_dirty_ordered[local_dirty_ordered_count++] = entry;
+		local_dirty_ordered_sorted = false;
 		local_dirty_key_count = pglc_dirty_key_count_after_entry(
 			local_dirty_key_count, kind == PGLC_DIRTY_KEY);
 		if (kind == PGLC_DIRTY_GLOBAL)
@@ -4452,38 +4495,13 @@ compare_local_dirty_partitions(const void *left, const void *right)
 static PgLocalCacheLocalDirtyEntry **
 ordered_local_dirty_entries(Size *count)
 {
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheLocalDirtyEntry *local;
-	Size		index = 0;
-
-	if (local_dirty_ordered_count == 0 && local_dirty_count > 0)
+	Assert(local_dirty_ordered_count == local_dirty_count);
+	if (!local_dirty_ordered_sorted)
 	{
-		MemoryContext old_context;
-		Size		capacity;
-
-		if (local_dirty_count > local_dirty_ordered_capacity)
-		{
-			capacity = Max(local_dirty_ordered_capacity, (Size) 64);
-			while (capacity < local_dirty_count)
-				capacity *= 2;
-			old_context = MemoryContextSwitchTo(TopMemoryContext);
-			if (local_dirty_ordered == NULL)
-				local_dirty_ordered = palloc(
-					capacity * sizeof(*local_dirty_ordered));
-			else
-				local_dirty_ordered = repalloc(
-					local_dirty_ordered,
-					capacity * sizeof(*local_dirty_ordered));
-			MemoryContextSwitchTo(old_context);
-			local_dirty_ordered_capacity = capacity;
-		}
-
-		hash_seq_init(&sequence, local_dirty_hash);
-		while ((local = hash_seq_search(&sequence)) != NULL)
-			local_dirty_ordered[index++] = local;
-		qsort(local_dirty_ordered, index, sizeof(*local_dirty_ordered),
+		qsort(local_dirty_ordered, local_dirty_ordered_count,
+			  sizeof(*local_dirty_ordered),
 			  compare_local_dirty_partitions);
-		local_dirty_ordered_count = index;
+		local_dirty_ordered_sorted = true;
 	}
 	*count = local_dirty_ordered_count;
 	return local_dirty_ordered;
@@ -4492,17 +4510,15 @@ ordered_local_dirty_entries(Size *count)
 static void
 reset_local_dirty(void)
 {
-	Size		count;
+	Size		count = local_dirty_ordered_count;
 	Size		index;
 
 	if (local_dirty_count > 0)
 	{
-		PgLocalCacheLocalDirtyEntry **ordered =
-			ordered_local_dirty_entries(&count);
-
+		Assert(count == local_dirty_count);
 		for (index = 0; index < count; index++)
 		{
-			PgLocalCacheLocalDirtyEntry *local = ordered[index];
+			PgLocalCacheLocalDirtyEntry *local = local_dirty_ordered[index];
 			void	   *removed;
 
 			removed = hash_search_with_hash_value(local_dirty_hash, &local->key,
@@ -4512,10 +4528,17 @@ reset_local_dirty(void)
 			if (removed == NULL)
 				elog(ERROR, "pg_local_cache dirty-key reset lost an entry");
 		}
+		/* HTAB hides bucket count; entry count detects large-table growth. */
+		if (count > PGLC_LOCAL_DIRTY_HASH_RECREATE_ENTRY_THRESHOLD)
+		{
+			hash_destroy(local_dirty_hash);
+			local_dirty_hash = NULL;
+		}
 	}
 	local_dirty_count = 0;
 	local_dirty_key_count = 0;
 	local_dirty_ordered_count = 0;
+	local_dirty_ordered_sorted = true;
 	local_dirty_published = false;
 	local_global_fallback = false;
 	local_bump_config = false;
@@ -4556,13 +4579,18 @@ reserve_relation_handle_locked(PgLocalCacheLocalDirtyEntry *local)
 static void
 release_relation_handles_locked(bool committed)
 {
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheLocalDirtyEntry *local;
+	PgLocalCacheLocalDirtyEntry **ordered;
+	Size		count;
+	Size		index;
+
+	ordered = ordered_local_dirty_entries(&count);
 
 	if (committed)
 	{
-		hash_seq_init(&sequence, local_dirty_hash);
-		while ((local = hash_seq_search(&sequence)) != NULL)
+		for (index = 0; index < count; index++)
+		{
+			PgLocalCacheLocalDirtyEntry *local = ordered[index];
+
 			if (local->key.kind == PGLC_DIRTY_FORGET_RELATION)
 			{
 				PgLocalCacheRelationState *state =
@@ -4575,11 +4603,12 @@ release_relation_handles_locked(bool committed)
 					local->target_relation_incarnation)
 					state->pending_forget = true;
 			}
+		}
 	}
 
-	hash_seq_init(&sequence, local_dirty_hash);
-	while ((local = hash_seq_search(&sequence)) != NULL)
+	for (index = 0; index < count; index++)
 	{
+		PgLocalCacheLocalDirtyEntry *local = ordered[index];
 		PgLocalCacheRelationState *state;
 		bool		identity_matches;
 
@@ -4617,14 +4646,16 @@ release_relation_handles_locked(bool committed)
 static bool
 resolve_and_pin_relations(void)
 {
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheLocalDirtyEntry *local;
+	PgLocalCacheLocalDirtyEntry **ordered;
+	Size		count;
+	Size		index;
 	bool		ok = true;
 
+	ordered = ordered_local_dirty_entries(&count);
 	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
-	hash_seq_init(&sequence, local_dirty_hash);
-	while ((local = hash_seq_search(&sequence)) != NULL)
+	for (index = 0; index < count; index++)
 	{
+		PgLocalCacheLocalDirtyEntry *local = ordered[index];
 		PgLocalCacheRelationState *state;
 
 		if (local->key.kind == PGLC_DIRTY_GLOBAL ||
@@ -4669,13 +4700,15 @@ resolve_and_pin_relations(void)
 static void
 resolve_and_pin_forget_relations(void)
 {
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheLocalDirtyEntry *local;
+	PgLocalCacheLocalDirtyEntry **ordered;
+	Size		count;
+	Size		index;
 
+	ordered = ordered_local_dirty_entries(&count);
 	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
-	hash_seq_init(&sequence, local_dirty_hash);
-	while ((local = hash_seq_search(&sequence)) != NULL)
+	for (index = 0; index < count; index++)
 	{
+		PgLocalCacheLocalDirtyEntry *local = ordered[index];
 		PgLocalCacheRelationState *state;
 
 		if (local->key.kind != PGLC_DIRTY_FORGET_RELATION)

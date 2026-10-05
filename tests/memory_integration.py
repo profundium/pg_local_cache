@@ -15,6 +15,7 @@ from pipeline_integration import (
     RespConnection,
     WORKER_ROLE,
     crud_key,
+    guc_number,
     sql,
     sql_identifier,
 )
@@ -92,8 +93,8 @@ def main() -> None:
     created = False
     attached = False
     sql("CREATE EXTENSION IF NOT EXISTS pg_local_cache")
-    cache_entries = int(sql("SELECT current_setting('pg_local_cache.cache_entries')::integer"))
-    worker_count = int(sql("SELECT current_setting('pg_local_cache.workers')::integer"))
+    cache_entries = guc_number("pg_local_cache.cache_entries")
+    worker_count = guc_number("pg_local_cache.workers")
     row_count = 4 * cache_entries
     role_grants = ""
     if WORKER_ROLE:

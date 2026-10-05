@@ -35,6 +35,8 @@ All notable changes to pg_local_cache are documented here. This project follows
   and CRC32C; rows above the payload limit are returned uncached.
 - RESP `MGET` deduplicates cache misses, reads them in one snapshot, and defers
   single-flight waits until it holds no load claims.
+- Cache misses blocked on a relation lock now use bounded per-worker deferral,
+  preserve client command order, and return retry or deadline errors at limits.
 - Evictions no longer rehash the relation key for every sampled candidate,
   which serialized RESP workers when the cache was full.
 - Evictions free up to 8 entries per sample so full caches no longer scan on

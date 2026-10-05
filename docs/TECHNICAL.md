@@ -53,6 +53,34 @@ cache miss, the worker reads the source row in its own short transaction. Rows
 larger than the cache payload limit still return from PostgreSQL but are not
 cached.
 
+### Deferred misses and lock deadlines
+
+Before entering SPI for a cache miss, the worker tries to acquire the source
+relation's `AccessShareLock` without waiting. If the lock is unavailable, it
+releases that exact load claim, aborts the worker transaction, and places the
+request in a bounded per-worker deferred-miss queue. It does not
+enter SPI while waiting for the relation lock. The queue holds at most
+`pg_local_cache.max_deferred_misses` requests per worker (default `8`) and
+accounts at most 512 KiB of retained request bytes per worker. Request bytes
+remain in the client's input buffer outside the per-command context. Each
+client can have at most one deferred request. The setting range is `1`–`64`. If either limit
+prevents enqueueing, `MGET` returns `-ERR busy: relation locked, retry` in
+that client's response order.
+
+A deferred request blocks later commands and responses from its client while
+other clients on the same worker continue to run. Once the lock is available,
+the worker retries the retained request and validates the captured
+mapping generation again. Queue time uses the request's remaining
+`statement_timeout` deadline; expiration returns `-ERR MGET deadline exceeded`
+in order. This deferral covers the initial source-relation lock only. Waits on
+catalog locks, child relations, or conflicting concurrent writes can still
+occur and remain bounded by `lock_timeout` and `statement_timeout`. Source
+query execution also remains subject to `statement_timeout`. Complete
+isolation from blocked misses would require separate miss executors.
+RESP `STAT` JSON reports `deferred_misses_total`,
+`deferred_misses_current`, `deferred_timeouts_total`, and
+`deferred_rejections_total` for the worker serving that connection.
+
 ## Transaction consistency {#transaction-consistency}
 
 Mapped-write triggers in any PostgreSQL session publish per-key or
@@ -140,6 +168,7 @@ authoritative for each configuration.
 | `pg_local_cache.statement_timeout_ms` | `2000` | worker statement deadline |
 | `pg_local_cache.lock_timeout_ms` | `250` | worker lock deadline |
 | `pg_local_cache.singleflight_wait_ms` | `25` | same-key follower wait |
+| `pg_local_cache.max_deferred_misses` | `8` | maximum queued deferred cache misses per worker (range `1`–`64`); retained request bytes also share a fixed 512 KiB per-worker limit; requires restart |
 | `pg_local_cache.max_pipeline_commands` | `256` | commands per event-loop turn |
 | `pg_local_cache.max_dirty_keys` | `4096` | transaction key-fence bound |
 | `pg_local_cache.auth_token_file` | empty | preferred RESP credential |
