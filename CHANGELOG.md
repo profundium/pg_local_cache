@@ -25,6 +25,8 @@ All notable changes to pg_local_cache are documented here. This project follows
   which serialized RESP workers when the cache was full.
 - Evictions free up to 8 entries per sample so full caches no longer scan on
   every fill.
+- Cache locks are partitioned, and request counters are sharded to reduce
+  contention across concurrent clients.
 
 ## [3.0.0] - 2026-10-04
 

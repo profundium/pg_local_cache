@@ -2,6 +2,8 @@
 #include "postgres.h"
 
 #include <limits.h>
+#include <stddef.h>
+#include <stdlib.h>
 
 #include "access/htup_details.h"
 #include "access/xact.h"
@@ -33,10 +35,11 @@
 
 PG_MODULE_MAGIC;
 
-
 int			pglc_port = 6380;
 int			pglc_worker_count = 4;
 int			pglc_cache_entries = 16384;
+int			pglc_lock_partitions = 64;
+static int	pglc_active_lock_partitions = 0;
 int			pglc_relation_states = 1024;
 int			pglc_max_clients = 256;
 int			pglc_max_clients_per_worker = 64;
@@ -62,8 +65,10 @@ char	   *pglc_tls_key_file = NULL;
 char	   *pglc_tls_ca_file = NULL;
 
 PgLocalCacheSharedState *pglc_shared = NULL;
-HTAB	   *pglc_cache_hash = NULL;
 HTAB	   *pglc_relation_hash = NULL;
+static HTAB *pglc_cache_hashes[PGLC_MAX_LOCK_PARTITIONS];
+static PgLocalCacheRelationSlot *pglc_relation_slots = NULL;
+static int pglc_worker_slot = -1;
 
 static char *pglc_binary_version = NULL;
 static char *pglc_binary_build_id = NULL;
@@ -71,6 +76,7 @@ static char *pglc_binary_build_id = NULL;
 static char *pglc_test_pause_point = NULL;
 static int pglc_test_barrier_relation_oid = 0;
 static bool pglc_test_abort_after_reservation = false;
+static int pglc_test_partition_lock_depth = 0;
 #endif
 
 static const struct config_enum_entry pglc_tls_protocol_options[] =
@@ -107,12 +113,18 @@ typedef struct PgLocalCacheLocalDirtyEntry
 	PgLocalCacheLocalDirtyKey key;
 	Oid			relation_oid;
 	bool		shared_marker_reserved;
-	bool		shared_relation_fallback;
+	bool		shared_relation_reserved;
+	bool		shared_relation_fence_published;
+	bool		shared_identity_pin;
+	uint32		shared_slot;
+	uint64		shared_slot_generation;
 	uint64		shared_relation_incarnation;
 	uint64		target_relation_incarnation;
 } PgLocalCacheLocalDirtyEntry;
 
 static HTAB *local_dirty_hash = NULL;
+static PgLocalCacheLocalDirtyEntry **local_dirty_ordered = NULL;
+static Size local_dirty_ordered_count = 0;
 static bool local_dirty_published = false;
 static bool local_global_fallback = false;
 static bool local_bump_config = false;
@@ -130,12 +142,15 @@ PG_FUNCTION_INFO_V1(pg_local_cache_metrics_json);
 PG_FUNCTION_INFO_V1(pg_local_cache_forget);
 #ifdef PGLC_TEST_HOOKS
 PG_FUNCTION_INFO_V1(pg_local_cache_test_collect_key);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_partition);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_hash_bucket);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_relation_incarnation);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_relation_identity_pins);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_recreate_relation_state);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_collect_global);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_abort_after_reservation);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_corrupt_value_len);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_partition_lock_violations);
 #endif
 
 static void pglc_shmem_request(void);
@@ -157,6 +172,10 @@ static uint64 pglc_workers_without_current_mappings(void);
 static uint32 pglc_cache_key_hash(const void *key, Size keysize);
 static int pglc_cache_key_match(const void *left, const void *right,
 								Size keysize);
+static uint32 pglc_cache_partition(const PgLocalCacheCacheKey *key);
+static int pglc_cache_partition_count(void);
+static Size pglc_cache_entries_per_partition(int partitions);
+static int evict_cache_entries(uint32 partition);
 static void
 pglc_define_gucs(void)
 {
@@ -293,6 +312,19 @@ pglc_define_gucs(void)
 							16384,
 							128,
 							65536,
+							PGC_POSTMASTER,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_local_cache.lock_partitions",
+							"Maximum independent shared cache lock partitions; small caches use fewer.",
+							NULL,
+							&pglc_lock_partitions,
+							64,
+							16,
+							PGLC_MAX_LOCK_PARTITIONS,
 							PGC_POSTMASTER,
 							0,
 							NULL,
@@ -546,6 +578,34 @@ pglc_test_pause_at(const char *point)
 }
 #endif
 
+static void
+pglc_partition_lock_acquire(uint32 partition, LWLockMode mode)
+{
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("before_partition_acquire");
+	if (pglc_test_partition_lock_depth != 0)
+		(void) pg_atomic_fetch_add_u64(
+			&pglc_shared->test_partition_lock_violations, 1);
+#endif
+	LWLockAcquire(pglc_shared->partitions[partition].lock, mode);
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_partition_lock_depth++;
+#endif
+}
+
+static void
+pglc_partition_lock_release(uint32 partition)
+{
+	LWLockRelease(pglc_shared->partitions[partition].lock);
+#ifdef PGLC_TEST_HOOKS
+	if (pglc_test_partition_lock_depth <= 0)
+		(void) pg_atomic_fetch_add_u64(
+			&pglc_shared->test_partition_lock_violations, 1);
+	else
+		pglc_test_partition_lock_depth--;
+#endif
+}
+
 void
 _PG_init(void)
 {
@@ -591,18 +651,69 @@ _PG_init(void)
 	}
 }
 
-Size
-pglc_shared_memory_bytes(void)
+static Size
+pglc_addin_shmem_bytes(void)
 {
 	Size		size = MAXALIGN(sizeof(PgLocalCacheSharedState));
+	int			partitions = pglc_cache_partition_count();
+	Size		per_partition = pglc_cache_entries_per_partition(partitions);
+	int			partition;
 
-	size = add_size(size,
-					hash_estimate_size(pglc_cache_entries,
-									   sizeof(PgLocalCacheCacheEntry)));
+	for (partition = 0; partition < partitions; partition++)
+		size = add_size(size,
+						hash_estimate_size(per_partition,
+										   sizeof(PgLocalCacheCacheEntry)));
 	size = add_size(size,
 					hash_estimate_size(pglc_relation_states,
 									   sizeof(PgLocalCacheRelationState)));
+	size = add_size(size,
+					mul_size((Size) pglc_relation_states,
+							 sizeof(PgLocalCacheRelationSlot)));
 	return size;
+}
+
+/*
+ * cache_entries is the hard global maximum. Each independently bounded
+ * partition gets 25% headroom so ordinary hash variance does not force
+ * eviction before the configured aggregate working set is reached. This
+ * exact per-partition cap is also used by the shared-memory estimate.
+ */
+static Size
+pglc_cache_entries_per_partition(int partitions)
+{
+	Size		target = mul_size((Size) pglc_cache_entries, (Size) 5);
+	Size		divisor = mul_size((Size) partitions, (Size) 4);
+
+	return add_size(target, divisor - 1) / divisor;
+}
+
+/*
+ * Dynahash allocates entries in batches of at least 32 per table. Avoid
+ * multiplying that minimum across partitions when the configured cache is
+ * small; lock_partitions remains an upper bound.
+ */
+static int
+pglc_cache_partition_count(void)
+{
+	int			partitions;
+
+	if (pglc_active_lock_partitions != 0)
+		return pglc_active_lock_partitions;
+	partitions = pglc_lock_partitions;
+
+	while (partitions > 16 &&
+		   pglc_cache_entries_per_partition(partitions) < 32)
+		partitions >>= 1;
+	pglc_active_lock_partitions = partitions;
+	return pglc_active_lock_partitions;
+}
+
+Size
+pglc_shared_memory_bytes(void)
+{
+	return add_size(pglc_addin_shmem_bytes(),
+					mul_size((Size) pglc_cache_partition_count() + 1,
+							 sizeof(LWLockPadded)));
 }
 
 Size
@@ -630,6 +741,11 @@ pglc_validate_startup_limits(void)
 							   pglc_max_clients_per_worker, client_slots),
 					 errhint("Increase pg_local_cache.workers or pg_local_cache.max_clients_per_worker, or lower pg_local_cache.max_clients.")));
 	}
+	if (pglc_lock_partitions < 16 ||
+		pglc_lock_partitions > PGLC_MAX_LOCK_PARTITIONS ||
+		(pglc_lock_partitions & (pglc_lock_partitions - 1)) != 0)
+		ereport(FATAL,
+				(errmsg("pg_local_cache.lock_partitions must be a power of two from 16 through 256")));
 
 	budget_bytes = mul_size((Size) pglc_memory_budget_mb,
 							(Size) 1024 * 1024);
@@ -650,8 +766,9 @@ pglc_shmem_request(void)
 		previous_shmem_request_hook();
 #endif
 
-	RequestAddinShmemSpace(pglc_shared_memory_bytes());
-	RequestNamedLWLockTranche("pg_local_cache", 1);
+	RequestAddinShmemSpace(pglc_addin_shmem_bytes());
+	RequestNamedLWLockTranche("pg_local_cache",
+						  pglc_cache_partition_count() + 1);
 }
 
 static void
@@ -660,6 +777,10 @@ pglc_shmem_startup(void)
 	bool		found;
 	HASHCTL		control;
 	int		worker_index;
+	int		partition;
+	int			partitions = pglc_cache_partition_count();
+	Size		per_partition = pglc_cache_entries_per_partition(partitions);
+	char		name[64];
 
 	if (previous_shmem_startup_hook)
 		previous_shmem_startup_hook();
@@ -672,9 +793,21 @@ pglc_shmem_startup(void)
 	if (!found)
 	{
 		memset(pglc_shared, 0, sizeof(PgLocalCacheSharedState));
-		pglc_shared->lock = &(GetNamedLWLockTranche("pg_local_cache"))->lock;
+		pglc_shared->registry_lock =
+			&(GetNamedLWLockTranche("pg_local_cache"))[0].lock;
+		for (partition = 0; partition < partitions; partition++)
+		{
+			pglc_shared->partitions[partition].lock =
+				&(GetNamedLWLockTranche("pg_local_cache"))[partition + 1].lock;
+			pglc_shared->partitions[partition].capacity =
+				(uint32) per_partition;
+		}
 		pg_atomic_init_u64(&pglc_shared->clock, 0);
-		pg_atomic_init_u64(&pglc_shared->entry_generation, 0);
+		pg_atomic_init_u64(&pglc_shared->relation_incarnation_counter, 0);
+		pg_atomic_init_u64(&pglc_shared->global_version, 0);
+		pg_atomic_init_u64(&pglc_shared->global_epoch, 0);
+		pg_atomic_init_u64(&pglc_shared->global_dirty_writers, 0);
+		pg_atomic_init_u64(&pglc_shared->cache_entry_count, 0);
 		pg_atomic_init_u64(&pglc_shared->config_generation, 1);
 		pg_atomic_init_u64(&pglc_shared->cache_hits, 0);
 		pg_atomic_init_u64(&pglc_shared->cache_misses, 0);
@@ -722,6 +855,57 @@ pglc_shmem_startup(void)
 		pg_atomic_init_u64(&pglc_shared->pass_to_main, 0);
 		pg_atomic_init_u64(&pglc_shared->sql_sets, 0);
 		pg_atomic_init_u64(&pglc_shared->sql_dels, 0);
+#ifdef PGLC_TEST_HOOKS
+		pg_atomic_init_u64(&pglc_shared->test_partition_lock_violations, 0);
+#endif
+		for (worker_index = 0; worker_index < PGLC_MAX_STATS_SHARDS;
+			 worker_index++)
+		{
+			PgLocalCacheWorkerStats *stats =
+				&pglc_shared->stats_shards[worker_index];
+
+			pg_atomic_init_u64(&stats->cache_hits, 0);
+			pg_atomic_init_u64(&stats->cache_misses, 0);
+			pg_atomic_init_u64(&stats->negative_hits, 0);
+			pg_atomic_init_u64(&stats->negative_writes, 0);
+			pg_atomic_init_u64(&stats->database_reads, 0);
+			pg_atomic_init_u64(&stats->client_requests, 0);
+			pg_atomic_init_u64(&stats->client_request_errors, 0);
+			pg_atomic_init_u64(&stats->client_mget_keys, 0);
+			pg_atomic_init_u64(&stats->client_sets, 0);
+			pg_atomic_init_u64(&stats->client_dels, 0);
+			pg_atomic_init_u64(&stats->pass_to_main, 0);
+			pg_atomic_init_u64(&stats->database_writes, 0);
+			pg_atomic_init_u64(&stats->sql_sets, 0);
+			pg_atomic_init_u64(&stats->sql_dels, 0);
+			pg_atomic_init_u64(&stats->cache_admission_rejections, 0);
+			pg_atomic_init_u64(&stats->invalidations, 0);
+			pg_atomic_init_u64(&stats->key_invalidations, 0);
+			pg_atomic_init_u64(&stats->table_invalidations, 0);
+			pg_atomic_init_u64(&stats->evictions, 0);
+			pg_atomic_init_u64(&stats->singleflight_leaders, 0);
+			pg_atomic_init_u64(&stats->singleflight_waiters, 0);
+			pg_atomic_init_u64(&stats->singleflight_reuses, 0);
+			pg_atomic_init_u64(&stats->singleflight_timeouts, 0);
+		}
+	}
+
+	pglc_relation_slots = ShmemInitStruct("pg_local_cache relation slots",
+											 mul_size((Size) pglc_relation_states,
+											  sizeof(PgLocalCacheRelationSlot)),
+											 &found);
+	if (!found)
+	{
+		memset(pglc_relation_slots, 0,
+			   mul_size((Size) pglc_relation_states,
+						 sizeof(PgLocalCacheRelationSlot)));
+		for (partition = 0; partition < pglc_relation_states; partition++)
+		{
+			pg_atomic_init_u64(&pglc_relation_slots[partition].generation, 0);
+			pg_atomic_init_u64(&pglc_relation_slots[partition].incarnation, 0);
+			pg_atomic_init_u64(&pglc_relation_slots[partition].version, 0);
+			pg_atomic_init_u64(&pglc_relation_slots[partition].dirty_writers, 0);
+		}
 	}
 
 	memset(&control, 0, sizeof(control));
@@ -729,12 +913,16 @@ pglc_shmem_startup(void)
 	control.entrysize = sizeof(PgLocalCacheCacheEntry);
 	control.hash = pglc_cache_key_hash;
 	control.match = pglc_cache_key_match;
-	pglc_cache_hash = ShmemInitHash("pg_local_cache cache",
-								   pglc_cache_entries,
-								   pglc_cache_entries,
-								   &control,
-								   HASH_ELEM | HASH_FUNCTION | HASH_COMPARE);
-
+	for (partition = 0; partition < partitions; partition++)
+	{
+		snprintf(name, sizeof(name), "pg_local_cache cache %d", partition);
+		pglc_cache_hashes[partition] = ShmemInitHash(name,
+												per_partition,
+												per_partition,
+												&control,
+												HASH_ELEM | HASH_FUNCTION |
+												HASH_COMPARE);
+	}
 	memset(&control, 0, sizeof(control));
 	control.keysize = sizeof(PgLocalCacheRelationKey);
 	control.entrysize = sizeof(PgLocalCacheRelationState);
@@ -751,7 +939,8 @@ void
 pglc_require_preload(void)
 {
 	if (!pglc_was_preloaded || pglc_shared == NULL ||
-		pglc_cache_hash == NULL || pglc_relation_hash == NULL)
+		pglc_cache_hashes[0] == NULL || pglc_relation_hash == NULL ||
+		pglc_relation_slots == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_local_cache must be loaded through shared_preload_libraries")));
@@ -762,6 +951,25 @@ pglc_config_generation(void)
 {
 	pglc_require_preload();
 	return pg_atomic_read_u64(&pglc_shared->config_generation);
+}
+
+static void
+pglc_worker_stat_add(pg_atomic_uint64 *fallback, Size offset, uint64 amount)
+{
+	int			shard;
+
+	if (pglc_worker_slot >= 0 && pglc_worker_slot < PGLC_MAX_WORKERS)
+		shard = pglc_worker_slot;
+	else if (MyProc != NULL)
+		shard = PGLC_MAX_WORKERS;
+	else
+	{
+		(void) pg_atomic_fetch_add_u64(fallback, amount);
+		return;
+	}
+	(void) pg_atomic_fetch_add_u64(
+		(pg_atomic_uint64 *) ((char *) &pglc_shared->stats_shards[shard] + offset),
+		amount);
 }
 
 /*
@@ -810,6 +1018,25 @@ pglc_cache_key_match(const void *left, const void *right, Size keysize)
 				   sizeof(left_key->key));
 }
 
+static uint32
+pglc_cache_partition(const PgLocalCacheCacheKey *key)
+{
+	uint32		hash;
+	uint32		partition_bits = 0;
+	uint32		partition_count = (uint32) pglc_cache_partition_count();
+
+	Assert(partition_count >= 16 &&
+		   (partition_count & (partition_count - 1)) == 0);
+	while (partition_count > 1)
+	{
+		partition_bits++;
+		partition_count >>= 1;
+	}
+	/* dynahash selects buckets from low hash bits; route partitions from high. */
+	hash = pglc_cache_key_hash(key, sizeof(*key));
+	return hash >> (32 - partition_bits);
+}
+
 static void
 make_cache_key(PgLocalCacheCacheKey *result, Oid database_oid,
 				   const char *nspace, const char *key, bool initialize_padding)
@@ -822,6 +1049,15 @@ make_cache_key(PgLocalCacheCacheKey *result, Oid database_oid,
 	strlcpy(result->key, key, sizeof(result->key));
 }
 
+static uint32
+cache_partition_for(Oid database_oid, const char *nspace, const char *key)
+{
+	PgLocalCacheCacheKey cache_key;
+
+	make_cache_key(&cache_key, database_oid, nspace, key, false);
+	return pglc_cache_partition(&cache_key);
+}
+
 static void
 make_relation_key(PgLocalCacheRelationKey *result, Oid database_oid,
 				  const char *nspace)
@@ -831,16 +1067,115 @@ make_relation_key(PgLocalCacheRelationKey *result, Oid database_oid,
 	strlcpy(result->nspace, nspace, sizeof(result->nspace));
 }
 
-/* Called under the cache LWLock.  Zero is reserved for missing identity. */
-static bool
-next_relation_incarnation_locked(uint64 *incarnation)
+/* Compare/exchange is a full-barrier RMW, with overflow checked before change. */
+static uint64
+pglc_atomic_fetch_add_checked(pg_atomic_uint64 *counter, uint64 amount)
 {
-	if (pglc_shared->relation_incarnation_counter == (uint64) -1)
-		return false;
+	uint64		observed = pg_atomic_read_u64(counter);
 
-	pglc_shared->relation_incarnation_counter++;
-	*incarnation = pglc_shared->relation_incarnation_counter;
-	return *incarnation != 0;
+	for (;;)
+	{
+		uint64		expected = observed;
+
+		if (observed > (uint64) -1 - amount)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("pg_local_cache fence counter overflow")));
+		if (pg_atomic_compare_exchange_u64(counter, &expected,
+										 observed + amount))
+			return observed;
+		observed = expected;
+	}
+}
+
+static uint64
+pglc_atomic_fetch_sub_checked(pg_atomic_uint64 *counter, uint64 amount)
+{
+	uint64		observed = pg_atomic_read_u64(counter);
+
+	for (;;)
+	{
+		uint64		expected = observed;
+
+		if (observed < amount)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("pg_local_cache fence counter underflow")));
+		if (pg_atomic_compare_exchange_u64(counter, &expected,
+										 observed - amount))
+			return observed;
+		observed = expected;
+	}
+}
+
+/* Called under registry_lock.  Reused slots keep advancing both tags. */
+static bool
+initialize_relation_slot(PgLocalCacheRelationState *state, bool reuse)
+{
+	uint32		slot_index;
+	PgLocalCacheRelationSlot *slot;
+	uint64		generation;
+	uint64		incarnation;
+	uint64		previous_incarnation;
+	uint64		version;
+
+	if (reuse)
+		slot_index = state->slot;
+	else
+	{
+		for (slot_index = 0; slot_index < (uint32) pglc_relation_states;
+			 slot_index++)
+			if (!pglc_relation_slots[slot_index].in_use)
+				break;
+		if (slot_index == (uint32) pglc_relation_states)
+			return false;
+	}
+
+	slot = &pglc_relation_slots[slot_index];
+	generation = pglc_atomic_fetch_add_checked(&slot->generation, 1) + 1;
+	incarnation = pglc_atomic_fetch_add_checked(
+		&pglc_shared->relation_incarnation_counter, 1) + 1;
+	previous_incarnation = pg_atomic_read_u64(&slot->incarnation);
+	if (incarnation <= previous_incarnation)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pg_local_cache relation incarnation overflow")));
+	(void) pglc_atomic_fetch_add_checked(&slot->incarnation,
+									 incarnation - previous_incarnation);
+	if (!reuse)
+		slot->in_use = true;
+	if (generation == 0 || incarnation == 0)
+	{
+		/* Exhausted identity slots stay poisoned and can never be reused. */
+		slot->in_use = true;
+		return false;
+	}
+	version = pg_atomic_read_u64(&slot->version);
+	if (pg_atomic_read_u64(&slot->dirty_writers) != 0)
+	{
+		/* A slot with an outstanding fence cannot be safely recycled. */
+		slot->in_use = true;
+		return false;
+	}
+	if (version != 0)
+		(void) pglc_atomic_fetch_sub_checked(&slot->version, version);
+	state->slot = slot_index;
+	state->slot_generation = generation;
+	return true;
+}
+
+static void
+release_relation_slot(PgLocalCacheRelationState *state)
+{
+	if (state->slot < (uint32) pglc_relation_states)
+	{
+		PgLocalCacheRelationSlot *slot = &pglc_relation_slots[state->slot];
+
+		uint64		previous = pglc_atomic_fetch_add_checked(&slot->generation, 1);
+
+		/* A wrapped generation poisons the slot instead of permitting ABA. */
+		slot->in_use = previous == (uint64) -1;
+	}
 }
 
 static PgLocalCacheRelationState *
@@ -857,8 +1192,11 @@ get_relation_state(Oid database_oid, Oid relation_oid,
 	if (state != NULL && create && state->pending_forget)
 	{
 		/* A forgotten identity stays reserved until every publisher releases it. */
-		if (state->identity_pins != 0 || state->dirty_writers != 0)
+		if (state->identity_pins != 0 ||
+			pg_atomic_read_u64(
+				&pglc_relation_slots[state->slot].dirty_writers) != 0)
 			return NULL;
+		release_relation_slot(state);
 		(void) hash_search(pglc_relation_hash, &key, HASH_REMOVE, NULL);
 		state = NULL;
 		found = false;
@@ -886,67 +1224,225 @@ get_relation_state(Oid database_oid, Oid relation_oid,
 	if (state != NULL && !found)
 	{
 		PgLocalCacheRelationKey saved_key = state->key;
-		uint64		incarnation;
-
-		if (!next_relation_incarnation_locked(&incarnation))
-		{
-			(void) hash_search(pglc_relation_hash, &key, HASH_REMOVE, NULL);
-			return NULL;
-		}
 
 		memset(state, 0, sizeof(*state));
 		state->key = saved_key;
 		state->relation_oid = relation_oid;
-		state->relation_incarnation = incarnation;
+		if (!initialize_relation_slot(state, false))
+		{
+			(void) hash_search(pglc_relation_hash, &key, HASH_REMOVE, NULL);
+			return NULL;
+		}
 	}
 	else if (state != NULL && create && OidIsValid(relation_oid) &&
 			 state->relation_oid != relation_oid)
 	{
-		uint64		incarnation;
-
 		/* Published handles own this identity until their finish callback. */
-		if (state->identity_pins != 0 || state->dirty_writers != 0 ||
-			!next_relation_incarnation_locked(&incarnation))
+		if (state->identity_pins != 0 ||
+			!initialize_relation_slot(state, true))
 			return NULL;
 
 		state->relation_oid = relation_oid;
-		state->relation_incarnation = incarnation;
-		state->version = 0;
 		state->pending_forget = false;
 	}
 	return state;
 }
 
-static bool
-cache_entry_is_current_locked(PgLocalCacheCacheEntry *entry,
-							  PgLocalCacheRelationState *relation_state)
+/* Called under registry_lock.  Every acquired identity pin has one release. */
+static void
+release_relation_identity_pin(PgLocalCacheRelationState *state)
 {
+	Assert(state != NULL);
+	Assert(state->identity_pins > 0);
+	if (state->identity_pins == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pg_local_cache relation identity pin underflow")));
+	state->identity_pins--;
+}
+
+bool
+pglc_resolve_mapping_slot(PgLocalCacheMapping *mapping)
+{
+	PgLocalCacheRelationState *state;
+	bool		resolved = false;
+
+	pglc_require_preload();
+	mapping->relation_slot = UINT32_MAX;
+	mapping->relation_slot_generation = 0;
+	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
+	state = get_relation_state(MyDatabaseId, mapping->relation_oid,
+							   mapping->nspace, true);
+	if (state != NULL && state->relation_oid == mapping->relation_oid &&
+		!state->pending_forget)
+	{
+		mapping->relation_slot = state->slot;
+		mapping->relation_slot_generation = state->slot_generation;
+		resolved = true;
+	}
+	LWLockRelease(pglc_shared->registry_lock);
+	return resolved;
+}
+
+bool
+pglc_mapping_slot_is_current(const PgLocalCacheMapping *mapping)
+{
+	return mapping->relation_slot < (uint32) pglc_relation_states &&
+		mapping->relation_slot_generation == pg_atomic_read_u64(
+			&pglc_relation_slots[mapping->relation_slot].generation);
+}
+
+static bool
+cache_entry_is_current_slot_locked(PgLocalCacheCacheEntry *entry)
+{
+	PgLocalCacheRelationSlot *slot;
+
+	if (entry->relation_slot >= (uint32) pglc_relation_states)
+		return false;
+	slot = &pglc_relation_slots[entry->relation_slot];
 	return entry->valid &&
-			relation_state != NULL &&
-			entry->relation_oid == relation_state->relation_oid &&
-			entry->global_epoch == pglc_shared->global_epoch &&
-			entry->relation_incarnation ==
-			relation_state->relation_incarnation &&
-			entry->relation_version == relation_state->version;
+		entry->slot_generation == pg_atomic_read_u64(&slot->generation) &&
+		entry->global_epoch ==
+		pg_atomic_read_u64(&pglc_shared->global_epoch) &&
+		entry->relation_incarnation ==
+		pg_atomic_read_u64(&slot->incarnation) &&
+		entry->relation_version == pg_atomic_read_u64(&slot->version);
+}
+
+typedef struct PgLocalCacheFenceSnapshot
+{
+	uint64		global_version;
+	uint64		global_epoch;
+	uint64		global_dirty_writers;
+	uint64		relation_version;
+	uint64		relation_incarnation;
+	uint64		relation_dirty_writers;
+	uint64		config_generation;
+	uint64		slot_generation;
+	uint64		key_version;
+	uint64		key_dirty_writers;
+	uint64		entry_global_epoch;
+	uint64		entry_relation_version;
+	uint64		entry_relation_incarnation;
+	uint64		entry_slot_generation;
+	uint32		relation_slot;
+} PgLocalCacheFenceSnapshot;
+
+/* Caller holds key's partition lock, shared or exclusive. */
+static bool
+read_fence_snapshot(const PgLocalCacheMapping *mapping,
+					PgLocalCacheCacheEntry *entry,
+					PgLocalCacheFenceSnapshot *snapshot)
+{
+	PgLocalCacheRelationSlot *slot;
+	uint64		global_version_after;
+	uint64		relation_version_after;
+	uint64		config_generation_after;
+	uint64		slot_generation_after;
+	uint64		relation_incarnation_after;
+
+	if (mapping->relation_slot >= (uint32) pglc_relation_states)
+		return false;
+	memset(snapshot, 0, sizeof(*snapshot));
+	slot = &pglc_relation_slots[mapping->relation_slot];
+	snapshot->global_version =
+		pg_atomic_read_u64(&pglc_shared->global_version);
+	snapshot->relation_version = pg_atomic_read_u64(&slot->version);
+	snapshot->config_generation =
+		pg_atomic_read_u64(&pglc_shared->config_generation);
+	snapshot->slot_generation = pg_atomic_read_u64(&slot->generation);
+	snapshot->relation_incarnation = pg_atomic_read_u64(&slot->incarnation);
+	pg_read_barrier();
+	snapshot->global_dirty_writers =
+		pg_atomic_read_u64(&pglc_shared->global_dirty_writers);
+	snapshot->relation_dirty_writers =
+		pg_atomic_read_u64(&slot->dirty_writers);
+	snapshot->global_epoch = pg_atomic_read_u64(&pglc_shared->global_epoch);
+	snapshot->relation_slot = mapping->relation_slot;
+	snapshot->key_version = entry != NULL ? entry->version : 0;
+	snapshot->key_dirty_writers = entry != NULL ? entry->dirty_writers : 0;
+	snapshot->entry_global_epoch = entry != NULL ? entry->global_epoch : 0;
+	snapshot->entry_relation_version =
+		entry != NULL ? entry->relation_version : 0;
+	snapshot->entry_relation_incarnation =
+		entry != NULL ? entry->relation_incarnation : 0;
+	snapshot->entry_slot_generation =
+		entry != NULL ? entry->slot_generation : 0;
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("after_snapshot_first_read");
+#endif
+	pg_read_barrier();
+	global_version_after = pg_atomic_read_u64(&pglc_shared->global_version);
+	relation_version_after = pg_atomic_read_u64(&slot->version);
+	config_generation_after =
+		pg_atomic_read_u64(&pglc_shared->config_generation);
+	slot_generation_after = pg_atomic_read_u64(&slot->generation);
+	relation_incarnation_after = pg_atomic_read_u64(&slot->incarnation);
+	return snapshot->global_version == global_version_after &&
+		snapshot->relation_version == relation_version_after &&
+		snapshot->config_generation == config_generation_after &&
+		snapshot->slot_generation == slot_generation_after &&
+		snapshot->relation_incarnation == relation_incarnation_after &&
+		snapshot->config_generation == mapping->config_generation &&
+		snapshot->slot_generation == mapping->relation_slot_generation &&
+		snapshot->relation_incarnation != 0 &&
+		snapshot->global_dirty_writers == 0 &&
+		snapshot->relation_dirty_writers == 0 &&
+		snapshot->key_dirty_writers == 0;
+}
+
+static bool
+fence_snapshots_equal(const PgLocalCacheFenceSnapshot *left,
+				  const PgLocalCacheFenceSnapshot *right)
+{
+	return memcmp(left, right, sizeof(*left)) == 0;
+}
+
+static bool
+fence_snapshot_matches_token(const PgLocalCacheFenceSnapshot *snapshot,
+							 const PgLocalCacheReadToken *token)
+{
+	return snapshot->config_generation == token->config_generation &&
+		snapshot->global_version == token->global_version &&
+		snapshot->global_epoch == token->global_epoch &&
+		snapshot->relation_version == token->relation_version &&
+		snapshot->relation_incarnation == token->relation_incarnation &&
+		snapshot->slot_generation == token->slot_generation &&
+		snapshot->relation_slot == token->relation_slot &&
+		snapshot->key_version == token->key_version;
+}
+
+static bool
+fence_snapshot_fences_match_token(const PgLocalCacheFenceSnapshot *snapshot,
+								 const PgLocalCacheReadToken *token)
+{
+	return snapshot->config_generation == token->config_generation &&
+		snapshot->global_version == token->global_version &&
+		snapshot->global_epoch == token->global_epoch &&
+		snapshot->relation_version == token->relation_version &&
+		snapshot->relation_incarnation == token->relation_incarnation &&
+		snapshot->slot_generation == token->slot_generation &&
+		snapshot->relation_slot == token->relation_slot;
 }
 
 static void
 advance_global_version_locked(void)
 {
-	pglc_shared->global_version++;
+	(void) pglc_atomic_fetch_add_checked(&pglc_shared->global_version, 1);
 }
 
 static uint64
-next_entry_generation(void)
+next_entry_generation(uint32 partition)
 {
-	uint64		generation;
+	PgLocalCachePartition *cache_partition =
+		&pglc_shared->partitions[partition];
 
-	generation =
-		pg_atomic_fetch_add_u64(&pglc_shared->entry_generation, 1) + 1;
-	if (generation == 0)
-		generation =
-			pg_atomic_fetch_add_u64(&pglc_shared->entry_generation, 1) + 1;
-	return generation;
+	/* Only called under this partition's exclusive lock. */
+	if (cache_partition->entry_generation == (uint64) -1)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pg_local_cache key generation overflow")));
+	return ++cache_partition->entry_generation;
 }
 
 static int
@@ -961,7 +1457,8 @@ cache_load_lease_ms(void)
  * from filling an entry that another worker has subsequently reclaimed.
  */
 static bool
-cache_load_is_active_locked(PgLocalCacheCacheEntry *entry, TimestampTz now)
+cache_load_is_active_locked(PgLocalCacheCacheEntry *entry, TimestampTz now,
+								uint32 partition)
 {
 	if (!entry->loading)
 		return false;
@@ -971,19 +1468,21 @@ cache_load_is_active_locked(PgLocalCacheCacheEntry *entry, TimestampTz now)
 
 	entry->loading = false;
 	entry->load_id++;
-	entry->version = next_entry_generation();
+	entry->version = next_entry_generation(partition);
 	return false;
 }
 
 static int
-evict_cache_entries(void)
+evict_cache_entries(uint32 partition)
 {
 	HASH_SEQ_STATUS sequence;
 	PgLocalCacheCacheEntry *entry;
+	PgLocalCachePartition *cache_partition = &pglc_shared->partitions[partition];
+	HTAB	   *cache_hash = pglc_cache_hashes[partition];
 	PgLocalCacheCacheKey victims[PGLC_EVICTION_BATCH];
 	PgLocalCacheCacheKey candidates[PGLC_EVICTION_BATCH];
 	uint64		candidate_access[PGLC_EVICTION_BATCH];
-	uint32		initial_cursor = pglc_shared->eviction_bucket_cursor;
+	uint32		initial_cursor = cache_partition->eviction_bucket_cursor;
 	uint32		start_bucket;
 	int			victim_count = 0;
 	int			candidate_count = 0;
@@ -992,51 +1491,29 @@ evict_cache_entries(void)
 	int			pass;
 	int			i;
 	bool		sample_limited = false;
-	bool		have_cached_relation_key = false;
-	Oid			cached_database_oid = InvalidOid;
-	char		cached_nspace[PGLC_NAMESPACE_MAX];
-	PgLocalCacheRelationState *cached_relation_state = NULL;
 	TimestampTz now = GetCurrentTimestamp();
 
 	/*
-	 * The exclusive cache lock keeps relation state stable.  Victims still rank
-	 * within the same 64-entry sample, preserving approximate LRU; eight
-	 * removals amortize that scan and bound lock work.
+	 * Scan only this partition.  Relation and global tags are atomic, so no
+	 * registry lock is needed while the partition lock is held.
 	 */
 	for (pass = 0; pass < 2; pass++)
 	{
 		if (pass == 1 && initial_cursor == 0)
 			break;
 		start_bucket = pass == 0 ? initial_cursor : 0;
-		hash_seq_init(&sequence, pglc_cache_hash);
+		hash_seq_init(&sequence, cache_hash);
 		sequence.curBucket = start_bucket;
 		while ((entry = hash_seq_search(&sequence)) != NULL)
 		{
-			PgLocalCacheRelationState *relation_state;
 			uint64		last_access;
 			int			position;
 
 			scanned++;
 			if (entry->dirty_writers == 0 &&
-				!cache_load_is_active_locked(entry, now))
+				!cache_load_is_active_locked(entry, now, partition))
 			{
-				if (!have_cached_relation_key ||
-					cached_database_oid != entry->key.database_oid ||
-					memcmp(cached_nspace, entry->key.nspace,
-						   sizeof(cached_nspace)) != 0)
-				{
-					cached_database_oid = entry->key.database_oid;
-					memcpy(cached_nspace, entry->key.nspace,
-						   sizeof(cached_nspace));
-					cached_relation_state =
-						get_relation_state(entry->key.database_oid,
-										   entry->relation_oid,
-										   entry->key.nspace,
-										   false);
-					have_cached_relation_key = true;
-				}
-				relation_state = cached_relation_state;
-				if (!cache_entry_is_current_locked(entry, relation_state))
+				if (!cache_entry_is_current_slot_locked(entry))
 				{
 					if (victim_count < PGLC_EVICTION_BATCH)
 						victims[victim_count++] = entry->key;
@@ -1068,11 +1545,11 @@ evict_cache_entries(void)
 				}
 			}
 
-			if (scanned >= PGLC_EVICTION_SAMPLE)
+			/* Finish the current chain before advancing the bucket cursor. */
+			if (scanned >= PGLC_EVICTION_SAMPLE &&
+				sequence.curEntry == NULL)
 			{
-				pglc_shared->eviction_bucket_cursor = sequence.curBucket;
-				if (sequence.curEntry != NULL)
-					pglc_shared->eviction_bucket_cursor++;
+				cache_partition->eviction_bucket_cursor = sequence.curBucket;
 				hash_seq_term(&sequence);
 				sample_limited = true;
 				break;
@@ -1082,7 +1559,7 @@ evict_cache_entries(void)
 			break;
 
 		/* hash_seq_search reached the end and terminated the scan. */
-		pglc_shared->eviction_bucket_cursor = 0;
+		cache_partition->eviction_bucket_cursor = 0;
 		if (victim_count > 0 || candidate_count > 0 || start_bucket == 0 ||
 			scanned >= PGLC_EVICTION_SAMPLE)
 			break;
@@ -1095,13 +1572,44 @@ evict_cache_entries(void)
 
 	for (i = 0; i < victim_count; i++)
 	{
-		if (hash_search(pglc_cache_hash, &victims[i], HASH_REMOVE, NULL) != NULL)
+		if (hash_search(cache_hash, &victims[i], HASH_REMOVE, NULL) != NULL)
 		{
-			pg_atomic_fetch_add_u64(&pglc_shared->evictions, 1);
+			pglc_worker_stat_add(&pglc_shared->evictions,
+							 offsetof(PgLocalCacheWorkerStats, evictions), 1);
+			if (cache_partition->entry_count > 0)
+				cache_partition->entry_count--;
+			Assert(pg_atomic_read_u64(&pglc_shared->cache_entry_count) > 0);
+			(void) pg_atomic_fetch_sub_u64(&pglc_shared->cache_entry_count, 1);
 			removed++;
 		}
 	}
 	return removed;
+}
+
+/*
+ * Reserve one global cache slot before inserting. fetch_add is a full-barrier
+ * RMW; undo reservations that observed a full cache before trying local
+ * eviction. The count may briefly include concurrent reservations, so stats
+ * clamp their reported value to cache_entries.
+ */
+static bool
+reserve_cache_entry(void)
+{
+	uint64		previous = pg_atomic_fetch_add_u64(
+			&pglc_shared->cache_entry_count, 1);
+
+	if (previous < (uint64) pglc_cache_entries)
+		return true;
+
+	(void) pg_atomic_fetch_sub_u64(&pglc_shared->cache_entry_count, 1);
+	return false;
+}
+
+static void
+release_cache_entry(void)
+{
+	Assert(pg_atomic_read_u64(&pglc_shared->cache_entry_count) > 0);
+	(void) pg_atomic_fetch_sub_u64(&pglc_shared->cache_entry_count, 1);
 }
 
 static PgLocalCacheCacheEntry *
@@ -1110,26 +1618,54 @@ get_cache_entry(Oid database_oid, Oid relation_oid,
 {
 	PgLocalCacheCacheKey cache_key;
 	PgLocalCacheCacheEntry *entry;
+	PgLocalCachePartition *cache_partition;
+	HTAB	   *cache_hash;
+	uint32		partition;
 	bool		found;
 
 	make_cache_key(&cache_key, database_oid, nspace, key, create);
-	entry = hash_search(pglc_cache_hash, &cache_key, HASH_FIND, NULL);
+	partition = pglc_cache_partition(&cache_key);
+	cache_partition = &pglc_shared->partitions[partition];
+	cache_hash = pglc_cache_hashes[partition];
+	entry = hash_search(cache_hash, &cache_key, HASH_FIND, NULL);
 	found = entry != NULL;
 	if (entry == NULL && create)
 	{
-		/* Enforce capacity explicitly; dynahash does not do so by default. */
-		if (hash_get_num_entries(pglc_cache_hash) >=
-			(uint64) pglc_cache_entries && !evict_cache_entries())
+		/* Enforce the local bound; dynahash does not do so by default. */
+		if (cache_partition->entry_count >= cache_partition->capacity &&
+			!evict_cache_entries(partition))
 		{
-			pg_atomic_fetch_add_u64(
-				&pglc_shared->cache_admission_rejections, 1);
+			pglc_worker_stat_add(
+				&pglc_shared->cache_admission_rejections,
+				offsetof(PgLocalCacheWorkerStats,
+							 cache_admission_rejections), 1);
 			return NULL;
 		}
-		entry = hash_search(pglc_cache_hash, &cache_key,
+		while (!reserve_cache_entry())
+		{
+			if (evict_cache_entries(partition) == 0)
+			{
+				pglc_worker_stat_add(
+					&pglc_shared->cache_admission_rejections,
+					offsetof(PgLocalCacheWorkerStats,
+							 cache_admission_rejections), 1);
+				return NULL;
+			}
+		}
+		entry = hash_search(cache_hash, &cache_key,
 							HASH_ENTER_NULL, &found);
 		if (entry == NULL)
-			pg_atomic_fetch_add_u64(
-				&pglc_shared->cache_admission_rejections, 1);
+		{
+			release_cache_entry();
+			pglc_worker_stat_add(
+				&pglc_shared->cache_admission_rejections,
+				offsetof(PgLocalCacheWorkerStats,
+						 cache_admission_rejections), 1);
+		}
+		else if (!found)
+			cache_partition->entry_count++;
+		else
+			release_cache_entry();
 	}
 
 	if (entry != NULL && !found)
@@ -1139,7 +1675,8 @@ get_cache_entry(Oid database_oid, Oid relation_oid,
 		memset(entry, 0, sizeof(*entry));
 		entry->key = saved_key;
 		entry->relation_oid = relation_oid;
-		entry->version = next_entry_generation();
+		entry->relation_slot = UINT32_MAX;
+		entry->version = next_entry_generation(partition);
 		pg_atomic_init_u64(&entry->last_access, 0);
 	}
 	else if (entry != NULL && create && OidIsValid(relation_oid) &&
@@ -1154,121 +1691,119 @@ get_cache_entry(Oid database_oid, Oid relation_oid,
 		 * relation become a hit for the new relation.
 		 */
 		entry->valid = false;
-		entry->version = next_entry_generation();
+		entry->version = next_entry_generation(partition);
 		entry->loading = false;
 		entry->load_id++;
 		entry->relation_incarnation = 0;
 		entry->load_relation_incarnation = 0;
+		entry->relation_slot = UINT32_MAX;
+		entry->slot_generation = 0;
 		entry->relation_oid = relation_oid;
 	}
 	return entry;
 }
 
 static uint64
-invalidate_namespace_locked(Oid database_oid, const char *nspace)
-{
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheCacheEntry *entry;
-	PgLocalCacheRelationState *relation_state;
-	uint64		count = 0;
-
-	relation_state = get_relation_state(database_oid, InvalidOid,
-									   nspace, false);
-	if (relation_state == NULL)
-		return 0;
-
-	hash_seq_init(&sequence, pglc_cache_hash);
-	while ((entry = hash_seq_search(&sequence)) != NULL)
-	{
-		if (entry->key.database_oid == database_oid &&
-			strncmp(entry->key.nspace, nspace, PGLC_NAMESPACE_MAX) == 0 &&
-			cache_entry_is_current_locked(entry, relation_state))
-			count++;
-	}
-	relation_state->version++;
-	return count;
-}
-
-static uint64
 invalidate_all_locked(void)
 {
-	pglc_shared->global_epoch++;
+	(void) pglc_atomic_fetch_add_checked(&pglc_shared->global_epoch, 1);
 	return 1;
 }
 
-/* Caller holds the cache lock exclusively. */
+/* Caller holds key's partition lock exclusively. */
 static bool
 cache_retire_malformed_entry_locked(const PgLocalCacheMapping *mapping,
-									const char *canonical_key)
+									const char *canonical_key,
+									uint32 partition)
 {
-	PgLocalCacheRelationState *relation_state;
 	PgLocalCacheCacheEntry *entry;
+	PgLocalCacheFenceSnapshot snapshot;
 
-	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
-									   mapping->nspace, false);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
 							mapping->nspace, canonical_key, false);
-	if (relation_state == NULL || entry == NULL ||
+	if (entry == NULL ||
 		entry->value_len <= PGLC_VALUE_MAX ||
-		!cache_entry_is_current_locked(entry, relation_state))
+		!read_fence_snapshot(mapping, entry, &snapshot) ||
+		!cache_entry_is_current_slot_locked(entry))
 		return false;
 
 	entry->valid = false;
 	entry->loading = false;
 	entry->load_id++;
-	entry->version = next_entry_generation();
+	entry->version = next_entry_generation(partition);
 	entry->source_xmin = InvalidTransactionId;
 	entry->source_observed_full_xid = 0;
-	pg_atomic_fetch_add_u64(&pglc_shared->invalidations, 1);
-	pg_atomic_fetch_add_u64(&pglc_shared->key_invalidations, 1);
+	pglc_worker_stat_add(&pglc_shared->invalidations,
+						 offsetof(PgLocalCacheWorkerStats, invalidations), 1);
+	pglc_worker_stat_add(&pglc_shared->key_invalidations,
+						 offsetof(PgLocalCacheWorkerStats, key_invalidations), 1);
 	return true;
 }
 
 static bool
 cache_lookup_locked(const PgLocalCacheMapping *mapping,
 					const char *canonical_key,
+					uint32 partition,
 					char *value, Size value_capacity, Size *value_len,
 					bool *negative, TransactionId *source_xmin,
 					PgLocalCacheReadToken *token,
 					bool create, bool *complete, bool *malformed)
 {
-	PgLocalCacheRelationState *relation_state;
 	PgLocalCacheCacheEntry *entry;
+	PgLocalCacheFenceSnapshot before;
+	PgLocalCacheFenceSnapshot after;
+	bool		stable;
 	bool		mapping_matches;
-	bool		mapping_current;
 	bool		hit = false;
 
 	*malformed = false;
-	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
-										mapping->nspace, create);
+	if (mapping->relation_slot >= (uint32) pglc_relation_states)
+	{
+		*complete = true;
+		token->cacheable = false;
+		return false;
+	}
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
-							mapping->nspace, canonical_key,
-							create && relation_state != NULL);
-	mapping_matches = relation_state != NULL && entry != NULL &&
-		relation_state->relation_oid == mapping->relation_oid &&
-		entry->relation_oid == mapping->relation_oid;
-	mapping_current =
-		pg_atomic_read_u64(&pglc_shared->config_generation) ==
-		mapping->config_generation;
+							mapping->nspace, canonical_key, create);
+	if (entry != NULL && create)
+	{
+		if (entry->dirty_writers != 0 &&
+			(entry->relation_slot != mapping->relation_slot ||
+			 entry->slot_generation != mapping->relation_slot_generation))
+			entry = NULL;
+		else if (entry->relation_oid != mapping->relation_oid ||
+				 entry->relation_slot != mapping->relation_slot ||
+				 entry->slot_generation != mapping->relation_slot_generation)
+		{
+			entry->valid = false;
+			entry->loading = false;
+			entry->load_id++;
+			entry->version = next_entry_generation(partition);
+			entry->relation_oid = mapping->relation_oid;
+			entry->relation_slot = mapping->relation_slot;
+			entry->slot_generation = mapping->relation_slot_generation;
+		}
+	}
+	mapping_matches = entry != NULL &&
+		entry->relation_oid == mapping->relation_oid &&
+		entry->relation_slot == mapping->relation_slot &&
+		entry->slot_generation == mapping->relation_slot_generation;
 	*complete = mapping_matches;
-
-	token->config_generation = mapping->config_generation;
-	token->global_version = pglc_shared->global_version;
-	token->relation_version = relation_state ? relation_state->version : 0;
-	token->relation_incarnation = relation_state ?
-		relation_state->relation_incarnation : 0;
-	token->key_version = entry ? entry->version : 0;
-	token->source_observed_full_xid =
-		entry ? entry->source_observed_full_xid : 0;
+	stable = read_fence_snapshot(mapping, entry, &before);
+	token->config_generation = before.config_generation;
+	token->global_version = before.global_version;
+	token->global_epoch = before.global_epoch;
+	token->relation_version = before.relation_version;
+	token->relation_incarnation = before.relation_incarnation;
+	token->slot_generation = before.slot_generation;
+	token->relation_slot = mapping->relation_slot;
+	token->key_version = entry != NULL ? entry->version : 0;
+	token->source_observed_full_xid = entry != NULL ?
+		entry->source_observed_full_xid : 0;
 	token->has_entry = entry != NULL;
-	token->cacheable = mapping_matches && mapping_current &&
-		pglc_shared->global_dirty_writers == 0 &&
-		relation_state->dirty_writers == 0 &&
-		!relation_state->pending_forget &&
-		entry->dirty_writers == 0;
+	token->cacheable = stable && mapping_matches;
 
-	if (token->cacheable &&
-		cache_entry_is_current_locked(entry, relation_state))
+	if (token->cacheable && cache_entry_is_current_slot_locked(entry))
 	{
 		uint64		access_clock;
 
@@ -1281,10 +1816,31 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 		}
 		else if (entry->value_len <= value_capacity)
 		{
+#ifdef PGLC_TEST_HOOKS
+			pglc_test_pause_at("before_lookup_copy");
+#endif
 			memcpy(value, entry->value, entry->value_len);
-			*value_len = entry->value_len;
-			*source_xmin = entry->source_xmin;
+#ifdef PGLC_TEST_HOOKS
+			pglc_test_pause_at("after_lookup_copy");
+#endif
 			hit = true;
+		}
+		if (hit)
+		{
+			stable = read_fence_snapshot(mapping, entry, &after);
+			hit = stable && fence_snapshots_equal(&before, &after);
+			if (hit && !entry->negative)
+			{
+				*value_len = entry->value_len;
+				*source_xmin = entry->source_xmin;
+			}
+			else if (!hit)
+			{
+				*negative = false;
+				*value_len = 0;
+				*source_xmin = InvalidTransactionId;
+				token->cacheable = false;
+			}
 		}
 		/*
 		 * Eviction only runs when admitting a new entry, and admission advances
@@ -1318,36 +1874,45 @@ pglc_cache_lookup_internal(const PgLocalCacheMapping *mapping,
 	*value_len = 0;
 	*source_xmin = InvalidTransactionId;
 
-	LWLockAcquire(pglc_shared->lock, LW_SHARED);
-	hit = cache_lookup_locked(mapping, canonical_key,
+	{
+		PgLocalCacheCacheKey cache_key;
+		uint32		partition;
+
+		make_cache_key(&cache_key, MyDatabaseId, mapping->nspace,
+					   canonical_key, false);
+		partition = pglc_cache_partition(&cache_key);
+		pglc_partition_lock_acquire(partition, LW_SHARED);
+	hit = cache_lookup_locked(mapping, canonical_key, partition,
 							  value, value_capacity, value_len,
 							  negative, source_xmin, token,
 							  false, &complete, &malformed);
-	LWLockRelease(pglc_shared->lock);
+		pglc_partition_lock_release(partition);
 
 	if (malformed)
 	{
 		/* Recheck, retire and refresh the token while holding the write lock. */
 		*negative = false;
 		*value_len = 0;
-		LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-		(void) cache_retire_malformed_entry_locked(mapping, canonical_key);
-		hit = cache_lookup_locked(mapping, canonical_key,
+		pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
+		(void) cache_retire_malformed_entry_locked(mapping, canonical_key,
+											 partition);
+		hit = cache_lookup_locked(mapping, canonical_key, partition,
 								  value, value_capacity, value_len,
 								  negative, source_xmin, token,
 								  false, &complete, &malformed);
-		LWLockRelease(pglc_shared->lock);
+		pglc_partition_lock_release(partition);
 	}
 	else if (!complete)
 	{
 		*negative = false;
 		*value_len = 0;
-		LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-		hit = cache_lookup_locked(mapping, canonical_key,
+		pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
+		hit = cache_lookup_locked(mapping, canonical_key, partition,
 								  value, value_capacity, value_len,
 								  negative, source_xmin, token,
 								  true, &complete, &malformed);
-		LWLockRelease(pglc_shared->lock);
+		pglc_partition_lock_release(partition);
+	}
 	}
 
 #ifdef PGLC_TEST_HOOKS
@@ -1357,12 +1922,15 @@ pglc_cache_lookup_internal(const PgLocalCacheMapping *mapping,
 
 	if (count_stats && hit)
 	{
-		pg_atomic_fetch_add_u64(&pglc_shared->cache_hits, 1);
+		pglc_worker_stat_add(&pglc_shared->cache_hits,
+						 offsetof(PgLocalCacheWorkerStats, cache_hits), 1);
 		if (*negative)
-			pg_atomic_fetch_add_u64(&pglc_shared->negative_hits, 1);
+			pglc_worker_stat_add(&pglc_shared->negative_hits,
+							 offsetof(PgLocalCacheWorkerStats, negative_hits), 1);
 	}
 	else if (count_stats)
-		pg_atomic_fetch_add_u64(&pglc_shared->cache_misses, 1);
+		pglc_worker_stat_add(&pglc_shared->cache_misses,
+						 offsetof(PgLocalCacheWorkerStats, cache_misses), 1);
 	return hit;
 }
 
@@ -1395,8 +1963,9 @@ pglc_cache_retire_positive(const PgLocalCacheMapping *mapping,
 						   const PgLocalCacheReadToken *token,
 						   TransactionId expected_xmin)
 {
-	PgLocalCacheRelationState *relation_state;
 	PgLocalCacheCacheEntry *entry;
+	PgLocalCacheFenceSnapshot snapshot;
+	uint32		partition;
 	bool		retired = false;
 
 	pglc_require_preload();
@@ -1404,24 +1973,20 @@ pglc_cache_retire_positive(const PgLocalCacheMapping *mapping,
 		mapping->config_generation != token->config_generation)
 		return false;
 
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
-										mapping->nspace, false);
+	partition = cache_partition_for(MyDatabaseId, mapping->nspace,
+									 canonical_key);
+	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("after_store_lock");
+#endif
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
 							mapping->nspace, canonical_key, false);
-	if (relation_state != NULL && entry != NULL &&
-		pg_atomic_read_u64(&pglc_shared->config_generation) ==
-			token->config_generation &&
-		relation_state->relation_oid == mapping->relation_oid &&
+	if (entry != NULL && read_fence_snapshot(mapping, entry, &snapshot) &&
+		fence_snapshot_matches_token(&snapshot, token) &&
 		entry->relation_oid == mapping->relation_oid &&
-		pglc_shared->global_dirty_writers == 0 &&
-		relation_state->dirty_writers == 0 && entry->dirty_writers == 0 &&
-		pglc_shared->global_version == token->global_version &&
-		relation_state->version == token->relation_version &&
-		relation_state->relation_incarnation ==
-		token->relation_incarnation &&
-		entry->version == token->key_version &&
-		cache_entry_is_current_locked(entry, relation_state) &&
+		entry->relation_slot == mapping->relation_slot &&
+		entry->slot_generation == mapping->relation_slot_generation &&
+		cache_entry_is_current_slot_locked(entry) &&
 		!entry->negative &&
 		TransactionIdEquals(entry->source_xmin, expected_xmin) &&
 		entry->source_observed_full_xid == token->source_observed_full_xid)
@@ -1429,12 +1994,12 @@ pglc_cache_retire_positive(const PgLocalCacheMapping *mapping,
 		entry->valid = false;
 		entry->loading = false;
 		entry->load_id++;
-		entry->version = next_entry_generation();
+		entry->version = next_entry_generation(partition);
 		entry->source_xmin = InvalidTransactionId;
 		entry->source_observed_full_xid = 0;
 		retired = true;
 	}
-	LWLockRelease(pglc_shared->lock);
+	pglc_partition_lock_release(partition);
 	return retired;
 }
 
@@ -1444,10 +2009,12 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 				Size value_len, bool negative, uint64 load_id,
 				TransactionId source_xmin)
 {
-	PgLocalCacheRelationState *relation_state;
 	PgLocalCacheCacheEntry *entry;
+	PgLocalCacheFenceSnapshot before;
+	PgLocalCacheFenceSnapshot after;
 	bool		stored = false;
 	uint64		observed_full_xid;
+	uint32		partition;
 
 	if (!token->cacheable || !token->has_entry || value_len > PGLC_VALUE_MAX ||
 		mapping->config_generation != token->config_generation ||
@@ -1469,25 +2036,19 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 	pglc_test_pause_at("before_store");
 #endif
 
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
-										mapping->nspace, false);
+	partition = cache_partition_for(MyDatabaseId, mapping->nspace,
+									 canonical_key);
+	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
 							mapping->nspace, canonical_key, false);
 
-	if (relation_state != NULL && entry != NULL &&
-		pg_atomic_read_u64(&pglc_shared->config_generation) ==
-		token->config_generation &&
-		relation_state->relation_oid == mapping->relation_oid &&
+	if (entry != NULL && read_fence_snapshot(mapping, entry, &before) &&
+		fence_snapshot_matches_token(&before, token) &&
 		entry->relation_oid == mapping->relation_oid &&
-		pglc_shared->global_dirty_writers == 0 &&
-		relation_state->dirty_writers == 0 &&
-		entry->dirty_writers == 0 &&
+		entry->relation_oid == mapping->relation_oid &&
+		entry->relation_slot == mapping->relation_slot &&
+		entry->slot_generation == mapping->relation_slot_generation &&
 		load_id != 0 && entry->loading && entry->load_id == load_id &&
-		pglc_shared->global_version == token->global_version &&
-		relation_state->version == token->relation_version &&
-		relation_state->relation_incarnation ==
-		token->relation_incarnation &&
 		entry->load_relation_incarnation == token->relation_incarnation &&
 		entry->version == token->key_version)
 	{
@@ -1496,27 +2057,47 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 		entry->source_xmin = negative ? InvalidTransactionId : source_xmin;
 		entry->source_observed_full_xid = observed_full_xid;
 		if (!negative && value_len > 0)
+		{
+#ifdef PGLC_TEST_HOOKS
+			pglc_test_pause_at("before_store_copy");
+#endif
 			memcpy(entry->value, value, value_len);
-		entry->global_epoch = pglc_shared->global_epoch;
+#ifdef PGLC_TEST_HOOKS
+			pglc_test_pause_at("after_store_copy");
+#endif
+		}
+		entry->global_epoch = token->global_epoch;
 		entry->relation_version = token->relation_version;
 		entry->relation_incarnation = token->relation_incarnation;
+		entry->relation_slot = token->relation_slot;
+		entry->slot_generation = token->slot_generation;
 		/*
 		 * The first successful fill wins.  Moving to a fresh generation
 		 * prevents a timed-out or orphaned former loader from overwriting it.
 		 * The successful owner fill also completes its outstanding lease.
 		 */
-		entry->version = next_entry_generation();
+		entry->version = next_entry_generation(partition);
 		entry->loading = false;
 		entry->load_id++;
+		pg_write_barrier();
 		entry->valid = true;
-		stored = true;
+		stored = read_fence_snapshot(mapping, entry, &after) &&
+			fence_snapshot_fences_match_token(&after, token) &&
+			entry->valid;
+		if (!stored)
+		{
+			entry->valid = false;
+			entry->loading = false;
+			entry->load_id++;
+		}
 		pg_atomic_write_u64(
 			&entry->last_access,
 			pg_atomic_fetch_add_u64(&pglc_shared->clock, 1) + 1);
 	}
-	LWLockRelease(pglc_shared->lock);
+	pglc_partition_lock_release(partition);
 	if (stored && negative)
-		pg_atomic_fetch_add_u64(&pglc_shared->negative_writes, 1);
+		pglc_worker_stat_add(&pglc_shared->negative_writes,
+						 offsetof(PgLocalCacheWorkerStats, negative_writes), 1);
 	return stored;
 }
 
@@ -1526,10 +2107,12 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 					  const PgLocalCacheReadToken *token,
 					  uint64 *load_id)
 {
-	PgLocalCacheRelationState *relation_state;
 	PgLocalCacheCacheEntry *entry;
+	PgLocalCacheFenceSnapshot before;
+	PgLocalCacheFenceSnapshot after;
 	PgLocalCacheLoadClaim result = PGLC_LOAD_BYPASS;
 	TimestampTz now = GetCurrentTimestamp();
+	uint32		partition;
 
 	*load_id = 0;
 	if (!token->cacheable || !token->has_entry)
@@ -1539,23 +2122,22 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 	pglc_test_pause_at("before_claim");
 #endif
 
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
-									   mapping->nspace, false);
+	partition = cache_partition_for(MyDatabaseId, mapping->nspace,
+									 canonical_key);
+	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("after_claim_lock");
+#endif
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
 							mapping->nspace, canonical_key, false);
-	if (relation_state == NULL || entry == NULL ||
-		mapping->config_generation != token->config_generation ||
-		pg_atomic_read_u64(&pglc_shared->config_generation) !=
-			token->config_generation ||
-		relation_state->relation_oid != mapping->relation_oid ||
+	if (entry == NULL ||
+		!read_fence_snapshot(mapping, entry, &before) ||
+		!fence_snapshot_fences_match_token(&before, token) ||
 		entry->relation_oid != mapping->relation_oid ||
-		pglc_shared->global_dirty_writers != 0 ||
-		relation_state->dirty_writers != 0 || entry->dirty_writers != 0 ||
-		pglc_shared->global_version != token->global_version ||
-		relation_state->version != token->relation_version ||
-		relation_state->relation_incarnation !=
-		token->relation_incarnation)
+		entry->relation_slot != mapping->relation_slot ||
+		entry->slot_generation != mapping->relation_slot_generation ||
+		entry->relation_oid != mapping->relation_oid ||
+		entry->dirty_writers != 0)
 		goto done;
 
 	/*
@@ -1569,7 +2151,7 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 	 * relation and dirty-writer fences above stay conservative because they
 	 * represent transaction invalidation, not an owner completing this load.
 	 */
-	if (cache_entry_is_current_locked(entry, relation_state))
+	if (cache_entry_is_current_slot_locked(entry))
 	{
 		result = PGLC_LOAD_RETRY;
 		goto done;
@@ -1591,7 +2173,7 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 		entry->load_id++;
 	}
 
-	if (cache_load_is_active_locked(entry, now))
+	if (cache_load_is_active_locked(entry, now, partition))
 	{
 		result = PGLC_LOAD_WAIT;
 		goto done;
@@ -1614,10 +2196,28 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 		entry->load_id = 1;
 	*load_id = entry->load_id;
 	result = PGLC_LOAD_OWNER;
-	pg_atomic_fetch_add_u64(&pglc_shared->singleflight_leaders, 1);
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("after_claim_owner");
+#endif
+	pg_read_barrier();
+	if (!read_fence_snapshot(mapping, entry, &after) ||
+		!fence_snapshot_matches_token(&after, token))
+	{
+		if (entry->loading && entry->load_id == *load_id)
+		{
+			entry->loading = false;
+			entry->load_id++;
+		}
+		*load_id = 0;
+		result = PGLC_LOAD_RETRY;
+	}
+	if (result == PGLC_LOAD_OWNER)
+		pglc_worker_stat_add(&pglc_shared->singleflight_leaders,
+						 offsetof(PgLocalCacheWorkerStats,
+								  singleflight_leaders), 1);
 
 done:
-	LWLockRelease(pglc_shared->lock);
+	pglc_partition_lock_release(partition);
 	return result;
 }
 
@@ -1628,12 +2228,15 @@ pglc_cache_release_load(const PgLocalCacheMapping *mapping,
 						uint64 load_id)
 {
 	PgLocalCacheCacheEntry *entry;
+	uint32		partition;
 
 	pglc_require_preload();
 	if (load_id == 0 || claim_token == NULL ||
 		!claim_token->cacheable || !claim_token->has_entry)
 		return;
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
+	partition = cache_partition_for(MyDatabaseId, mapping->nspace,
+									 canonical_key);
+	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
 							mapping->nspace, canonical_key, false);
 	if (entry != NULL &&
@@ -1641,6 +2244,8 @@ pglc_cache_release_load(const PgLocalCacheMapping *mapping,
 		strcmp(entry->key.nspace, mapping->nspace) == 0 &&
 		strcmp(entry->key.key, canonical_key) == 0 &&
 		entry->relation_oid == mapping->relation_oid &&
+		entry->relation_slot == mapping->relation_slot &&
+		entry->slot_generation == mapping->relation_slot_generation &&
 		entry->version == claim_token->key_version &&
 		entry->loading && entry->load_id == load_id &&
 		entry->load_global_version == claim_token->global_version &&
@@ -1649,25 +2254,28 @@ pglc_cache_release_load(const PgLocalCacheMapping *mapping,
 		claim_token->relation_incarnation &&
 		entry->load_key_version == claim_token->key_version)
 		entry->loading = false;
-	LWLockRelease(pglc_shared->lock);
+	pglc_partition_lock_release(partition);
 }
 
 void
 pglc_note_singleflight_waiter(void)
 {
-	pg_atomic_fetch_add_u64(&pglc_shared->singleflight_waiters, 1);
+	pglc_worker_stat_add(&pglc_shared->singleflight_waiters,
+					 offsetof(PgLocalCacheWorkerStats, singleflight_waiters), 1);
 }
 
 void
 pglc_note_singleflight_reuse(void)
 {
-	pg_atomic_fetch_add_u64(&pglc_shared->singleflight_reuses, 1);
+	pglc_worker_stat_add(&pglc_shared->singleflight_reuses,
+					 offsetof(PgLocalCacheWorkerStats, singleflight_reuses), 1);
 }
 
 void
 pglc_note_singleflight_timeout(void)
 {
-	pg_atomic_fetch_add_u64(&pglc_shared->singleflight_timeouts, 1);
+	pglc_worker_stat_add(&pglc_shared->singleflight_timeouts,
+					 offsetof(PgLocalCacheWorkerStats, singleflight_timeouts), 1);
 }
 
 bool
@@ -1679,14 +2287,99 @@ pglc_current_transaction_is_dirty(void)
 uint64
 pglc_cache_invalidate_namespace(Oid database_oid, const char *nspace)
 {
+	PgLocalCacheRelationState *state;
+	uint32		slot_index = UINT32_MAX;
+	uint64		slot_generation = 0;
+	uint64		relation_incarnation = 0;
+	uint64		relation_version = 0;
+	uint64		global_epoch = 0;
 	uint64		count;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	count = invalidate_namespace_locked(database_oid, nspace);
-	LWLockRelease(pglc_shared->lock);
-	pg_atomic_fetch_add_u64(&pglc_shared->invalidations, 1);
-	pg_atomic_fetch_add_u64(&pglc_shared->table_invalidations, 1);
+	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
+	state = get_relation_state(database_oid, InvalidOid, nspace, false);
+	if (state != NULL)
+	{
+		if (state->identity_pins == (uint64) -1)
+			state = NULL;
+		else
+			state->identity_pins++;
+	}
+	if (state != NULL)
+	{
+		slot_index = state->slot;
+		slot_generation = state->slot_generation;
+	}
+	LWLockRelease(pglc_shared->registry_lock);
+	if (slot_index != UINT32_MAX)
+	{
+		PgLocalCacheRelationSlot *slot = &pglc_relation_slots[slot_index];
+
+		if (pg_atomic_read_u64(&slot->generation) == slot_generation)
+		{
+			relation_incarnation = pg_atomic_read_u64(&slot->incarnation);
+			global_epoch = pg_atomic_read_u64(&pglc_shared->global_epoch);
+			(void) pglc_atomic_fetch_add_checked(&slot->dirty_writers, 1);
+			relation_version =
+				pglc_atomic_fetch_add_checked(&slot->version, 1);
+		}
+	}
+	count = 0;
+	{
+		uint32		partition;
+
+		for (partition = 0; partition < (uint32) pglc_cache_partition_count();
+			 partition++)
+		{
+			HASH_SEQ_STATUS sequence;
+			PgLocalCacheCacheEntry *entry;
+
+			pglc_partition_lock_acquire(partition, LW_SHARED);
+			hash_seq_init(&sequence, pglc_cache_hashes[partition]);
+			while ((entry = hash_seq_search(&sequence)) != NULL)
+				if (entry->key.database_oid == database_oid &&
+					strncmp(entry->key.nspace, nspace,
+							PGLC_NAMESPACE_MAX) == 0 &&
+					slot_index != UINT32_MAX && entry->valid &&
+					entry->relation_slot == slot_index &&
+					entry->slot_generation == slot_generation &&
+					entry->global_epoch == global_epoch &&
+					entry->relation_incarnation == relation_incarnation &&
+					entry->relation_version == relation_version)
+					count++;
+			pglc_partition_lock_release(partition);
+		}
+	}
+	if (slot_index != UINT32_MAX)
+	{
+		PgLocalCacheRelationSlot *slot = &pglc_relation_slots[slot_index];
+
+		if (pg_atomic_read_u64(&slot->generation) == slot_generation)
+		{
+			(void) pglc_atomic_fetch_add_checked(&slot->version, 1);
+			(void) pglc_atomic_fetch_sub_checked(&slot->dirty_writers, 1);
+		}
+		LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
+		state = get_relation_state(database_oid, InvalidOid, nspace, false);
+		if (state != NULL && state->slot == slot_index &&
+			state->slot_generation == slot_generation)
+		{
+			release_relation_identity_pin(state);
+			if (state->identity_pins == 0 &&
+				pg_atomic_read_u64(&slot->dirty_writers) == 0 &&
+				state->pending_forget)
+			{
+				release_relation_slot(state);
+				(void) hash_search(pglc_relation_hash, &state->key,
+								   HASH_REMOVE, NULL);
+			}
+		}
+		LWLockRelease(pglc_shared->registry_lock);
+	}
+	pglc_worker_stat_add(&pglc_shared->invalidations,
+						 offsetof(PgLocalCacheWorkerStats, invalidations), 1);
+	pglc_worker_stat_add(&pglc_shared->table_invalidations,
+						 offsetof(PgLocalCacheWorkerStats, table_invalidations), 1);
 	return count;
 }
 
@@ -1694,122 +2387,110 @@ uint64
 pglc_cache_invalidate_key(const PgLocalCacheMapping *mapping,
 						  const char *canonical_key)
 {
-	PgLocalCacheRelationState *relation_state;
 	PgLocalCacheCacheEntry *entry;
 	uint64		count = 0;
+	uint32		partition;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	relation_state = get_relation_state(MyDatabaseId, mapping->relation_oid,
-									   mapping->nspace, false);
+	partition = cache_partition_for(MyDatabaseId, mapping->nspace,
+									 canonical_key);
+	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
 						mapping->nspace, canonical_key, false);
-	if (entry != NULL &&
-		cache_entry_is_current_locked(entry, relation_state))
+	if (entry != NULL && cache_entry_is_current_slot_locked(entry))
 		count = 1;
 	if (entry != NULL)
 	{
 		entry->valid = false;
 		entry->loading = false;
 		entry->load_id++;
-		entry->version = next_entry_generation();
+		entry->version = next_entry_generation(partition);
 		entry->source_xmin = InvalidTransactionId;
 		entry->source_observed_full_xid = 0;
 	}
-	LWLockRelease(pglc_shared->lock);
-	pg_atomic_fetch_add_u64(&pglc_shared->invalidations, count);
-	pg_atomic_fetch_add_u64(&pglc_shared->key_invalidations, count);
+	pglc_partition_lock_release(partition);
+	pglc_worker_stat_add(&pglc_shared->invalidations,
+						 offsetof(PgLocalCacheWorkerStats, invalidations), count);
+	pglc_worker_stat_add(&pglc_shared->key_invalidations,
+						 offsetof(PgLocalCacheWorkerStats, key_invalidations), count);
 	return count;
 }
 
 uint64
 pglc_cache_invalidate_database(Oid database_oid)
 {
-	HASH_SEQ_STATUS cache_sequence;
 	HASH_SEQ_STATUS relation_sequence;
 	PgLocalCacheCacheEntry *entry;
 	PgLocalCacheRelationState *relation_state;
-	PgLocalCacheRelationState *cached_relation_state = NULL;
-	Oid			cached_database_oid = InvalidOid;
-	char		cached_nspace[PGLC_NAMESPACE_MAX];
-	bool		have_cached_relation_key = false;
+	uint32		partition;
 	uint64		count = 0;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	hash_seq_init(&cache_sequence, pglc_cache_hash);
-	while ((entry = hash_seq_search(&cache_sequence)) != NULL)
+	for (partition = 0; partition < (uint32) pglc_cache_partition_count();
+		 partition++)
 	{
-		if (entry->key.database_oid != database_oid)
-			continue;
-		if (!have_cached_relation_key ||
-			cached_database_oid != entry->key.database_oid ||
-			memcmp(cached_nspace, entry->key.nspace,
-				   sizeof(cached_nspace)) != 0)
-		{
-			cached_database_oid = entry->key.database_oid;
-			memcpy(cached_nspace, entry->key.nspace, sizeof(cached_nspace));
-			cached_relation_state =
-				get_relation_state(database_oid,
-								   entry->relation_oid,
-								   entry->key.nspace, false);
-			have_cached_relation_key = true;
-		}
-		relation_state = cached_relation_state;
-		if (cache_entry_is_current_locked(entry, relation_state))
-			count++;
+		HASH_SEQ_STATUS cache_sequence;
+
+		pglc_partition_lock_acquire(partition, LW_SHARED);
+		hash_seq_init(&cache_sequence, pglc_cache_hashes[partition]);
+		while ((entry = hash_seq_search(&cache_sequence)) != NULL)
+			if (entry->key.database_oid == database_oid &&
+				cache_entry_is_current_slot_locked(entry))
+				count++;
+		pglc_partition_lock_release(partition);
 	}
+	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
 	hash_seq_init(&relation_sequence, pglc_relation_hash);
 	while ((relation_state = hash_seq_search(&relation_sequence)) != NULL)
 	{
 		if (relation_state->key.database_oid == database_oid)
-			relation_state->version++;
+		{
+			PgLocalCacheRelationSlot *slot =
+				&pglc_relation_slots[relation_state->slot];
+
+			(void) pglc_atomic_fetch_add_checked(&slot->dirty_writers, 1);
+			(void) pglc_atomic_fetch_add_checked(&slot->version, 1);
+			(void) pglc_atomic_fetch_add_checked(&slot->version, 1);
+			(void) pglc_atomic_fetch_sub_checked(&slot->dirty_writers, 1);
+		}
 	}
-	LWLockRelease(pglc_shared->lock);
-	pg_atomic_fetch_add_u64(&pglc_shared->invalidations, count);
-	pg_atomic_fetch_add_u64(&pglc_shared->table_invalidations, 1);
+	LWLockRelease(pglc_shared->registry_lock);
+	pglc_worker_stat_add(&pglc_shared->invalidations,
+						 offsetof(PgLocalCacheWorkerStats, invalidations), count);
+	pglc_worker_stat_add(&pglc_shared->table_invalidations,
+						 offsetof(PgLocalCacheWorkerStats, table_invalidations), 1);
 	return count;
 }
 
 uint64
 pglc_cache_invalidate_all(void)
 {
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheCacheEntry *entry;
-	PgLocalCacheRelationState *relation_state;
-	PgLocalCacheRelationState *cached_relation_state = NULL;
-	Oid			cached_database_oid = InvalidOid;
-	char		cached_nspace[PGLC_NAMESPACE_MAX];
-	bool		have_cached_relation_key = false;
+	uint32		partition;
 	uint64		count = 0;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	hash_seq_init(&sequence, pglc_cache_hash);
-	while ((entry = hash_seq_search(&sequence)) != NULL)
-	{
-		if (!have_cached_relation_key ||
-			cached_database_oid != entry->key.database_oid ||
-			memcmp(cached_nspace, entry->key.nspace,
-				   sizeof(cached_nspace)) != 0)
-		{
-			cached_database_oid = entry->key.database_oid;
-			memcpy(cached_nspace, entry->key.nspace, sizeof(cached_nspace));
-			cached_relation_state =
-				get_relation_state(entry->key.database_oid,
-								   entry->relation_oid,
-								   entry->key.nspace, false);
-			have_cached_relation_key = true;
-		}
-		relation_state = cached_relation_state;
-		if (cache_entry_is_current_locked(entry, relation_state))
-			count++;
-	}
+	(void) pglc_atomic_fetch_add_checked(&pglc_shared->global_dirty_writers, 1);
 	advance_global_version_locked();
+	for (partition = 0; partition < (uint32) pglc_cache_partition_count();
+		 partition++)
+	{
+		HASH_SEQ_STATUS sequence;
+		PgLocalCacheCacheEntry *entry;
+
+		pglc_partition_lock_acquire(partition, LW_SHARED);
+		hash_seq_init(&sequence, pglc_cache_hashes[partition]);
+		while ((entry = hash_seq_search(&sequence)) != NULL)
+			if (cache_entry_is_current_slot_locked(entry))
+				count++;
+		pglc_partition_lock_release(partition);
+	}
 	(void) invalidate_all_locked();
-	LWLockRelease(pglc_shared->lock);
-	pg_atomic_fetch_add_u64(&pglc_shared->invalidations, count);
-	pg_atomic_fetch_add_u64(&pglc_shared->table_invalidations, 1);
+	advance_global_version_locked();
+	(void) pglc_atomic_fetch_sub_checked(&pglc_shared->global_dirty_writers, 1);
+	pglc_worker_stat_add(&pglc_shared->invalidations,
+						 offsetof(PgLocalCacheWorkerStats, invalidations), count);
+	pglc_worker_stat_add(&pglc_shared->table_invalidations,
+						 offsetof(PgLocalCacheWorkerStats, table_invalidations), 1);
 	return count;
 }
 
@@ -1840,13 +2521,22 @@ pglc_sync_cache_enabled(void)
 void
 pglc_note_database_read(void)
 {
-	pg_atomic_fetch_add_u64(&pglc_shared->database_reads, 1);
+	pglc_worker_stat_add(&pglc_shared->database_reads,
+					 offsetof(PgLocalCacheWorkerStats, database_reads), 1);
+}
+
+void
+pglc_set_worker_slot(int worker_slot)
+{
+	pglc_worker_slot =
+		worker_slot >= 0 && worker_slot < PGLC_MAX_WORKERS ? worker_slot : -1;
 }
 
 void
 pglc_note_database_write(void)
 {
-	pg_atomic_fetch_add_u64(&pglc_shared->database_writes, 1);
+	pglc_worker_stat_add(&pglc_shared->database_writes,
+						 offsetof(PgLocalCacheWorkerStats, database_writes), 1);
 }
 
 void
@@ -1987,7 +2677,11 @@ collect_dirty(PgLocalCacheDirtyKind kind, Oid database_oid, Oid relation_oid,
 	{
 		entry->relation_oid = relation_oid;
 		entry->shared_marker_reserved = false;
-		entry->shared_relation_fallback = false;
+		entry->shared_relation_reserved = false;
+		entry->shared_relation_fence_published = false;
+		entry->shared_identity_pin = false;
+		entry->shared_slot = UINT32_MAX;
+		entry->shared_slot_generation = 0;
 		entry->shared_relation_incarnation = 0;
 		entry->target_relation_incarnation = 0;
 	}
@@ -2024,6 +2718,40 @@ pglc_collect_key(Oid database_oid, Oid relation_oid,
 
 #ifdef PGLC_TEST_HOOKS
 Datum
+pg_local_cache_test_partition_lock_violations(PG_FUNCTION_ARGS)
+{
+	pglc_require_preload();
+	PG_RETURN_INT64((int64) pg_atomic_read_u64(
+		&pglc_shared->test_partition_lock_violations));
+}
+
+Datum
+pg_local_cache_test_partition(PG_FUNCTION_ARGS)
+{
+	Oid			database_oid = PG_GETARG_OID(0);
+	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(2));
+
+	pglc_require_preload();
+	PG_RETURN_INT32((int32) cache_partition_for(database_oid, nspace, key));
+}
+
+Datum
+pg_local_cache_test_hash_bucket(PG_FUNCTION_ARGS)
+{
+	Oid			database_oid = PG_GETARG_OID(0);
+	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	PgLocalCacheCacheKey cache_key;
+
+	pglc_require_preload();
+	make_cache_key(&cache_key, database_oid, nspace, key, false);
+	/* dynahash selects its buckets from the hash value's low-order bits. */
+	PG_RETURN_INT32((int32) (pglc_cache_key_hash(&cache_key,
+											 sizeof(cache_key)) & 0xff));
+}
+
+Datum
 pg_local_cache_test_collect_key(PG_FUNCTION_ARGS)
 {
 	Oid			relation_oid = PG_GETARG_OID(0);
@@ -2043,10 +2771,11 @@ pg_local_cache_test_relation_incarnation(PG_FUNCTION_ARGS)
 	uint64		incarnation;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
+	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
 	state = get_relation_state(MyDatabaseId, relation_oid, nspace, true);
-	incarnation = state != NULL ? state->relation_incarnation : 0;
-	LWLockRelease(pglc_shared->lock);
+	incarnation = state != NULL ? pg_atomic_read_u64(
+		&pglc_relation_slots[state->slot].incarnation) : 0;
+	LWLockRelease(pglc_shared->registry_lock);
 	PG_RETURN_INT64((int64) incarnation);
 }
 
@@ -2059,11 +2788,12 @@ pg_local_cache_test_relation_identity_pins(PG_FUNCTION_ARGS)
 	int64		pins;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_SHARED);
+	LWLockAcquire(pglc_shared->registry_lock, LW_SHARED);
 	state = get_relation_state(MyDatabaseId, relation_oid, nspace, false);
+	/* Missing state means no outstanding pins for this relation identity. */
 	pins = state != NULL && state->relation_oid == relation_oid ?
-		(int64) state->identity_pins : -1;
-	LWLockRelease(pglc_shared->lock);
+		(int64) state->identity_pins : 0;
+	LWLockRelease(pglc_shared->registry_lock);
 	PG_RETURN_INT64(pins);
 }
 
@@ -2076,34 +2806,39 @@ pg_local_cache_test_recreate_relation_state(PG_FUNCTION_ARGS)
 	PgLocalCacheRelationState *state;
 	uint64		version;
 	uint64		incarnation;
+	PgLocalCacheRelationSlot *slot;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
+	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
 	state = get_relation_state(MyDatabaseId, relation_oid, nspace, false);
 	if (state == NULL || state->relation_oid != relation_oid ||
 		state->pending_forget || state->identity_pins != 0 ||
-		state->dirty_writers != 0)
+		pg_atomic_read_u64(
+			&pglc_relation_slots[state->slot].dirty_writers) != 0)
 	{
-		LWLockRelease(pglc_shared->lock);
+		LWLockRelease(pglc_shared->registry_lock);
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("test relation state cannot be recreated while pinned")));
 	}
-	version = state->version;
+	slot = &pglc_relation_slots[state->slot];
+	version = pg_atomic_read_u64(&slot->version);
 	make_relation_key(&key, MyDatabaseId, nspace);
+	release_relation_slot(state);
 	(void) hash_search(pglc_relation_hash, &key, HASH_REMOVE, NULL);
 	state = get_relation_state(MyDatabaseId, relation_oid, nspace, true);
 	if (state == NULL)
 	{
-		LWLockRelease(pglc_shared->lock);
+		LWLockRelease(pglc_shared->registry_lock);
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("test relation state could not be recreated")));
 	}
-	/* Keep every read-token tag except the incarnation unchanged. */
-	state->version = version;
-	incarnation = state->relation_incarnation;
-	LWLockRelease(pglc_shared->lock);
+	/* Keep relation version stable; slot generation also fences old tokens. */
+	pg_atomic_write_u64(&pglc_relation_slots[state->slot].version, version);
+	incarnation = pg_atomic_read_u64(
+		&pglc_relation_slots[state->slot].incarnation);
+	LWLockRelease(pglc_shared->registry_lock);
 	PG_RETURN_INT64((int64) incarnation);
 }
 
@@ -2128,17 +2863,19 @@ pg_local_cache_test_corrupt_value_len(PG_FUNCTION_ARGS)
 	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(2));
 	PgLocalCacheCacheEntry *entry;
+	uint32		partition;
 	bool		corrupted = false;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
+	partition = cache_partition_for(MyDatabaseId, nspace, key);
+	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 	entry = get_cache_entry(MyDatabaseId, relation_oid, nspace, key, false);
 	if (entry != NULL && entry->relation_oid == relation_oid && entry->valid)
 	{
 		entry->value_len = PGLC_VALUE_MAX + 1;
 		corrupted = true;
 	}
-	LWLockRelease(pglc_shared->lock);
+	pglc_partition_lock_release(partition);
 	PG_RETURN_BOOL(corrupted);
 }
 #endif
@@ -2186,199 +2923,205 @@ local_has_global_dirty(void)
 	return false;
 }
 
-static bool
-reserve_relation_handle_locked(PgLocalCacheLocalDirtyEntry *local,
-							   bool keyed_fallback)
+static uint32
+local_dirty_partition(const PgLocalCacheLocalDirtyEntry *local)
 {
-	PgLocalCacheRelationState *state;
+	PgLocalCacheCacheKey key;
 
-	state = get_relation_state(local->key.database_oid,
-								local->relation_oid,
-								local->key.nspace, true);
-	if (state != NULL &&
-		(!OidIsValid(local->relation_oid) ||
-		 state->relation_oid == local->relation_oid))
-		local->target_relation_incarnation = state->relation_incarnation;
-	if (state == NULL ||
-		(OidIsValid(local->relation_oid) &&
-		 state->relation_oid != local->relation_oid) ||
-		state->pending_forget || state->identity_pins == (uint64) -1 ||
-		state->dirty_writers == (uint32) -1)
+	if (local->key.kind != PGLC_DIRTY_KEY)
+		return UINT32_MAX;
+	make_cache_key(&key, local->key.database_oid, local->key.nspace,
+				   local->key.key, false);
+	return pglc_cache_partition(&key);
+}
+
+static int
+compare_local_dirty_partitions(const void *left, const void *right)
+{
+	const PgLocalCacheLocalDirtyEntry *l =
+		*(PgLocalCacheLocalDirtyEntry *const *) left;
+	const PgLocalCacheLocalDirtyEntry *r =
+		*(PgLocalCacheLocalDirtyEntry *const *) right;
+	uint32		lp = local_dirty_partition(l);
+	uint32		rp = local_dirty_partition(r);
+
+	return lp < rp ? -1 : lp > rp ? 1 : 0;
+}
+
+static PgLocalCacheLocalDirtyEntry **
+ordered_local_dirty_entries(Size *count)
+{
+	HASH_SEQ_STATUS sequence;
+	PgLocalCacheLocalDirtyEntry *local;
+	Size		index = 0;
+
+	if (local_dirty_ordered == NULL)
+	{
+		Size		capacity = (Size) hash_get_num_entries(local_dirty_hash);
+
+		local_dirty_ordered =
+			palloc(sizeof(*local_dirty_ordered) * Max(capacity, (Size) 1));
+		hash_seq_init(&sequence, local_dirty_hash);
+		while ((local = hash_seq_search(&sequence)) != NULL)
+			local_dirty_ordered[index++] = local;
+		qsort(local_dirty_ordered, index, sizeof(*local_dirty_ordered),
+			  compare_local_dirty_partitions);
+		local_dirty_ordered_count = index;
+	}
+	*count = local_dirty_ordered_count;
+	return local_dirty_ordered;
+}
+
+static PgLocalCacheRelationState *
+local_relation_state_locked(PgLocalCacheLocalDirtyEntry *local)
+{
+	PgLocalCacheRelationKey key;
+
+	make_relation_key(&key, local->key.database_oid, local->key.nspace);
+	return hash_search(pglc_relation_hash, &key, HASH_FIND, NULL);
+}
+
+static bool
+reserve_relation_handle_locked(PgLocalCacheLocalDirtyEntry *local)
+{
+	PgLocalCacheRelationState *state = local_relation_state_locked(local);
+	PgLocalCacheRelationSlot *slot;
+
+	if (state == NULL || local->shared_slot >= (uint32) pglc_relation_states ||
+		state->slot != local->shared_slot ||
+		state->slot_generation != local->shared_slot_generation ||
+		state->pending_forget || state->identity_pins == 0)
 		return false;
-
-	state->identity_pins++;
-	state->dirty_writers++;
-	local->shared_marker_reserved = true;
-	local->shared_relation_fallback = keyed_fallback;
-	local->shared_relation_incarnation = state->relation_incarnation;
+	slot = &pglc_relation_slots[state->slot];
+	if (pg_atomic_read_u64(&slot->generation) !=
+		local->shared_slot_generation ||
+		pg_atomic_read_u64(&slot->incarnation) !=
+		local->shared_relation_incarnation)
+		return false;
+	local->shared_relation_reserved = true;
 	return true;
 }
 
-/* Release only handles recorded as reserved; never infer ownership by key. */
 static void
-release_shared_reservations_locked(void)
+release_relation_handles_locked(bool committed)
 {
 	HASH_SEQ_STATUS sequence;
 	PgLocalCacheLocalDirtyEntry *local;
 
+	if (committed)
+	{
+		hash_seq_init(&sequence, local_dirty_hash);
+		while ((local = hash_seq_search(&sequence)) != NULL)
+			if (local->key.kind == PGLC_DIRTY_FORGET_RELATION)
+			{
+				PgLocalCacheRelationState *state =
+					local_relation_state_locked(local);
+
+				if (state != NULL && state->slot == local->shared_slot &&
+					state->slot_generation == local->shared_slot_generation &&
+					pg_atomic_read_u64(
+						&pglc_relation_slots[state->slot].incarnation) ==
+					local->target_relation_incarnation)
+					state->pending_forget = true;
+			}
+	}
+
 	hash_seq_init(&sequence, local_dirty_hash);
 	while ((local = hash_seq_search(&sequence)) != NULL)
 	{
-		PgLocalCacheRelationKey relation_key;
 		PgLocalCacheRelationState *state;
-		bool		relation_handle;
+		bool		identity_matches;
 
-		if (!local->shared_marker_reserved)
+		if (!local->shared_identity_pin && !local->shared_relation_reserved)
 			continue;
-
-		relation_handle = local->key.kind != PGLC_DIRTY_KEY ||
-			local->shared_relation_fallback;
-		if (!relation_handle)
+		state = local_relation_state_locked(local);
+		identity_matches = state != NULL && local->shared_slot <
+			(uint32) pglc_relation_states &&
+			state->slot == local->shared_slot &&
+			state->slot_generation == local->shared_slot_generation &&
+			pg_atomic_read_u64(
+				&pglc_relation_slots[state->slot].incarnation) ==
+			local->shared_relation_incarnation;
+		Assert(!local->shared_identity_pin || identity_matches);
+		if (identity_matches)
 		{
-			PgLocalCacheCacheEntry *entry;
-
-			entry = get_cache_entry(local->key.database_oid,
-									local->relation_oid,
-									local->key.nspace,
-									local->key.key, false);
-			Assert(entry != NULL && entry->dirty_writers > 0);
-			if (entry != NULL && entry->dirty_writers > 0)
-				entry->dirty_writers--;
-		}
-
-		make_relation_key(&relation_key, local->key.database_oid,
-						  local->key.nspace);
-		state = hash_search(pglc_relation_hash, &relation_key, HASH_FIND, NULL);
-		Assert(state != NULL && state->identity_pins > 0 &&
-			   state->relation_incarnation ==
-			   local->shared_relation_incarnation);
-		if (state != NULL && state->relation_incarnation ==
-			local->shared_relation_incarnation)
-		{
-			if (relation_handle)
-			{
-				Assert(state->dirty_writers > 0);
-				if (state->dirty_writers > 0)
-					state->dirty_writers--;
-			}
-			Assert(state->identity_pins > 0);
-			if (state->identity_pins > 0)
-				state->identity_pins--;
-			if (state->identity_pins == 0 && state->dirty_writers == 0 &&
+			if (local->shared_identity_pin)
+				release_relation_identity_pin(state);
+			if (state->identity_pins == 0 &&
+				pg_atomic_read_u64(
+					&pglc_relation_slots[state->slot].dirty_writers) == 0 &&
 				state->pending_forget)
-				(void) hash_search(pglc_relation_hash, &relation_key,
+			{
+				release_relation_slot(state);
+				(void) hash_search(pglc_relation_hash, &state->key,
 								   HASH_REMOVE, NULL);
+			}
 		}
-		local->shared_marker_reserved = false;
-		local->shared_relation_fallback = false;
-		local->shared_relation_incarnation = 0;
+		local->shared_identity_pin = false;
+		local->shared_relation_reserved = false;
+		local->shared_relation_fence_published = false;
 	}
 }
 
 static bool
-precreate_shared_entries_locked(void)
+resolve_and_pin_relations(void)
 {
 	HASH_SEQ_STATUS sequence;
 	PgLocalCacheLocalDirtyEntry *local;
+	bool		ok = true;
 
+	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
 	hash_seq_init(&sequence, local_dirty_hash);
 	while ((local = hash_seq_search(&sequence)) != NULL)
 	{
 		PgLocalCacheRelationState *state;
 
-		if (local->key.kind == PGLC_DIRTY_KEY)
-		{
-			PgLocalCacheCacheEntry *entry;
-
-			state = get_relation_state(local->key.database_oid,
-									   local->relation_oid,
-									   local->key.nspace, true);
-			if (state == NULL || state->relation_oid != local->relation_oid ||
-				state->pending_forget ||
-				state->identity_pins == (uint64) -1)
-			{
-				hash_seq_term(&sequence);
-				return false;
-			}
-			entry = get_cache_entry(local->key.database_oid,
-									local->relation_oid,
-									local->key.nspace,
-									local->key.key, true);
-			if (entry == NULL || entry->relation_oid != local->relation_oid ||
-				entry->dirty_writers == (uint32) -1)
-			{
-				hash_seq_term(&sequence);
-				return false;
-			}
-			state->identity_pins++;
-			entry->dirty_writers++;
-			local->shared_marker_reserved = true;
-			local->shared_relation_fallback = false;
-			local->shared_relation_incarnation =
-				state->relation_incarnation;
-#ifdef PGLC_TEST_HOOKS
-			if (pglc_test_abort_after_reservation)
-			{
-				pglc_test_abort_after_reservation = false;
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("test abort after dirty reservation")));
-			}
-#endif
-		}
-		else if (local->key.kind == PGLC_DIRTY_RELATION ||
-				 local->key.kind == PGLC_DIRTY_FORGET_RELATION)
-		{
-			if (!reserve_relation_handle_locked(local, false))
-			{
-				hash_seq_term(&sequence);
-				return false;
-			}
-		}
-	}
-	return true;
-}
-
-static bool
-reserve_relation_fallbacks_locked(void)
-{
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheLocalDirtyEntry *local;
-
-	/* Reserve broad fences first; keyed handles then widen to those fences. */
-	hash_seq_init(&sequence, local_dirty_hash);
-	while ((local = hash_seq_search(&sequence)) != NULL)
-	{
-		if (local->key.kind == PGLC_DIRTY_RELATION ||
+		if (local->key.kind == PGLC_DIRTY_GLOBAL ||
 			local->key.kind == PGLC_DIRTY_FORGET_RELATION)
+			continue;
+		state = get_relation_state(local->key.database_oid,
+								   local->relation_oid,
+								   local->key.nspace, true);
+		/* Namespace INVALIDATE uses InvalidOid; its namespace slot is exact. */
+		if (state == NULL ||
+			(OidIsValid(local->relation_oid) &&
+			 state->relation_oid != local->relation_oid) ||
+			state->pending_forget || state->identity_pins == (uint64) -1)
 		{
-			if (!reserve_relation_handle_locked(local, false))
+			ok = false;
+			break;
+		}
+		state->identity_pins++;
+		local->shared_identity_pin = true;
+		local->shared_slot = state->slot;
+		local->shared_slot_generation = state->slot_generation;
+		local->shared_relation_incarnation = pg_atomic_read_u64(
+			&pglc_relation_slots[state->slot].incarnation);
+		if (local->key.kind == PGLC_DIRTY_RELATION)
+			if (!reserve_relation_handle_locked(local))
 			{
-				hash_seq_term(&sequence);
-				return false;
+				ok = false;
+				break;
 			}
-		}
 	}
-
-	hash_seq_init(&sequence, local_dirty_hash);
-	while ((local = hash_seq_search(&sequence)) != NULL)
-	{
-		if (local->key.kind == PGLC_DIRTY_KEY &&
-			!reserve_relation_handle_locked(local, true))
-		{
-			hash_seq_term(&sequence);
-			return false;
-		}
-	}
-	return true;
+	if (!ok)
+		release_relation_handles_locked(false);
+	LWLockRelease(pglc_shared->registry_lock);
+	return ok;
 }
 
+/*
+ * Forget records carry an identity to retire at commit.  Capture them in a
+ * separate pass so global publication fallback cannot skip them and a failed
+ * reservation for another dirty record cannot discard their identity.
+ */
 static void
-capture_forget_targets_locked(void)
+resolve_and_pin_forget_relations(void)
 {
 	HASH_SEQ_STATUS sequence;
 	PgLocalCacheLocalDirtyEntry *local;
 
+	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
 	hash_seq_init(&sequence, local_dirty_hash);
 	while ((local = hash_seq_search(&sequence)) != NULL)
 	{
@@ -2386,131 +3129,236 @@ capture_forget_targets_locked(void)
 
 		if (local->key.kind != PGLC_DIRTY_FORGET_RELATION)
 			continue;
-		state = get_relation_state(local->key.database_oid,
-								   local->relation_oid,
-								   local->key.nspace, true);
-		if (state != NULL && state->relation_oid == local->relation_oid)
-			local->target_relation_incarnation = state->relation_incarnation;
+		state = local_relation_state_locked(local);
+		if (state == NULL || state->relation_oid != local->relation_oid ||
+			state->pending_forget)
+			continue;
+		if (state->slot >= (uint32) pglc_relation_states)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("invalid pg_local_cache forget identity slot")));
+		if (state->identity_pins == (uint64) -1)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("pg_local_cache relation identity pin overflow")));
+
+		state->identity_pins++;
+		local->shared_identity_pin = true;
+		local->shared_slot = state->slot;
+		local->shared_slot_generation = state->slot_generation;
+		local->shared_relation_incarnation = pg_atomic_read_u64(
+			&pglc_relation_slots[state->slot].incarnation);
+		local->target_relation_incarnation =
+			local->shared_relation_incarnation;
+		if (!reserve_relation_handle_locked(local))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("could not preserve pg_local_cache forget identity")));
 	}
+	LWLockRelease(pglc_shared->registry_lock);
+}
+
+static bool
+reserve_key_entries(PgLocalCacheLocalDirtyEntry **ordered, Size count)
+{
+	Size		index = 0;
+	bool		ok = true;
+
+	while (index < count)
+	{
+		uint32		partition = local_dirty_partition(ordered[index]);
+		Size		end = index;
+
+		if (partition == UINT32_MAX)
+			break;
+		while (end < count && local_dirty_partition(ordered[end]) == partition)
+			end++;
+		pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
+		for (; index < end; index++)
+		{
+			PgLocalCacheLocalDirtyEntry *local = ordered[index];
+			PgLocalCacheCacheEntry *entry = get_cache_entry(
+				local->key.database_oid, local->relation_oid,
+				local->key.nspace, local->key.key, true);
+
+			if (entry == NULL || entry->dirty_writers == (uint32) -1)
+			{
+				ok = false;
+				break;
+			}
+			if (entry->dirty_writers != 0 &&
+				(entry->relation_slot != local->shared_slot ||
+				 entry->slot_generation != local->shared_slot_generation))
+			{
+				ok = false;
+				break;
+			}
+			if (entry->relation_oid != local->relation_oid ||
+				entry->relation_slot != local->shared_slot ||
+				entry->slot_generation != local->shared_slot_generation)
+			{
+				entry->valid = false;
+				entry->loading = false;
+				entry->load_id++;
+				entry->version = next_entry_generation(partition);
+				entry->relation_oid = local->relation_oid;
+				entry->relation_slot = local->shared_slot;
+				entry->slot_generation = local->shared_slot_generation;
+			}
+			entry->dirty_writers++;
+			local->shared_marker_reserved = true;
+#ifdef PGLC_TEST_HOOKS
+			if (pglc_test_abort_after_reservation)
+			{
+				pglc_test_abort_after_reservation = false;
+				pglc_partition_lock_release(partition);
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("test abort after dirty reservation")));
+			}
+#endif
+		}
+		pglc_partition_lock_release(partition);
+		if (!ok)
+			break;
+	}
+	return ok;
+}
+
+static void
+begin_relation_fence(PgLocalCacheLocalDirtyEntry *local)
+{
+	PgLocalCacheRelationSlot *slot =
+		&pglc_relation_slots[local->shared_slot];
+
+	(void) pglc_atomic_fetch_add_checked(&slot->dirty_writers, 1);
+	(void) pglc_atomic_fetch_add_checked(&slot->version, 1);
+	local->shared_relation_fence_published = true;
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("after_relation_begin");
+#endif
+}
+
+static void
+begin_global_fence(void)
+{
+	(void) pglc_atomic_fetch_add_checked(&pglc_shared->global_dirty_writers, 1);
+	advance_global_version_locked();
+	(void) pglc_atomic_fetch_add_checked(&pglc_shared->global_epoch, 1);
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("after_global_begin");
+#endif
 }
 
 static void
 pglc_publish_dirty(void)
 {
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheLocalDirtyEntry *local;
+	PgLocalCacheLocalDirtyEntry **ordered;
+	Size		count;
+	Size		index;
 	uint64		invalidated = 0;
 	uint64		key_invalidated = 0;
 	uint64		table_invalidated = 0;
 	bool		global_fallback;
 
-	if (local_dirty_hash == NULL || local_dirty_published)
+	if (local_dirty_hash == NULL || local_dirty_published ||
+		hash_get_num_entries(local_dirty_hash) == 0)
 		return;
-	/* A statement guard alone is a backend-local fence, not an invalidation. */
-	if (hash_get_num_entries(local_dirty_hash) == 0)
-		return;
-
-	LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-	capture_forget_targets_locked();
+	ordered = ordered_local_dirty_entries(&count);
 	global_fallback = local_has_global_dirty();
-	if (!global_fallback && !precreate_shared_entries_locked())
+	if (!global_fallback && !resolve_and_pin_relations())
+		global_fallback = true;
+	if (!global_fallback && !reserve_key_entries(ordered, count))
 	{
-		/* Undo every exact reservation before attempting a broader fence. */
-		release_shared_reservations_locked();
-		if (!reserve_relation_fallbacks_locked())
+		bool		fallback_ok = true;
+
+		LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
+		for (index = 0; index < count; index++)
 		{
-			release_shared_reservations_locked();
-			global_fallback = true;
+			PgLocalCacheLocalDirtyEntry *local = ordered[index];
+
+			if (local->key.kind == PGLC_DIRTY_KEY &&
+				!local->shared_marker_reserved &&
+				!reserve_relation_handle_locked(local))
+			{
+				fallback_ok = false;
+				break;
+			}
 		}
+		LWLockRelease(pglc_shared->registry_lock);
+		if (!fallback_ok)
+			global_fallback = true;
 	}
+	resolve_and_pin_forget_relations();
 
 	if (global_fallback)
 	{
-		advance_global_version_locked();
-		pglc_shared->global_dirty_writers++;
-		invalidated += invalidate_all_locked();
+		begin_global_fence();
 		local_global_fallback = true;
 	}
 	else
 	{
-		hash_seq_init(&sequence, local_dirty_hash);
-		while ((local = hash_seq_search(&sequence)) != NULL)
+		for (index = 0; index < count; index++)
+			if (ordered[index]->shared_relation_reserved)
+				begin_relation_fence(ordered[index]);
+
+		index = 0;
+		while (index < count)
 		{
-			if (local->key.kind == PGLC_DIRTY_KEY)
+			uint32		partition = local_dirty_partition(ordered[index]);
+			Size		end = index;
+
+			if (partition == UINT32_MAX)
+				break;
+			while (end < count &&
+				   local_dirty_partition(ordered[end]) == partition)
+				end++;
+			pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
+			for (; index < end; index++)
 			{
-				if (local->shared_relation_fallback)
-				{
-					PgLocalCacheRelationState *state;
-					PgLocalCacheRelationKey relation_key;
+				PgLocalCacheLocalDirtyEntry *local = ordered[index];
+				PgLocalCacheCacheEntry *entry;
 
-					make_relation_key(&relation_key, local->key.database_oid,
-									  local->key.nspace);
-					state = hash_search(pglc_relation_hash, &relation_key,
-										HASH_FIND, NULL);
-					Assert(local->shared_marker_reserved && state != NULL &&
-						   state->relation_incarnation ==
-						   local->shared_relation_incarnation);
-					if (state != NULL && state->relation_incarnation ==
-						local->shared_relation_incarnation)
-					{
-						state->version++;
-						invalidated++;
-						table_invalidated++;
-					}
-				}
-				else
-				{
-					PgLocalCacheCacheEntry *entry;
-
-					entry = get_cache_entry(local->key.database_oid,
+				if (!local->shared_marker_reserved)
+					continue;
+				entry = get_cache_entry(local->key.database_oid,
 										local->relation_oid,
 										local->key.nspace,
 										local->key.key, false);
-					Assert(local->shared_marker_reserved && entry != NULL);
-					if (entry != NULL)
-					{
-						if (entry->valid)
-						{
-							invalidated++;
-							key_invalidated++;
-						}
-						entry->valid = false;
-						entry->loading = false;
-						entry->load_id++;
-						entry->version = next_entry_generation();
-					}
-				}
-			}
-			else if (local->key.kind == PGLC_DIRTY_RELATION ||
-					 local->key.kind == PGLC_DIRTY_FORGET_RELATION)
-			{
-				PgLocalCacheRelationState *state;
-
-				state = get_relation_state(local->key.database_oid,
-										   local->relation_oid,
-										   local->key.nspace,
-										   false);
-				Assert(local->shared_marker_reserved && state != NULL &&
-					   state->relation_incarnation ==
-					   local->shared_relation_incarnation);
-				if (state != NULL && state->relation_incarnation ==
-					local->shared_relation_incarnation)
+				Assert(entry != NULL && entry->dirty_writers > 0);
+				if (entry != NULL)
 				{
-					state->version++;
-					invalidated++;
-					table_invalidated++;
+					if (entry->valid)
+					{
+						invalidated++;
+						key_invalidated++;
+					}
+					entry->valid = false;
+					entry->loading = false;
+					entry->load_id++;
+					entry->version = next_entry_generation(partition);
 				}
 			}
+			pglc_partition_lock_release(partition);
 		}
+		for (index = 0; index < count; index++)
+			if (ordered[index]->shared_relation_fence_published)
+			{
+				invalidated++;
+				table_invalidated++;
+			}
 	}
 
 	local_dirty_published = true;
-	LWLockRelease(pglc_shared->lock);
-	pg_atomic_fetch_add_u64(&pglc_shared->invalidations, invalidated);
-	pg_atomic_fetch_add_u64(&pglc_shared->key_invalidations,
-						key_invalidated);
-	pg_atomic_fetch_add_u64(&pglc_shared->table_invalidations,
-						table_invalidated);
+	pglc_worker_stat_add(&pglc_shared->invalidations,
+						 offsetof(PgLocalCacheWorkerStats, invalidations),
+						 invalidated);
+	pglc_worker_stat_add(&pglc_shared->key_invalidations,
+						 offsetof(PgLocalCacheWorkerStats, key_invalidations),
+						 key_invalidated);
+	pglc_worker_stat_add(&pglc_shared->table_invalidations,
+						 offsetof(PgLocalCacheWorkerStats, table_invalidations),
+						 table_invalidated);
 #ifdef PGLC_TEST_HOOKS
 	pglc_test_pause_at("after_publish");
 	if (pglc_test_pause_point != NULL &&
@@ -2522,93 +3370,88 @@ pglc_publish_dirty(void)
 }
 
 static void
-forget_relation_states_locked(bool committed)
-{
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheLocalDirtyEntry *local;
-
-	if (!committed)
-		return;
-
-	hash_seq_init(&sequence, local_dirty_hash);
-	while ((local = hash_seq_search(&sequence)) != NULL)
-	{
-		PgLocalCacheRelationKey relation_key;
-		PgLocalCacheRelationState *state;
-
-		if (local->key.kind != PGLC_DIRTY_FORGET_RELATION)
-			continue;
-		make_relation_key(&relation_key, local->key.database_oid,
-						  local->key.nspace);
-		state = hash_search(pglc_relation_hash, &relation_key,
-							HASH_FIND, NULL);
-		if (state != NULL && local->target_relation_incarnation != 0 &&
-			state->relation_incarnation == local->target_relation_incarnation)
-		{
-			state->pending_forget = true;
-			if (state->dirty_writers == 0 && state->identity_pins == 0)
-				(void) hash_search(pglc_relation_hash, &relation_key,
-								   HASH_REMOVE, NULL);
-		}
-	}
-}
-
-static void
 pglc_finish_dirty(bool committed)
 {
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheLocalDirtyEntry *local;
-	bool		bump_config_after_unlock = committed && local_bump_config;
+	PgLocalCacheLocalDirtyEntry **ordered = NULL;
+	Size		count = 0;
+	Size		index;
+	bool		bump_config = committed && local_bump_config;
 
 	if (local_dirty_hash == NULL)
 		return;
-
 	if (local_dirty_published || !committed)
 	{
-		LWLockAcquire(pglc_shared->lock, LW_EXCLUSIVE);
-		if (local_dirty_published && local_global_fallback)
+		ordered = ordered_local_dirty_entries(&count);
+		if (local_dirty_published && bump_config)
 		{
-			Assert(pglc_shared->global_dirty_writers > 0);
-			pglc_shared->global_dirty_writers--;
+			(void) pglc_atomic_fetch_add_checked(
+				&pglc_shared->config_generation, 1);
+			bump_config = false;
 		}
-		else if (local_dirty_published)
+		if (local_global_fallback)
 		{
-			hash_seq_init(&sequence, local_dirty_hash);
-			while ((local = hash_seq_search(&sequence)) != NULL)
+			advance_global_version_locked();
+			(void) pg_atomic_fetch_sub_u64(
+				&pglc_shared->global_dirty_writers, 1);
+#ifdef PGLC_TEST_HOOKS
+			pglc_test_pause_at("after_global_finish");
+#endif
+		}
+		for (index = 0; index < count; index++)
+			if (ordered[index]->shared_relation_fence_published)
 			{
-				if (local->key.kind == PGLC_DIRTY_KEY &&
-					local->shared_marker_reserved &&
-					!local->shared_relation_fallback)
-				{
-					PgLocalCacheCacheEntry *entry;
+				PgLocalCacheRelationSlot *slot =
+					&pglc_relation_slots[ordered[index]->shared_slot];
 
-					entry = get_cache_entry(local->key.database_oid,
-											local->relation_oid,
-										local->key.nspace,
-										local->key.key,
-										false);
-					if (entry != NULL)
-						entry->valid = false;
-				}
+				(void) pglc_atomic_fetch_add_checked(&slot->version, 1);
+				(void) pglc_atomic_fetch_sub_checked(&slot->dirty_writers, 1);
+#ifdef PGLC_TEST_HOOKS
+				pglc_test_pause_at("after_relation_finish");
+#endif
 			}
-			release_shared_reservations_locked();
-		}
-		else
-			release_shared_reservations_locked();
-		if (local_dirty_published)
-			forget_relation_states_locked(committed);
-		if (local_dirty_published && bump_config_after_unlock)
+		index = 0;
+		while (index < count)
 		{
-			pg_atomic_fetch_add_u64(&pglc_shared->config_generation, 1);
-			bump_config_after_unlock = false;
-		}
-		LWLockRelease(pglc_shared->lock);
-	}
+			uint32		partition = local_dirty_partition(ordered[index]);
+			Size		end = index;
 
-	if (bump_config_after_unlock)
-		pg_atomic_fetch_add_u64(&pglc_shared->config_generation, 1);
+			if (partition == UINT32_MAX)
+				break;
+			while (end < count &&
+				   local_dirty_partition(ordered[end]) == partition)
+				end++;
+			pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
+			for (; index < end; index++)
+			{
+				PgLocalCacheLocalDirtyEntry *local = ordered[index];
+				PgLocalCacheCacheEntry *entry;
+
+				if (!local->shared_marker_reserved)
+					continue;
+				entry = get_cache_entry(local->key.database_oid,
+										local->relation_oid,
+										local->key.nspace,
+										local->key.key, false);
+				if (entry != NULL && entry->dirty_writers > 0)
+				{
+					entry->valid = false;
+					entry->dirty_writers--;
+				}
+				local->shared_marker_reserved = false;
+			}
+			pglc_partition_lock_release(partition);
+		}
+		LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
+		release_relation_handles_locked(local_dirty_published && committed);
+		LWLockRelease(pglc_shared->registry_lock);
+	}
+	if (bump_config)
+		(void) pglc_atomic_fetch_add_checked(
+			&pglc_shared->config_generation, 1);
 
 	local_dirty_hash = NULL;
+	local_dirty_ordered = NULL;
+	local_dirty_ordered_count = 0;
 	local_dirty_published = false;
 	local_global_fallback = false;
 	local_bump_config = false;
@@ -2617,6 +3460,15 @@ pglc_finish_dirty(bool committed)
 static void
 pglc_xact_callback(XactEvent event, void *arg)
 {
+#ifdef PGLC_TEST_HOOKS
+	if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
+	{
+		if (pglc_test_partition_lock_depth != 0)
+			(void) pg_atomic_fetch_add_u64(
+				&pglc_shared->test_partition_lock_violations, 1);
+		pglc_test_partition_lock_depth = 0;
+	}
+#endif
 	switch (event)
 	{
 		case XACT_EVENT_PRE_COMMIT:
@@ -2865,24 +3717,24 @@ pg_local_cache_forget(PG_FUNCTION_ARGS)
 static uint64
 count_namespace_entries(Oid database_oid, const char *nspace)
 {
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheCacheEntry *entry;
-	PgLocalCacheRelationState *relation_state;
+	uint32		partition;
 	uint64		count = 0;
 
-	LWLockAcquire(pglc_shared->lock, LW_SHARED);
-	relation_state = get_relation_state(database_oid, InvalidOid,
-									   nspace, false);
-	hash_seq_init(&sequence, pglc_cache_hash);
-	while ((entry = hash_seq_search(&sequence)) != NULL)
+	for (partition = 0; partition < (uint32) pglc_cache_partition_count();
+		 partition++)
 	{
-		if (relation_state != NULL &&
-			entry->key.database_oid == database_oid &&
-			strncmp(entry->key.nspace, nspace, PGLC_NAMESPACE_MAX) == 0 &&
-			cache_entry_is_current_locked(entry, relation_state))
-			count++;
+		HASH_SEQ_STATUS sequence;
+		PgLocalCacheCacheEntry *entry;
+
+		pglc_partition_lock_acquire(partition, LW_SHARED);
+		hash_seq_init(&sequence, pglc_cache_hashes[partition]);
+		while ((entry = hash_seq_search(&sequence)) != NULL)
+			if (entry->key.database_oid == database_oid &&
+				strncmp(entry->key.nspace, nspace, PGLC_NAMESPACE_MAX) == 0 &&
+				cache_entry_is_current_slot_locked(entry))
+				count++;
+		pglc_partition_lock_release(partition);
 	}
-	LWLockRelease(pglc_shared->lock);
 	return count;
 }
 
@@ -2934,10 +3786,28 @@ pg_local_cache_invalidate(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64((int64) count);
 }
 
+static uint64
+pglc_worker_stat_total(pg_atomic_uint64 *fallback, Size offset)
+{
+	uint64		total = pg_atomic_read_u64(fallback);
+	int			worker_index;
+
+	for (worker_index = 0; worker_index < PGLC_MAX_STATS_SHARDS;
+		 worker_index++)
+	{
+		pg_atomic_uint64 *counter = (pg_atomic_uint64 *)
+			((char *) &pglc_shared->stats_shards[worker_index] + offset);
+
+		total += pg_atomic_read_u64(counter);
+	}
+	return total;
+}
+
 char *
 pglc_stats_json(void)
 {
 	StringInfoData expanded;
+	uint32		partition;
 	HASH_SEQ_STATUS sequence;
 	PgLocalCacheCacheEntry *entry;
 	uint64		positive = 0;
@@ -2970,75 +3840,88 @@ pglc_stats_json(void)
 	uint64		workers_with_incomplete_mappings = 0;
 	HASH_SEQ_STATUS relation_sequence;
 	PgLocalCacheRelationState *relation_state;
-	uint32		global_dirty_writers;
+	uint64		global_dirty_writers;
 	TimestampTz now = GetCurrentTimestamp();
-	PgLocalCacheRelationState *cached_relation_state = NULL;
-	Oid			cached_database_oid = InvalidOid;
-	char		cached_nspace[PGLC_NAMESPACE_MAX];
-	bool		have_cached_relation_key = false;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_SHARED);
-	hash_seq_init(&sequence, pglc_cache_hash);
-	while ((entry = hash_seq_search(&sequence)) != NULL)
+	total = pg_atomic_read_u64(&pglc_shared->cache_entry_count);
+	if (total > (uint64) pglc_cache_entries)
+		total = (uint64) pglc_cache_entries;
+	for (partition = 0; partition < (uint32) pglc_cache_partition_count();
+		 partition++)
 	{
-		if (!have_cached_relation_key ||
-			cached_database_oid != entry->key.database_oid ||
-			memcmp(cached_nspace, entry->key.nspace,
-				   sizeof(cached_nspace)) != 0)
+		pglc_partition_lock_acquire(partition, LW_SHARED);
+		hash_seq_init(&sequence, pglc_cache_hashes[partition]);
+		while ((entry = hash_seq_search(&sequence)) != NULL)
 		{
-			cached_database_oid = entry->key.database_oid;
-			memcpy(cached_nspace, entry->key.nspace, sizeof(cached_nspace));
-			cached_relation_state =
-				get_relation_state(entry->key.database_oid,
-								   entry->relation_oid,
-								   entry->key.nspace, false);
-			have_cached_relation_key = true;
+			if (cache_entry_is_current_slot_locked(entry) && entry->negative)
+				negative++;
+			else if (cache_entry_is_current_slot_locked(entry))
+				positive++;
+			if (entry->dirty_writers > 0)
+				dirty++;
+			if (entry->loading)
+			{
+				if (TimestampDifferenceExceeds(entry->load_started, now,
+										   cache_load_lease_ms()))
+					expired_loading++;
+				else
+					loading++;
+			}
 		}
-		relation_state = cached_relation_state;
-		if (cache_entry_is_current_locked(entry, relation_state) &&
-			entry->negative)
-			negative++;
-		else if (cache_entry_is_current_locked(entry, relation_state))
-			positive++;
-		if (entry->dirty_writers > 0)
-			dirty++;
-		if (entry->loading)
-		{
-			if (TimestampDifferenceExceeds(entry->load_started, now,
-									   cache_load_lease_ms()))
-				expired_loading++;
-			else
-				loading++;
-		}
+		pglc_partition_lock_release(partition);
 	}
+	LWLockAcquire(pglc_shared->registry_lock, LW_SHARED);
 	hash_seq_init(&relation_sequence, pglc_relation_hash);
 	while ((relation_state = hash_seq_search(&relation_sequence)) != NULL)
 	{
 		relation_states++;
-		if (relation_state->dirty_writers > 0)
+		if (pg_atomic_read_u64(
+				&pglc_relation_slots[relation_state->slot].dirty_writers) > 0)
 			dirty_relations++;
 		if (relation_state->pending_forget)
 			pending_forget++;
 	}
-	global_dirty_writers = pglc_shared->global_dirty_writers;
-	total = hash_get_num_entries(pglc_cache_hash);
-	LWLockRelease(pglc_shared->lock);
-	cache_hits = pg_atomic_read_u64(&pglc_shared->cache_hits);
-	cache_misses = pg_atomic_read_u64(&pglc_shared->cache_misses);
-	negative_hits = pg_atomic_read_u64(&pglc_shared->negative_hits);
-	database_reads = pg_atomic_read_u64(&pglc_shared->database_reads);
-	database_writes = pg_atomic_read_u64(&pglc_shared->database_writes);
-	invalidations = pg_atomic_read_u64(&pglc_shared->invalidations);
-	evictions = pg_atomic_read_u64(&pglc_shared->evictions);
+	global_dirty_writers =
+		pg_atomic_read_u64(&pglc_shared->global_dirty_writers);
+	LWLockRelease(pglc_shared->registry_lock);
+	cache_hits = pglc_worker_stat_total(&pglc_shared->cache_hits,
+										  offsetof(PgLocalCacheWorkerStats,
+										   cache_hits));
+	cache_misses = pglc_worker_stat_total(&pglc_shared->cache_misses,
+											offsetof(PgLocalCacheWorkerStats,
+												 cache_misses));
+	negative_hits = pglc_worker_stat_total(&pglc_shared->negative_hits,
+										 offsetof(PgLocalCacheWorkerStats,
+											  negative_hits));
+	database_reads = pglc_worker_stat_total(&pglc_shared->database_reads,
+											offsetof(PgLocalCacheWorkerStats,
+												 database_reads));
+	database_writes = pglc_worker_stat_total(&pglc_shared->database_writes,
+											 offsetof(PgLocalCacheWorkerStats,
+											  database_writes));
+	invalidations = pglc_worker_stat_total(&pglc_shared->invalidations,
+										  offsetof(PgLocalCacheWorkerStats,
+										   invalidations));
+	evictions = pglc_worker_stat_total(&pglc_shared->evictions,
+									   offsetof(PgLocalCacheWorkerStats,
+										evictions));
 	singleflight_leaders =
-		pg_atomic_read_u64(&pglc_shared->singleflight_leaders);
+		pglc_worker_stat_total(&pglc_shared->singleflight_leaders,
+							  offsetof(PgLocalCacheWorkerStats,
+								   singleflight_leaders));
 	singleflight_waiters =
-		pg_atomic_read_u64(&pglc_shared->singleflight_waiters);
+		pglc_worker_stat_total(&pglc_shared->singleflight_waiters,
+							  offsetof(PgLocalCacheWorkerStats,
+								   singleflight_waiters));
 	singleflight_reuses =
-		pg_atomic_read_u64(&pglc_shared->singleflight_reuses);
+		pglc_worker_stat_total(&pglc_shared->singleflight_reuses,
+							  offsetof(PgLocalCacheWorkerStats,
+								   singleflight_reuses));
 	singleflight_timeouts =
-		pg_atomic_read_u64(&pglc_shared->singleflight_timeouts);
+		pglc_worker_stat_total(&pglc_shared->singleflight_timeouts,
+							  offsetof(PgLocalCacheWorkerStats,
+								   singleflight_timeouts));
 	active_clients = pg_atomic_read_u64(&pglc_shared->active_clients);
 	rejected_connections =
 		pg_atomic_read_u64(&pglc_shared->rejected_connections);
@@ -3063,7 +3946,7 @@ pglc_stats_json(void)
 		",\"dirty_relations\":" UINT64_FORMAT
 		",\"relation_states\":" UINT64_FORMAT
 		",\"pending_forget\":" UINT64_FORMAT
-		",\"global_dirty_writers\":%u"
+		",\"global_dirty_writers\":" UINT64_FORMAT
 		",\"store_size\":" UINT64_FORMAT
 		",\"cache_hits\":" UINT64_FORMAT
 		",\"cache_misses\":" UINT64_FORMAT
@@ -3107,6 +3990,7 @@ pglc_stats_json(void)
 	appendStringInfo(
 		&expanded,
 		",\"cache_capacity\":%d"
+		",\"lock_partitions\":%d"
 		",\"relation_state_capacity\":%d"
 		",\"max_clients\":%d"
 		",\"max_clients_per_worker\":%d"
@@ -3148,7 +4032,7 @@ pglc_stats_json(void)
 		",\"sql_result_reuses\":" UINT64_FORMAT
 		",\"tls_handshakes_total\":" UINT64_FORMAT
 		",\"tls_handshake_failures_total\":" UINT64_FORMAT "}",
-		pglc_cache_entries, pglc_relation_states,
+		pglc_cache_entries, pglc_cache_partition_count(), pglc_relation_states,
 		pglc_port == 0 ? 0 : pglc_max_clients,
 		pglc_port == 0 ? 0 : pglc_max_clients_per_worker,
 		pglc_port == 0 ? 0 :
@@ -3164,7 +4048,9 @@ pglc_stats_json(void)
 		mul_size((Size) pglc_memory_budget_mb, (Size) 1024 * 1024),
 		hash_estimate_size(pglc_max_dirty_keys,
 						   sizeof(PgLocalCacheLocalDirtyEntry)),
-		pg_atomic_read_u64(&pglc_shared->cache_admission_rejections),
+		pglc_worker_stat_total(&pglc_shared->cache_admission_rejections,
+							  offsetof(PgLocalCacheWorkerStats,
+								   cache_admission_rejections)),
 		pg_atomic_read_u64(
 			&pglc_shared->relation_state_admission_rejections),
 		pg_atomic_read_u64(&pglc_shared->dirty_key_limit_fallbacks),
@@ -3176,21 +4062,37 @@ pglc_stats_json(void)
 				 sizeof(PgLocalCacheCacheEntry)),
 		pg_atomic_read_u64(&pglc_shared->client_connects),
 		pg_atomic_read_u64(&pglc_shared->client_disconnects),
-		pg_atomic_read_u64(&pglc_shared->client_requests),
-		pg_atomic_read_u64(&pglc_shared->client_request_errors),
-		pg_atomic_read_u64(&pglc_shared->client_mget_keys),
-		pg_atomic_read_u64(&pglc_shared->client_sets),
-		pg_atomic_read_u64(&pglc_shared->client_dels),
+		pglc_worker_stat_total(&pglc_shared->client_requests,
+							  offsetof(PgLocalCacheWorkerStats, client_requests)),
+		pglc_worker_stat_total(&pglc_shared->client_request_errors,
+							  offsetof(PgLocalCacheWorkerStats,
+								   client_request_errors)),
+		pglc_worker_stat_total(&pglc_shared->client_mget_keys,
+							  offsetof(PgLocalCacheWorkerStats, client_mget_keys)),
+		pglc_worker_stat_total(&pglc_shared->client_sets,
+							  offsetof(PgLocalCacheWorkerStats, client_sets)),
+		pglc_worker_stat_total(&pglc_shared->client_dels,
+							  offsetof(PgLocalCacheWorkerStats, client_dels)),
 		/* Every RESP hit comes from the shared/global hash in this design. */
 		cache_hits,
-		pg_atomic_read_u64(&pglc_shared->negative_writes),
-		pg_atomic_read_u64(&pglc_shared->key_invalidations),
-		pg_atomic_read_u64(&pglc_shared->table_invalidations),
-		pg_atomic_read_u64(&pglc_shared->pass_to_main),
+		pglc_worker_stat_total(&pglc_shared->negative_writes,
+							  offsetof(PgLocalCacheWorkerStats, negative_writes)),
+		pglc_worker_stat_total(&pglc_shared->key_invalidations,
+							  offsetof(PgLocalCacheWorkerStats,
+								   key_invalidations)),
+		pglc_worker_stat_total(&pglc_shared->table_invalidations,
+							  offsetof(PgLocalCacheWorkerStats,
+								   table_invalidations)),
+		pglc_worker_stat_total(&pglc_shared->pass_to_main,
+							  offsetof(PgLocalCacheWorkerStats, pass_to_main)),
 		pg_atomic_read_u64(&pglc_shared->mapping_reload_attempts),
-		pg_atomic_read_u64(&pglc_shared->sql_sets),
-		pg_atomic_read_u64(&pglc_shared->sql_dels),
-		pg_atomic_read_u64(&pglc_shared->singleflight_reuses),
+		pglc_worker_stat_total(&pglc_shared->sql_sets,
+							  offsetof(PgLocalCacheWorkerStats, sql_sets)),
+		pglc_worker_stat_total(&pglc_shared->sql_dels,
+							  offsetof(PgLocalCacheWorkerStats, sql_dels)),
+		pglc_worker_stat_total(&pglc_shared->singleflight_reuses,
+							  offsetof(PgLocalCacheWorkerStats,
+								   singleflight_reuses)),
 		pg_atomic_read_u64(&pglc_shared->tls_handshakes),
 		pg_atomic_read_u64(&pglc_shared->tls_handshake_failures));
 	return expanded.data;
@@ -3206,11 +4108,14 @@ pglc_metrics_json(void)
 	uint64		workers_with_incomplete_mappings;
 
 	pglc_require_preload();
-	LWLockAcquire(pglc_shared->lock, LW_SHARED);
-	entries = hash_get_num_entries(pglc_cache_hash);
+	entries = pg_atomic_read_u64(&pglc_shared->cache_entry_count);
+	if (entries > (uint64) pglc_cache_entries)
+		entries = (uint64) pglc_cache_entries;
+	LWLockAcquire(pglc_shared->registry_lock, LW_SHARED);
 	relation_states = hash_get_num_entries(pglc_relation_hash);
-	global_dirty_writers = pglc_shared->global_dirty_writers;
-	LWLockRelease(pglc_shared->lock);
+	LWLockRelease(pglc_shared->registry_lock);
+	global_dirty_writers =
+		pg_atomic_read_u64(&pglc_shared->global_dirty_writers);
 	workers_with_incomplete_mappings =
 		pglc_workers_without_current_mappings();
 	initStringInfo(&result);
@@ -3253,17 +4158,50 @@ pglc_metrics_json(void)
 #define PGLC_APPEND_METRIC_COUNTER(json_name, field_name) \
 	appendStringInfo(&result, ",\"" json_name "\":" UINT64_FORMAT, \
 					 pg_atomic_read_u64(&pglc_shared->field_name))
-	PGLC_APPEND_METRIC_COUNTER("cache_hits_total", cache_hits);
-	PGLC_APPEND_METRIC_COUNTER("cache_misses_total", cache_misses);
-	PGLC_APPEND_METRIC_COUNTER("negative_hits_total", negative_hits);
-	PGLC_APPEND_METRIC_COUNTER("database_reads_total", database_reads);
-	PGLC_APPEND_METRIC_COUNTER("database_writes_total", database_writes);
-	PGLC_APPEND_METRIC_COUNTER("invalidations_total", invalidations);
-	PGLC_APPEND_METRIC_COUNTER("evictions_total", evictions);
-	PGLC_APPEND_METRIC_COUNTER("singleflight_leaders_total", singleflight_leaders);
-	PGLC_APPEND_METRIC_COUNTER("singleflight_waiters_total", singleflight_waiters);
-	PGLC_APPEND_METRIC_COUNTER("singleflight_reuses_total", singleflight_reuses);
-	PGLC_APPEND_METRIC_COUNTER("singleflight_timeouts_total", singleflight_timeouts);
+	appendStringInfo(&result, ",\"cache_hits_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->cache_hits,
+									   offsetof(PgLocalCacheWorkerStats,
+										cache_hits)));
+	appendStringInfo(&result, ",\"cache_misses_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->cache_misses,
+									   offsetof(PgLocalCacheWorkerStats,
+										cache_misses)));
+	appendStringInfo(&result, ",\"negative_hits_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->negative_hits,
+									   offsetof(PgLocalCacheWorkerStats,
+										negative_hits)));
+	appendStringInfo(&result, ",\"database_reads_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->database_reads,
+									   offsetof(PgLocalCacheWorkerStats,
+										database_reads)));
+	appendStringInfo(&result, ",\"database_writes_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->database_writes,
+									   offsetof(PgLocalCacheWorkerStats,
+										database_writes)));
+	appendStringInfo(&result, ",\"invalidations_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->invalidations,
+									   offsetof(PgLocalCacheWorkerStats,
+										invalidations)));
+	appendStringInfo(&result, ",\"evictions_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->evictions,
+									   offsetof(PgLocalCacheWorkerStats,
+										evictions)));
+	appendStringInfo(&result, ",\"singleflight_leaders_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->singleflight_leaders,
+									   offsetof(PgLocalCacheWorkerStats,
+											singleflight_leaders)));
+	appendStringInfo(&result, ",\"singleflight_waiters_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->singleflight_waiters,
+									   offsetof(PgLocalCacheWorkerStats,
+											singleflight_waiters)));
+	appendStringInfo(&result, ",\"singleflight_reuses_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->singleflight_reuses,
+									   offsetof(PgLocalCacheWorkerStats,
+											singleflight_reuses)));
+	appendStringInfo(&result, ",\"singleflight_timeouts_total\":" UINT64_FORMAT,
+					 pglc_worker_stat_total(&pglc_shared->singleflight_timeouts,
+									   offsetof(PgLocalCacheWorkerStats,
+											singleflight_timeouts)));
 	PGLC_APPEND_METRIC_COUNTER("rejected_connections_total", rejected_connections);
 	PGLC_APPEND_METRIC_COUNTER("client_limit_rejections_total", client_limit_rejections);
 	PGLC_APPEND_METRIC_COUNTER("authentication_failures_total", authentication_failures);

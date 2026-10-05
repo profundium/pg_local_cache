@@ -417,6 +417,18 @@ def test_warm_pipeline_has_no_sql_reads(table: str) -> None:
         client.close()
 
 
+def test_hot_counter_shards_aggregate() -> None:
+    before = read_cache_stats()
+    client = RespConnection()
+    try:
+        assert client.command("PING") == "PONG"
+    finally:
+        client.close()
+    after = read_cache_stats()
+    expected = 2 if AUTH_TOKEN else 1  # AUTH, when enabled, is a RESP request too.
+    assert int(after["client_requests"]) - int(before["client_requests"]) == expected
+
+
 def test_mget(table: str, composite_table: str, scoped_table: str) -> None:
     unauthenticated = RespConnection(authenticate=False)
     try:
@@ -680,9 +692,18 @@ def test_collect_key_sql(table: str, namespace: str, key: str) -> str:
 def install_test_hook_functions(table: str, namespace: str) -> bool:
     relation = f"public.{sql_identifier(table)}"
     definitions = (
+        "CREATE OR REPLACE FUNCTION public.pglc_test_partition_lock_violations() "
+        "RETURNS bigint AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_partition_lock_violations' LANGUAGE C",
         "CREATE OR REPLACE FUNCTION public.pglc_test_collect_key(regclass, text, text) "
         "RETURNS void AS '$libdir/pg_local_cache', 'pg_local_cache_test_collect_key' "
         "LANGUAGE C STRICT",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_partition(oid, text, text) "
+        "RETURNS integer AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_partition' LANGUAGE C STRICT",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_hash_bucket(oid, text, text) "
+        "RETURNS integer AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_hash_bucket' LANGUAGE C STRICT",
         "CREATE OR REPLACE FUNCTION public.pglc_test_relation_incarnation(regclass, text) "
         "RETURNS bigint AS '$libdir/pg_local_cache', "
         "'pg_local_cache_test_relation_incarnation' LANGUAGE C STRICT",
@@ -720,7 +741,10 @@ def install_test_hook_functions(table: str, namespace: str) -> bool:
 
 def drop_test_hook_functions() -> None:
     sql_commands(
+        "DROP FUNCTION IF EXISTS public.pglc_test_partition_lock_violations()",
         "DROP FUNCTION IF EXISTS public.pglc_test_collect_key(regclass, text, text)",
+        "DROP FUNCTION IF EXISTS public.pglc_test_partition(oid, text, text)",
+        "DROP FUNCTION IF EXISTS public.pglc_test_hash_bucket(oid, text, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_relation_incarnation(regclass, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_relation_identity_pins(regclass, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_recreate_relation_state(regclass, text)",
@@ -763,6 +787,18 @@ def start_publishing_key_writer(
     *,
     application_name: str,
 ) -> subprocess.Popen[str]:
+    return start_publishing_keys_writer(
+        table, namespace, [key], application_name=application_name
+    )
+
+
+def start_publishing_keys_writer(
+    table: str,
+    namespace: str,
+    keys: list[str],
+    *,
+    application_name: str,
+) -> subprocess.Popen[str]:
     environment = os.environ.copy()
     environment["PGAPPNAME"] = application_name
     process = subprocess.Popen(
@@ -776,8 +812,10 @@ def start_publishing_key_writer(
     assert process.stdin is not None
     process.stdin.write(
         "BEGIN;\n"
-        f"{test_collect_key_sql(table, namespace, key)};\n"
-        "COMMIT;\n"
+        + "\n".join(
+            f"{test_collect_key_sql(table, namespace, key)};" for key in keys
+        )
+        + "\nCOMMIT;\n"
     )
     process.stdin.flush()
     return process
@@ -790,6 +828,133 @@ def finish_publishing_key_writer(process: subprocess.Popen[str]) -> str:
     output = process.communicate(timeout=10)[0]
     assert process.returncode == 0, output
     return output
+
+
+def test_partition_routing_and_opposite_order_writers(
+    table: str,
+    namespace: str,
+    barrier_table: str,
+    second_barrier_table: str,
+) -> None:
+    stats = read_cache_stats()
+    partition_count = int(stats["lock_partitions"])
+    database_oid = int(
+        sql("SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()")
+    )
+    probe_key = f"route-probe-{os.getpid()}"
+    probe_result = sql(
+        "SELECT public.pglc_test_partition("
+        f"{database_oid}, {sql_literal(namespace)}, {sql_literal(probe_key)}), "
+        "public.pglc_test_partition("
+        f"{database_oid}, {sql_literal(namespace)}, {sql_literal(probe_key)})"
+    )
+    first_route, second_route = (int(value) for value in probe_result.split("|"))
+    assert first_route == second_route
+    assert 0 <= first_route < partition_count
+
+    candidate_limit = partition_count * 128
+    routed_keys = sql(
+        "SELECT string_agg(key || ':' || partition, ',' ORDER BY partition) "
+        "FROM (SELECT DISTINCT ON (partition) key, partition FROM ("
+        "SELECT 'route-' || candidate::text AS key, "
+        "public.pglc_test_partition("
+        f"{database_oid}, {sql_literal(namespace)}, "
+        "'route-' || candidate::text) AS partition "
+        f"FROM generate_series(1, {candidate_limit}) AS candidates(candidate)"
+        ") AS routes ORDER BY partition, key LIMIT 16) AS selected"
+    )
+    key_routes = [
+        (item.rpartition(":")[0], int(item.rpartition(":")[2]))
+        for item in routed_keys.split(",")
+        if item
+    ]
+    assert len(key_routes) == min(16, partition_count), key_routes
+    keys = [key for key, _partition in key_routes]
+    assert len({partition for _key, partition in key_routes}) == len(key_routes)
+
+    bucket_probe_limit = partition_count * 512
+    minimum_bucket_diversity = int(
+        sql(
+            "SELECT min(bucket_count) FROM ("
+            "SELECT partition_id, count(DISTINCT bucket_id) AS bucket_count "
+            "FROM ("
+            "SELECT public.pglc_test_partition("
+            f"{database_oid}, {sql_literal(namespace)}, "
+            "'bucket-' || candidate::text) AS partition_id, "
+            "public.pglc_test_hash_bucket("
+            f"{database_oid}, {sql_literal(namespace)}, "
+            "'bucket-' || candidate::text) AS bucket_id "
+            f"FROM generate_series(1, {bucket_probe_limit}) AS probes(candidate)"
+            ") AS routed_buckets GROUP BY partition_id"
+            ") AS bucket_counts"
+        )
+    )
+    assert minimum_bucket_diversity >= 24, minimum_bucket_diversity
+
+    first: subprocess.Popen[str] | None = None
+    second: subprocess.Popen[str] | None = None
+    first_locker: subprocess.Popen[str] | None = None
+    second_locker: subprocess.Popen[str] | None = None
+    try:
+        first_locker = start_table_locker(
+            barrier_table,
+            application_name=f"pglc_partition_barrier_first_{os.getpid()}",
+        )
+        second_locker = start_table_locker(
+            second_barrier_table,
+            application_name=f"pglc_partition_barrier_second_{os.getpid()}",
+        )
+        set_test_pause("before_partition_acquire", barrier_table)
+        first_name = f"pglc_partition_first_{os.getpid()}"
+        first = start_publishing_keys_writer(
+            table, namespace, keys, application_name=first_name
+        )
+        wait_for_blocked_relation_pid(
+            barrier_table, application_name=first_name, timeout=10
+        )
+
+        set_test_pause("before_partition_acquire", second_barrier_table)
+        second_name = f"pglc_partition_second_{os.getpid()}"
+        second = start_publishing_keys_writer(
+            table, namespace, list(reversed(keys)), application_name=second_name
+        )
+        wait_for_blocked_relation_pid(
+            second_barrier_table, application_name=second_name, timeout=10
+        )
+
+        # Both writers reached first partition acquisition boundary. Release
+        # both relation barriers together so publication starts overlap.
+        set_test_pause(None)
+        unlock_errors: list[BaseException] = []
+
+        def unlock(process: subprocess.Popen[str]) -> None:
+            try:
+                finish_writer(process, commit=True)
+            except BaseException as error:
+                unlock_errors.append(error)
+
+        unlockers = [
+            threading.Thread(target=unlock, args=(first_locker,)),
+            threading.Thread(target=unlock, args=(second_locker,)),
+        ]
+        for unlocker in unlockers:
+            unlocker.start()
+        for unlocker in unlockers:
+            unlocker.join(timeout=10)
+            assert not unlocker.is_alive(), "partition barrier release did not finish"
+        if unlock_errors:
+            raise AssertionError("partition barrier release failed") from unlock_errors[0]
+        first_locker = None
+        second_locker = None
+        finish_publishing_key_writer(first)
+        first = None
+        finish_publishing_key_writer(second)
+        second = None
+        assert int(sql("SELECT public.pglc_test_partition_lock_violations()")) == 0
+    finally:
+        set_test_pause(None)
+        for process in (first_locker, second_locker, first, second):
+            terminate_writer(process)
 
 
 def run_mget_thread(
@@ -1385,8 +1550,10 @@ def run_fill_paused_before_store(
     barrier_table: str,
     key: str,
     during_pause: Callable[[], None],
+    *,
+    pause_point: str = "before_store",
 ) -> tuple[RespConnection, object, dict[str, object], dict[str, object]]:
-    set_test_pause("before_store", barrier_table)
+    set_test_pause(pause_point, barrier_table)
     client = RespConnection(socket_timeout=45)
     locker: subprocess.Popen[str] | None = None
     thread: threading.Thread | None = None
@@ -1455,7 +1622,7 @@ def test_same_key_relation_and_global_fences(
     table: str, namespace: str, barrier_table: str
 ) -> None:
     cases: list[
-        tuple[str, Callable[[int], Callable[[], None]] | None, str]
+        tuple[str, Callable[[int], Callable[[], None]] | None, str, str]
     ] = [
         (
             "same-key",
@@ -1464,6 +1631,7 @@ def test_same_key_relation_and_global_fences(
                 f"SET value = 'same-key-new' WHERE id = {row_id}"
             ),
             "same-key-new",
+            "before_store",
         ),
         (
             "relation",
@@ -1471,15 +1639,23 @@ def test_same_key_relation_and_global_fences(
                 f"SELECT local_cache.invalidate({sql_literal(namespace)})"
             ),
             "relation-fence",
+            "before_store",
         ),
         (
-            "global",
+            "global-claim",
             None,
             "global-fence",
+            "after_claim_owner",
+        ),
+        (
+            "global-copy",
+            None,
+            "global-fence",
+            "after_store_copy",
         ),
     ]
     first_id = 9_620_000_001
-    for offset, (name, mutation_for, updated_value) in enumerate(cases):
+    for offset, (name, mutation_for, updated_value, pause_point) in enumerate(cases):
         row_id = first_id + offset
         old_value = f"{name}-old"
         sql(
@@ -1492,7 +1668,11 @@ def test_same_key_relation_and_global_fences(
             mutation = mutation_for(row_id)
 
         client, response, _before, _after = run_fill_paused_before_store(
-            table, barrier_table, crud_key(table, row_id), mutation
+            table,
+            barrier_table,
+            crud_key(table, row_id),
+            mutation,
+            pause_point=pause_point,
         )
         try:
             assert response == [row_bytes(row_id, old_value)], (name, response)
@@ -1502,7 +1682,10 @@ def test_same_key_relation_and_global_fences(
                 row_id, expected_value
             )
             after_refill = read_cache_stats()
-            assert after_refill["database_reads"] == before_refill["database_reads"] + 1, name
+            expected_extra_read = 0 if name == "global-claim" else 1
+            assert after_refill["database_reads"] == (
+                before_refill["database_reads"] + expected_extra_read
+            ), name
             assert mget_one(client, crud_key(table, row_id)) == row_bytes(
                 row_id, expected_value
             )
@@ -1529,6 +1712,11 @@ def test_namespace_invalidation_preserves_other_scope(
     client = RespConnection(socket_timeout=45)
     try:
         assert mget_one(client, cached_key) == row_bytes(1, "scope-only")
+        assert isinstance(mget_one(client, crud_key(table, 1)), bytes)
+        invalidated = client.command(
+            "INVALIDATE", f"CRUD:{PGDATABASE}.public.{table}"
+        )
+        assert isinstance(invalidated, int) and invalidated >= 1, invalidated
 
         def invalidate_other_namespace() -> None:
             sql(f"SELECT local_cache.invalidate({sql_literal(namespace)})")
@@ -1607,6 +1795,9 @@ def test_overlapping_publishers_on_one_key(
         wait_for_blocked_relation_pid(
             second_barrier_table, application_name=second_name, timeout=10
         )
+        # Both publishers have reached their barriers. _forget publishes from
+        # this test backend too, so it must not inherit the global pause.
+        set_test_pause(None)
         assert int(
             sql(
                 "SELECT public.pglc_test_relation_identity_pins("
@@ -1638,10 +1829,11 @@ def test_overlapping_publishers_on_one_key(
             after_first_read["database_reads"] + 1
         ), "remaining publisher fence did not block cache publication"
 
-        # Forget cache identity while pinned without taking a table DDL lock.
+        # Exercise global publication fallback and _forget in the same commit.
         sql(
+            "BEGIN; SELECT public.pglc_test_collect_global(); "
             f"SELECT local_cache._forget({sql_literal(namespace)}, "
-            f"'{relation}'::regclass::oid)"
+            f"'{relation}'::regclass::oid); COMMIT"
         )
         assert int(
             sql(
@@ -2164,6 +2356,7 @@ def main() -> None:
             test_fragmented_suffix_and_order(table)
             test_command_error_does_not_poison_batch(table)
             test_warm_pipeline_has_no_sql_reads(table)
+            test_hot_counter_shards_aggregate()
             test_mget(table, composite_table, scoped_table)
             # Existing stale-read stress test covers the snapshot/store race statistically.
             test_mget_statement_timeout_cleanup(table)
@@ -2179,6 +2372,12 @@ def main() -> None:
             test_key_fill_hit_ratio_under_update_load(table)
             test_preprepare_still_rejected(table)
             if hooks_available:
+                test_partition_routing_and_opposite_order_writers(
+                    table,
+                    mapping_namespace,
+                    barrier_table,
+                    second_barrier_table,
+                )
                 test_unrelated_key_fill_survives_keyed_write(table, barrier_table)
                 test_same_key_relation_and_global_fences(
                     table, mapping_namespace, barrier_table
@@ -2204,6 +2403,7 @@ def main() -> None:
             else:
                 print(
                     "SKIP hook-dependent cases (PGLC_TEST_HOOKS functions absent): "
+                    "test_partition_routing_and_opposite_order_writers, "
                     "test_unrelated_key_fill_survives_keyed_write, "
                     "test_same_key_relation_and_global_fences, "
                     "test_namespace_invalidation_preserves_other_scope, "
@@ -2218,6 +2418,8 @@ def main() -> None:
                 "error recovery, fairness resume, "
                 + half_close_coverage
                 + "backpressure, phased MGET, close-after-flush, "
+                "sharded stat totals, "
+                "partition routing and opposite-order writers, "
                 "commit/rollback fence, database/table key scope, "
                 "uncommitted-write visibility, relation-incarnation and stale-fill fences, "
                 "overlapping/aborted publishers, UPDATE-load hit ratio, "
