@@ -904,6 +904,20 @@ def set_test_dirty_marker_limit(limit: int | None) -> None:
         )
 
 
+def set_test_max_dirty_keys(limit: int | None) -> None:
+    if limit is None:
+        sql_commands(
+            "ALTER SYSTEM RESET pg_local_cache.test_max_dirty_keys",
+            "SELECT pg_reload_conf()",
+        )
+    else:
+        sql_commands(
+            "ALTER SYSTEM SET pg_local_cache.test_max_dirty_keys = "
+            f"{limit}",
+            "SELECT pg_reload_conf()",
+        )
+
+
 def reset_test_gucs_if_available() -> None:
     available = sql(
         "SELECT current_setting('pg_local_cache.test_pause_point', true) "
@@ -912,6 +926,7 @@ def reset_test_gucs_if_available() -> None:
     if available == "t":
         set_test_pause(None)
         set_test_dirty_marker_limit(None)
+        set_test_max_dirty_keys(None)
 
 
 def test_collect_key_sql(table: str, namespace: str, key: str) -> str:
@@ -2478,6 +2493,86 @@ def test_marker_exhaustion_falls_back_safely(
         warm_client.close()
 
 
+def test_dirty_key_dedup_and_relation_fallback(
+    table: str,
+    namespace: str,
+    barrier_table: str,
+) -> None:
+    row_id, overflow_id = allocate_test_row_ids(table, 2)
+    sql(
+        f"INSERT INTO public.{sql_identifier(table)} (id, value) "
+        f"VALUES ({row_id}, 'dirty-dedup-0'), ({overflow_id}, 'overflow-0')"
+    )
+    key = crud_key(table, row_id)
+    client = RespConnection(socket_timeout=45)
+    locker: subprocess.Popen[str] | None = None
+    writer: subprocess.Popen[str] | None = None
+    set_test_max_dirty_keys(1)
+    try:
+        before = read_cache_stats()
+        updates = "; ".join(
+            f"UPDATE public.{sql_identifier(table)} SET value = 'dirty-dedup-{index}' "
+            f"WHERE id = {row_id}"
+            for index in range(20)
+        )
+        sql(f"BEGIN; {updates}; COMMIT")
+        after_repeated = read_cache_stats()
+        assert after_repeated["dirty_key_limit_fallbacks"] == (
+            before["dirty_key_limit_fallbacks"]
+        ), (before, after_repeated)
+
+        expected = row_bytes(row_id, "dirty-dedup-19")
+        assert mget_one(client, key) == expected
+        before_overflow = read_cache_stats()
+        set_test_pause("after_publish", barrier_table)
+        locker = start_table_locker(
+            barrier_table,
+            application_name=f"pglc_dirty_key_barrier_{os.getpid()}",
+        )
+        writer = start_publishing_keys_writer(
+            table,
+            namespace,
+            [key, crud_key(table, overflow_id)],
+            application_name=f"pglc_dirty_key_overflow_{os.getpid()}",
+        )
+        wait_for_blocked_relation_pid(
+            barrier_table,
+            application_name=f"pglc_dirty_key_overflow_{os.getpid()}",
+            psql_process=writer,
+            timeout=10,
+        )
+
+        set_test_pause(None)
+        active = read_cache_stats()
+        assert active["dirty_key_limit_fallbacks"] >= (
+            before_overflow["dirty_key_limit_fallbacks"] + 1
+        ), (before_overflow, active)
+        assert active["dirty_relations"] > 0, active
+
+        before_bypass = read_cache_stats()
+        assert mget_one(client, key) == expected
+        after_bypass = read_cache_stats()
+        assert after_bypass["database_reads"] >= (
+            before_bypass["database_reads"] + 1
+        ), (before_bypass, after_bypass)
+
+        finish_writer(locker, commit=True)
+        locker = None
+        finish_publishing_key_writer(writer)
+        writer = None
+        finished = read_cache_stats()
+        assert finished["dirty_relations"] == 0, finished
+        assert finished["global_dirty_writers"] == 0, finished
+    finally:
+        set_test_pause(None)
+        set_test_max_dirty_keys(None)
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        if writer is not None:
+            finish_publishing_key_writer(writer)
+        client.close()
+
+
 def test_unrelated_key_fill_survives_keyed_write(
     table: str, barrier_table: str
 ) -> None:
@@ -3339,6 +3434,9 @@ def main() -> None:
                     barrier_table,
                     second_barrier_table,
                 )
+                test_dirty_key_dedup_and_relation_fallback(
+                    table, mapping_namespace, barrier_table
+                )
                 test_namespace_invalidation_preserves_other_scope(
                     table, mapping_namespace, scoped_table, barrier_table
                 )
@@ -3366,6 +3464,7 @@ def main() -> None:
                     "test_warm_hit_snapshot_and_copy_fences, "
                     "test_relation_global_claim_store_fences, "
                     "test_marker_exhaustion_falls_back_safely, "
+                    "test_dirty_key_dedup_and_relation_fallback, "
                     "test_namespace_invalidation_preserves_other_scope, "
                     "test_overlapping_publishers_on_one_key, "
                     "test_abort_after_dirty_publication, "
@@ -3380,6 +3479,7 @@ def main() -> None:
                 + "backpressure, phased MGET, close-after-flush, "
                 "sharded stat totals, "
                 "partition routing and opposite-order writers, "
+                "transaction dirty-key deduplication and relation fallback, "
                 "commit/rollback fence, database/table key scope, "
                 "uncommitted-write visibility, relation-incarnation and stale-fill fences, "
                 "completed-TRUNCATE reload fencing, "

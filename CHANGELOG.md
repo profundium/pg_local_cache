@@ -41,6 +41,8 @@ All notable changes to pg_local_cache are documented here. This project follows
   every fill.
 - Cache locks are partitioned, and request counters are sharded to reduce
   contention across concurrent clients.
+- Write transactions reuse a backend-local dirty-key table, compare only used
+  key bytes, and cache trigger key metadata to reduce invalidation CPU.
 
 ## [3.0.0] - 2026-10-04
 
