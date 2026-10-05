@@ -68,24 +68,68 @@ share its snapshot, or participate in its transaction. Setting
 
 ## Shared memory and configuration {#shared-memory-and-configuration}
 
-Cache entries, relation states, counters, worker generations, and RESP client
-slots are allocated at postmaster startup. `cache_entries` is the hard global
-maximum. Each partition has a 25% headroom cap to absorb hash variance below
-that maximum. Eviction scans rotating buckets, finishes each sampled collision
-chain so its tail is visited, and prefers stale entries; admission failure
-returns to the source table.
-Each active partition cap is `ceil(1.25 * cache_entries / active_partitions)`;
-small caches reduce the active partition count to avoid dynahash's minimum
-allocation per table. Headroom and per-partition rounding are included in the
-startup memory estimate.
+Cache descriptors, indexes, dirty markers, relation states, counters, worker
+generations, and RESP client slots are allocated at postmaster startup.
+`cache_entries` is the hard global descriptor limit, split exactly across the
+active partitions. Each 120-byte descriptor holds fence/version/lease state,
+the key hash and length, and a 32-bit arena block reference; key and value
+bytes live in the partition arena. Each partition indexes descriptors with
+4-byte IDs in an open-addressed table sized to keep load at or below 0.5. A
+separate bucket-sized scratch array rebuilds tombstoned indexes. Probes stop at
+64 buckets, and rebuild starts after tombstones exceed one eighth of the table.
+
+The partition-local arena assigns 64 KiB pages on demand to power-of-two block
+classes from 256 bytes through 16 KiB. Positive blocks hold canonical key bytes
+and the validated JSON payload (header, JSON and CRC); negative blocks hold
+only key bytes. Empty pages return to that partition's free-page pool and can
+be assigned to another class. Admission evicts eligible entries from the
+requested class using the bounded sampling policy, skipping dirty entries and
+active loads. If the requested class remains unavailable, the row is served
+from PostgreSQL and is not cached. Index, descriptor or arena pressure never
+turns a successful source read into an error.
+
+Dirty keys without cache entries use a separate bounded marker table and key
+arena. Markers are split across partitions, cannot evict cached values, and
+block cache-entry creation for the same key while any writer holds the marker.
+Marker or transaction-local dirty-set exhaustion widens fencing to the
+relation, then global scope if relation state is unavailable.
+By default, marker capacity scales with the configured cache: the entry limit
+is `min(16384, max(1024, floor(cache_entries / 4)))`. The key-memory limit is
+`min(16 MiB, max(1 MiB, floor(memory_budget_mb / 25) MiB))`; the actual key
+arena also cannot exceed the marker entry limit. Set either marker option to a
+positive value to override its automatic limit. Explicit limits retain their
+supported ranges and remain part of the exact startup budget check.
+
+The default `cache_entries` is derived at startup as the largest power of two
+that leaves at least half of the default 384 MiB budget for arena pages after
+exactly accounting for descriptors, both index arrays, markers and marker
+keys, registry, partition metadata, alignment, and worker buffers. With the
+default four workers and 64 client slots per worker, the result is 262,144:
+30 MiB of descriptors, 4 MiB of bucket and scratch IDs, about 17.2 MiB for
+markers and marker keys, about 122.2 MiB for worker memory, and at least 192
+MiB for the arena. With root, registry, locks, page descriptors, and alignment,
+that minimum layout uses about 366 MiB; the remaining roughly 18 MiB adds four
+64 KiB pages per partition, for about 208 MiB of page capacity. Doubling the
+descriptor count adds 34 MiB, exceeding the budget while preserving the 192
+MiB arena reserve. `cache_entries` can be
+raised to 16,777,216 when the configured budget and other components fit.
+Startup reports a per-component breakdown and fails if they do not fit.
+
+With 100,000 rows whose key plus approximately 150-byte JSON payload fits a
+256-byte class, the arena needs about 24.4 MiB plus page slack. One million
+such rows need about 244.2 MiB; a 512 MiB budget fits this with a smaller
+worker configuration such as one RESP worker. The exact startup estimate is
+authoritative for each configuration.
 
 | Setting | Default | Meaning |
 |---|---:|---|
 | `pg_local_cache.database` | `postgres` | database served by the extension |
-| `pg_local_cache.cache_entries` | `16384` | hard global maximum number of shared row-cache entries |
+| `pg_local_cache.cache_entries` | `262144` | hard global maximum number of compact shared row-cache descriptors; derived from the 384 MiB default budget; range `128`–`16777216` |
+| `pg_local_cache.dirty_marker_entries` | `-1` | maximum number of shared dirty-key markers; `-1` selects the automatic limit above; explicit range `128`–`1048576` |
+| `pg_local_cache.dirty_marker_memory_mb` | `-1` | maximum memory for dirty-marker keys; `-1` selects the automatic limit above; explicit range `1`–`1024` MiB |
 | `pg_local_cache.lock_partitions` | `64` | maximum cache lock partitions; small caches may use fewer; power of two from `16` to `256`; requires restart (`PGC_POSTMASTER`) |
 | `pg_local_cache.relation_states` | `1024` | shared mapping-state capacity |
-| `pg_local_cache.memory_budget_mb` | `384` | extension startup budget |
+| `pg_local_cache.memory_budget_mb` | `384` | hard extension startup budget for shared cache storage and bounded RESP worker memory |
 | `pg_local_cache.port` | `6380` | RESP port; `0` is for regression tests and diagnostics only, and serves no reads |
 | `pg_local_cache.bind_address` | `127.0.0.1` | RESP bind address |
 | `pg_local_cache.workers` | `4` | RESP workers |
@@ -170,6 +214,16 @@ exposed in `stats()` and `metrics()`.
 Database reads, invalidations, admission rejection, dirty-key fallback,
 singleflight, worker, and RESP counters remain available. The four counters for
 the removed SQL read API were removed in 3.0.0.
+
+The arena counters report its configured page capacity, live requested bytes,
+and class slack. `arena_admission_rejections_total` counts rows left uncached
+when no eligible block can be admitted. `dirty_marker_entries` is the active
+marker count; `dirty_marker_highwater` records its peak, and
+`dirty_marker_fallbacks_total` counts keyed publications widened to relation
+or global fences because marker admission failed. `dirty_marker_entries_effective`
+and `dirty_marker_memory_mb_effective` report resolved marker limits after
+automatic sizing; `dirty_marker_memory_capacity_bytes` reports allocated key
+storage, which can be lower when the entry limit is binding.
 
 Next: use the [installation guide](INSTALL_EXISTING.md) for Debian and RPM
 package verification, PGXS source builds, configuration, restarts, upgrades,

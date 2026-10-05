@@ -158,15 +158,27 @@ def run_psql(
     environment = os.environ.copy()
     if application:
         environment["PGPASSWORD"] = APP_PASSWORD
-    return subprocess.run(
-        arguments,
-        input=statement if script else None,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-        timeout=45,
-    )
+    try:
+        return subprocess.run(
+            arguments,
+            input=statement if script else None,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            timeout=45,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        raise RuntimeError(
+            f"psql timed out after 45s for {statement!r}\n"
+            f"stdout:\n{stdout}\nstderr:\n{stderr}"
+        ) from error
 
 
 def checked_psql(statement: str, *, application: bool, script: bool = False) -> str:

@@ -5,7 +5,7 @@ MODULE_big = pg_local_cache
 
 OBJS = src/pg_local_cache.o \
 	src/pg_local_cache_worker.o src/resp.o src/key_codec.o \
-	src/row_payload.o
+	src/row_payload.o src/cache_arena.o src/cache_index.o
 
 DATA := $(patsubst $(PGLC_SRCDIR)%,%,$(wildcard $(PGLC_SRCDIR)sql/pg_local_cache--*.sql))
 REGRESS = admin
@@ -13,6 +13,8 @@ REGRESS_OPTS = --inputdir=$(PGLC_SRCDIR)test
 PGFILEDESC = "pg_local_cache - transaction-aware primary-key row cache"
 EXTRA_CLEAN = tests/unit/resp_test tests/unit/resp_test_sanitized \
 	tests/unit/row_payload_test tests/unit/row_payload_test_sanitized \
+	tests/unit/cache_arena_test tests/unit/cache_arena_test_sanitized \
+	tests/unit/cache_index_test tests/unit/cache_index_test_sanitized \
 	tests/unit/resp_parse_replay tests/unit/resp_parse_replay_sanitized
 
 PG_CPPFLAGS = -I$(srcdir)/src

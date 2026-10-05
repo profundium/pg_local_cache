@@ -64,6 +64,7 @@
 #define PGLC_READY_CLIENTS_PER_TURN 8
 #define PGLC_AUTH_TOKEN_FILE_MAX 256
 #define PGLC_TLS_READ_MAX 8192
+#define PGLC_MAX_LOAD_RETRIES 3
 
 typedef struct PgLocalCacheClient
 {
@@ -2621,6 +2622,7 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 	bool		waiter_counted = waiter_already_counted;
 	uint64		load_id = 0;
 	TimestampTz wait_started;
+	int			retry_count = 0;
 	char	   *database_value = NULL;
 	Size		database_value_length = 0;
 	Size		database_payload_length = 0;
@@ -2689,6 +2691,9 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 				pglc_note_singleflight_waiter();
 				waiter_counted = true;
 			}
+			if (claim == PGLC_LOAD_RETRY &&
+				++retry_count >= PGLC_MAX_LOAD_RETRIES)
+				break;
 
 			hit = pglc_cache_lookup_quiet(mapping, canonical,
 										 cached_value, sizeof(cached_value),
@@ -2714,20 +2719,33 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 					}
 					(void) pglc_cache_invalidate_key(mapping, canonical);
 					(void) pglc_cache_lookup_quiet(mapping, canonical,
-											  cached_value, sizeof(cached_value),
-											  &cached_length, &negative,
-											  &source_xmin, &token);
+										  cached_value, sizeof(cached_value),
+										  &cached_length, &negative,
+										  &source_xmin, &token);
+					if (deadline != 0 && GetCurrentTimestamp() >= deadline)
+						break;
+					if (TimestampDifferenceExceeds(wait_started,
+											   GetCurrentTimestamp(),
+											   pglc_singleflight_wait_ms))
+					{
+						if (claim == PGLC_LOAD_WAIT)
+							pglc_note_singleflight_timeout();
+						break;
+					}
 					continue;
 				}
 			}
-			if (claim == PGLC_LOAD_RETRY)
-				continue;
 			if (TimestampDifferenceExceeds(wait_started, GetCurrentTimestamp(),
 									   pglc_singleflight_wait_ms))
 			{
-				pglc_note_singleflight_timeout();
+				if (claim == PGLC_LOAD_WAIT)
+				{
+					pglc_note_singleflight_timeout();
+				}
 				break;
 			}
+			if (claim == PGLC_LOAD_RETRY)
+				continue;
 			(void) WaitLatch(MyLatch,
 							 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
 							 1L, PG_WAIT_EXTENSION);
@@ -2811,16 +2829,17 @@ command_mget_one(PgLocalCacheMapping *mapping, const char *canonical,
 		commit_spi_transaction(transaction_context);
 		pglc_note_database_read();
 
-		if (cache_enabled)
+		/* Only a load owner can publish this read. */
+		if (cache_enabled && owns_load)
 		{
 			if (database_value == NULL)
 				pglc_cache_store(mapping, canonical, &token, NULL, 0, true,
-								 owns_load ? load_id : 0,
+								 load_id,
 								 InvalidTransactionId);
 			else if (database_payload_cacheable)
 				pglc_cache_store(mapping, canonical, &token,
 								 cached_value, database_payload_length, false,
-								 owns_load ? load_id : 0,
+								 load_id,
 								 database_xmin);
 		}
 		if (owns_load)
@@ -2925,6 +2944,8 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 		for (item_index = 0; item_index < item_count && !failed; item_index++)
 		{
 			PgLocalCacheMgetItem *item = &items[item_index];
+			TimestampTz claim_started = GetCurrentTimestamp();
+			int			retry_count = 0;
 
 			if (item->result_ready || !item->cache_enabled)
 				continue;
@@ -2938,6 +2959,11 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 					failure_code = 1;
 					break;
 				}
+				if (retry_count > 0 &&
+					TimestampDifferenceExceeds(claim_started,
+											   GetCurrentTimestamp(),
+											   pglc_singleflight_wait_ms))
+					break;
 				claim = pglc_cache_claim_load(item->mapping, item->canonical,
 												&item->token, &item->load_id);
 				if (claim == PGLC_LOAD_OWNER)
@@ -2953,6 +2979,8 @@ command_mget(PgLocalCacheRespArg *args, int argc, Size *response_length)
 					pglc_note_singleflight_waiter();
 					break;
 				}
+				if (++retry_count >= PGLC_MAX_LOAD_RETRIES)
+					break;
 
 				/* RETRY only: refresh quietly, then retry the non-blocking claim. */
 				if (mget_quiet_lookup(item, false))

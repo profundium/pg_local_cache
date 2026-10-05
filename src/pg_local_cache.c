@@ -35,11 +35,18 @@
 
 PG_MODULE_MAGIC;
 
+StaticAssertDecl(sizeof(PgLocalCacheCacheEntry) <= 128,
+				 "pg_local_cache cache descriptor must not exceed 128 bytes");
+
 int			pglc_port = 6380;
 int			pglc_worker_count = 4;
-int			pglc_cache_entries = 16384;
+int			pglc_cache_entries = 262144;
+int			pglc_dirty_marker_entries = -1;
+int			pglc_dirty_marker_memory_mb = -1;
 int			pglc_lock_partitions = 64;
 static int	pglc_active_lock_partitions = 0;
+static int	pglc_effective_dirty_marker_entries = 0;
+static int	pglc_effective_dirty_marker_memory_mb = 0;
 int			pglc_relation_states = 1024;
 int			pglc_max_clients = 256;
 int			pglc_max_clients_per_worker = 64;
@@ -66,8 +73,8 @@ char	   *pglc_tls_ca_file = NULL;
 
 PgLocalCacheSharedState *pglc_shared = NULL;
 HTAB	   *pglc_relation_hash = NULL;
-static HTAB *pglc_cache_hashes[PGLC_MAX_LOCK_PARTITIONS];
 static PgLocalCacheRelationSlot *pglc_relation_slots = NULL;
+static char *pglc_cache_storage = NULL;
 static int pglc_worker_slot = -1;
 
 static char *pglc_binary_version = NULL;
@@ -75,6 +82,7 @@ static char *pglc_binary_build_id = NULL;
 #ifdef PGLC_TEST_HOOKS
 static char *pglc_test_pause_point = NULL;
 static int pglc_test_barrier_relation_oid = 0;
+static int pglc_test_dirty_marker_limit = 0;
 static bool pglc_test_abort_after_reservation = false;
 static int pglc_test_partition_lock_depth = 0;
 #endif
@@ -113,6 +121,7 @@ typedef struct PgLocalCacheLocalDirtyEntry
 	PgLocalCacheLocalDirtyKey key;
 	Oid			relation_oid;
 	bool		shared_marker_reserved;
+	bool		shared_entry_reserved;
 	bool		shared_relation_reserved;
 	bool		shared_relation_fence_published;
 	bool		shared_identity_pin;
@@ -120,6 +129,8 @@ typedef struct PgLocalCacheLocalDirtyEntry
 	uint64		shared_slot_generation;
 	uint64		shared_relation_incarnation;
 	uint64		target_relation_incarnation;
+	uint32		shared_marker_id;
+	uint64		shared_marker_generation;
 } PgLocalCacheLocalDirtyEntry;
 
 static HTAB *local_dirty_hash = NULL;
@@ -169,16 +180,34 @@ static void pglc_collect_forget_relation(Oid database_oid, Oid relation_oid,
 static void pglc_collect_global(bool bump_config);
 static bool pglc_mapping_exists(const char *nspace);
 static uint64 pglc_workers_without_current_mappings(void);
-static uint32 pglc_cache_key_hash(const void *key, Size keysize);
-static int pglc_cache_key_match(const void *left, const void *right,
-								Size keysize);
 static uint32 pglc_cache_partition(const PgLocalCacheCacheKey *key);
 static int pglc_cache_partition_count(void);
 static Size pglc_cache_entries_per_partition(int partitions);
-static int evict_cache_entries(uint32 partition);
+static int pglc_derive_default_cache_entries(void);
+static bool pglc_check_dirty_marker_entries(int *newval, void **extra,
+										 GucSource source);
+static bool pglc_check_dirty_marker_memory_mb(int *newval, void **extra,
+										GucSource source);
+static void pglc_resolve_dirty_marker_settings(void);
+static int evict_cache_entries(uint32 partition, uint32 required_class,
+								   uint32 excluded_entry_id);
+static uint64_t cache_key_hash64(Oid database_oid, const char *nspace,
+							   const char *key, uint16 key_len);
+static bool rebuild_cache_index(uint32 partition);
+static bool cache_entry_remove_locked(uint32 partition, uint32 entry_id);
+static bool reserve_cache_entry(void);
+static void release_cache_entry(void);
+static uint32 cache_marker_find(uint32 partition, uint64 hash,
+								const char *key, uint16 key_len,
+								uint32 relation_slot,
+								uint64 relation_slot_generation);
+static bool rebuild_marker_index(uint32 partition);
 static void
 pglc_define_gucs(void)
 {
+	int			default_cache_entries = pglc_derive_default_cache_entries();
+
+	pglc_cache_entries = default_cache_entries;
 	DefineCustomBoolVariable("pg_local_cache.enabled",
 							 "Enable RESP cache lookups and fills.",
 							 NULL,
@@ -306,15 +335,41 @@ pglc_define_gucs(void)
 							NULL);
 
 	DefineCustomIntVariable("pg_local_cache.cache_entries",
-							"Maximum number of shared row-cache entries.",
+							"Maximum number of compact shared row-cache descriptors.",
 							NULL,
 							&pglc_cache_entries,
-							16384,
+							default_cache_entries,
 							128,
-							65536,
+							16777216,
 							PGC_POSTMASTER,
 							0,
 							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_local_cache.dirty_marker_entries",
+							"Maximum shared dirty-key markers; -1 selects an automatic limit.",
+							NULL,
+							&pglc_dirty_marker_entries,
+							-1,
+							-1,
+							1048576,
+							PGC_POSTMASTER,
+							0,
+							pglc_check_dirty_marker_entries,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_local_cache.dirty_marker_memory_mb",
+							"Memory bound for dirty-marker keys; -1 selects an automatic limit.",
+							NULL,
+							&pglc_dirty_marker_memory_mb,
+							-1,
+							-1,
+							1024,
+							PGC_POSTMASTER,
+							GUC_UNIT_MB,
+							pglc_check_dirty_marker_memory_mb,
 							NULL,
 							NULL);
 
@@ -549,6 +604,19 @@ pglc_define_gucs(void)
 							PGC_SIGHUP,
 							GUC_SUPERUSER_ONLY,
 							NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomIntVariable("pg_local_cache.test_dirty_marker_limit",
+							"Test-only dirty-marker admission cap; zero disables it.",
+							NULL,
+							&pglc_test_dirty_marker_limit,
+							0,
+							0,
+							16777216,
+							PGC_SIGHUP,
+							GUC_SUPERUSER_ONLY,
+							NULL,
 							NULL,
 							NULL);
 #endif
@@ -561,20 +629,28 @@ pglc_define_gucs(void)
 }
 
 #ifdef PGLC_TEST_HOOKS
-static void
+static bool
 pglc_test_pause_at(const char *point)
 {
 	LOCKTAG		tag;
+	uint32		partition;
+
+	Assert(pglc_shared != NULL);
+	Assert(!LWLockHeldByMe(pglc_shared->registry_lock));
+	for (partition = 0; partition < (uint32) pglc_active_lock_partitions;
+		 partition++)
+		Assert(!LWLockHeldByMe(pglc_shared->partitions[partition].lock));
 
 	if (pglc_test_pause_point == NULL ||
 		strcmp(pglc_test_pause_point, point) != 0 ||
 		pglc_test_barrier_relation_oid <= 0)
-		return;
+		return false;
 
 	SET_LOCKTAG_RELATION(tag, MyDatabaseId,
 						 (Oid) pglc_test_barrier_relation_oid);
 	(void) LockAcquire(&tag, AccessShareLock, true, false);
 	LockRelease(&tag, AccessShareLock, true);
+	return true;
 }
 #endif
 
@@ -606,6 +682,34 @@ pglc_partition_lock_release(uint32 partition)
 #endif
 }
 
+static bool
+pglc_check_dirty_marker_entries(int *newval, void **extra, GucSource source)
+{
+	(void) extra;
+	(void) source;
+	return *newval == -1 || (*newval >= 128 && *newval <= 1048576);
+}
+
+static bool
+pglc_check_dirty_marker_memory_mb(int *newval, void **extra, GucSource source)
+{
+	(void) extra;
+	(void) source;
+	return *newval == -1 || (*newval >= 1 && *newval <= 1024);
+}
+
+static void
+pglc_resolve_dirty_marker_settings(void)
+{
+	pglc_effective_dirty_marker_entries = pglc_dirty_marker_entries == -1 ?
+		Min(16384, Max(1024, pglc_cache_entries / 4)) :
+		pglc_dirty_marker_entries;
+	pglc_effective_dirty_marker_memory_mb =
+		pglc_dirty_marker_memory_mb == -1 ?
+		Min(16, Max(1, pglc_memory_budget_mb / 25)) :
+		pglc_dirty_marker_memory_mb;
+}
+
 void
 _PG_init(void)
 {
@@ -620,6 +724,7 @@ _PG_init(void)
 		return;
 
 	pglc_was_preloaded = true;
+	pglc_resolve_dirty_marker_settings();
 	pglc_validate_startup_limits();
 
 #if PG_VERSION_NUM >= 150000
@@ -651,47 +756,66 @@ _PG_init(void)
 	}
 }
 
-static Size
-pglc_addin_shmem_bytes(void)
+typedef struct PgLocalCacheMemoryBreakdown
 {
-	Size		size = MAXALIGN(sizeof(PgLocalCacheSharedState));
-	int			partitions = pglc_cache_partition_count();
-	Size		per_partition = pglc_cache_entries_per_partition(partitions);
-	int			partition;
+	Size		workers;
+	Size		descriptors;
+	Size		buckets;
+	Size		scratch;
+	Size		markers;
+	Size		marker_buckets;
+	Size		marker_scratch;
+	Size		marker_keys;
+	Size		marker_key_free_list;
+	Size		registry;
+	Size		shared_state_and_locks;
+	Size		page_descriptors;
+	Size		arena;
+	Size		layout_overhead;
+	Size		total;
+} PgLocalCacheMemoryBreakdown;
 
-	for (partition = 0; partition < partitions; partition++)
-		size = add_size(size,
-						hash_estimate_size(per_partition,
-										   sizeof(PgLocalCacheCacheEntry)));
-	size = add_size(size,
-					hash_estimate_size(pglc_relation_states,
-									   sizeof(PgLocalCacheRelationState)));
-	size = add_size(size,
-					mul_size((Size) pglc_relation_states,
-							 sizeof(PgLocalCacheRelationSlot)));
-	return size;
+static Size
+pglc_align_append(Size *offset, Size bytes)
+{
+	Size		start = MAXALIGN(*offset);
+
+	*offset = add_size(start, MAXALIGN(bytes));
+	return start;
 }
 
-/*
- * cache_entries is the hard global maximum. Each independently bounded
- * partition gets 25% headroom so ordinary hash variance does not force
- * eviction before the configured aggregate working set is reached. This
- * exact per-partition cap is also used by the shared-memory estimate.
- */
-static Size
-pglc_cache_entries_per_partition(int partitions)
+static void *
+pglc_storage_take(Size *offset, Size bytes)
 {
-	Size		target = mul_size((Size) pglc_cache_entries, (Size) 5);
-	Size		divisor = mul_size((Size) partitions, (Size) 4);
+	Size		start = pglc_align_append(offset, bytes);
 
-	return add_size(target, divisor - 1) / divisor;
+	return pglc_cache_storage + start;
 }
 
-/*
- * Dynahash allocates entries in batches of at least 32 per table. Avoid
- * multiplying that minimum across partitions when the configured cache is
- * small; lock_partitions remains an upper bound.
- */
+static uint32
+pglc_next_power_of_two(uint32 requested)
+{
+	uint32		result = 1;
+
+	while (result < requested)
+		result <<= 1;
+	return result;
+}
+
+static uint32
+pglc_partition_capacity(uint32 total, uint32 partition, uint32 partitions)
+{
+	return total / partitions + (partition < total % partitions ? 1U : 0U);
+}
+
+static uint32
+pglc_index_buckets_for(uint32 capacity)
+{
+	uint32		minimum = Max(16U, capacity * 2U);
+
+	return pglc_next_power_of_two(minimum);
+}
+
 static int
 pglc_cache_partition_count(void)
 {
@@ -700,12 +824,132 @@ pglc_cache_partition_count(void)
 	if (pglc_active_lock_partitions != 0)
 		return pglc_active_lock_partitions;
 	partitions = pglc_lock_partitions;
-
 	while (partitions > 16 &&
 		   pglc_cache_entries_per_partition(partitions) < 32)
 		partitions >>= 1;
 	pglc_active_lock_partitions = partitions;
-	return pglc_active_lock_partitions;
+	return partitions;
+}
+
+static Size
+pglc_cache_entries_per_partition(int partitions)
+{
+	return add_size((Size) pglc_cache_entries, (Size) partitions - 1) /
+		(Size) partitions;
+}
+
+static Size
+pglc_cache_storage_fixed_bytes(void)
+{
+	Size		offset = 0;
+	uint32		partitions = (uint32) pglc_cache_partition_count();
+	uint32		partition;
+	uint32		marker_key_slots = (uint32) Min(
+			(Size) pglc_effective_dirty_marker_entries,
+			mul_size((Size) pglc_effective_dirty_marker_memory_mb,
+					 (Size) 1024 * 1024) /
+			PGLC_KEY_MAX);
+
+	for (partition = 0; partition < partitions; partition++)
+	{
+		uint32		capacity = pglc_partition_capacity(
+			(uint32) pglc_cache_entries, partition, partitions);
+		uint32		buckets = pglc_index_buckets_for(capacity);
+		uint32		marker_capacity = pglc_partition_capacity(
+			(uint32) pglc_effective_dirty_marker_entries, partition, partitions);
+		uint32		marker_buckets = pglc_index_buckets_for(marker_capacity);
+		uint32		key_slots = pglc_partition_capacity(
+			marker_key_slots, partition, partitions);
+
+		(void) pglc_align_append(&offset,
+								mul_size((Size) capacity,
+										 sizeof(PgLocalCacheCacheEntry)));
+		(void) pglc_align_append(&offset,
+								mul_size((Size) buckets, sizeof(uint32)));
+		(void) pglc_align_append(&offset,
+								mul_size((Size) buckets, sizeof(uint32)));
+		(void) pglc_align_append(&offset,
+								mul_size((Size) marker_capacity,
+										 sizeof(PgLocalCacheDirtyMarker)));
+		(void) pglc_align_append(&offset,
+								mul_size((Size) marker_buckets, sizeof(uint32)));
+		(void) pglc_align_append(&offset,
+								mul_size((Size) marker_buckets, sizeof(uint32)));
+		(void) pglc_align_append(&offset,
+								mul_size((Size) key_slots, PGLC_KEY_MAX));
+		(void) pglc_align_append(&offset,
+								mul_size((Size) key_slots, sizeof(uint32)));
+	}
+	return add_size(offset, MAXALIGN(64));
+}
+
+static Size
+pglc_common_memory_bytes(void)
+{
+	Size		size = MAXALIGN(sizeof(PgLocalCacheSharedState));
+	int			partitions = pglc_cache_partition_count();
+
+	size = add_size(size,
+					hash_estimate_size(pglc_relation_states,
+									   sizeof(PgLocalCacheRelationState)));
+	size = add_size(size,
+					mul_size((Size) pglc_relation_states,
+							 sizeof(PgLocalCacheRelationSlot)));
+	size = add_size(size,
+					mul_size((Size) partitions + 1,
+							 sizeof(LWLockPadded)));
+	return size;
+}
+
+static Size
+pglc_cache_storage_bytes(uint32 pages_per_partition)
+{
+	Size		offset = pglc_cache_storage_fixed_bytes();
+	uint32		partitions = (uint32) pglc_cache_partition_count();
+	Size		page_count = mul_size((Size) pages_per_partition, partitions);
+
+	(void) pglc_align_append(&offset,
+							mul_size(page_count, sizeof(PglcArenaPage)));
+	(void) pglc_align_append(&offset,
+							mul_size(page_count, PGLC_ARENA_PAGE_SIZE));
+	return offset;
+}
+
+static uint32
+pglc_arena_pages_per_partition(void)
+{
+	Size		budget = mul_size((Size) pglc_memory_budget_mb,
+								(Size) 1024 * 1024);
+	Size		non_cache = add_size(pglc_common_memory_bytes(),
+								 pglc_worker_memory_bytes());
+	Size		fixed;
+	Size		per_page = add_size(PGLC_ARENA_PAGE_SIZE,
+								MAXALIGN(sizeof(PglcArenaPage)));
+	Size		available;
+	uint32		pages;
+
+	fixed = add_size(non_cache, pglc_cache_storage_fixed_bytes());
+	if (fixed >= budget)
+		return 0;
+	available = budget - fixed;
+	pages = (uint32) (available /
+		((Size) pglc_cache_partition_count() * per_page));
+	while (pages > 0 &&
+		   add_size(non_cache, pglc_cache_storage_bytes(pages)) > budget)
+		pages--;
+	return pages;
+}
+
+static Size
+pglc_addin_shmem_bytes(void)
+{
+	return add_size(MAXALIGN(sizeof(PgLocalCacheSharedState)),
+				add_size(hash_estimate_size(pglc_relation_states,
+											 sizeof(PgLocalCacheRelationState)),
+					add_size(mul_size((Size) pglc_relation_states,
+										 sizeof(PgLocalCacheRelationSlot)),
+						 pglc_cache_storage_bytes(
+							 pglc_arena_pages_per_partition()))));
 }
 
 Size
@@ -723,11 +967,132 @@ pglc_estimated_memory_bytes(void)
 }
 
 static void
+pglc_memory_breakdown(PgLocalCacheMemoryBreakdown *breakdown)
+{
+	uint32		partitions = (uint32) pglc_cache_partition_count();
+	uint32		pages = pglc_arena_pages_per_partition();
+	uint32		marker_key_slots = (uint32) Min(
+			(Size) pglc_effective_dirty_marker_entries,
+			mul_size((Size) pglc_effective_dirty_marker_memory_mb,
+					 (Size) 1024 * 1024) /
+			PGLC_KEY_MAX);
+	uint32		partition;
+	Size		cache_bucket_total = 0;
+	Size		marker_bucket_total = 0;
+	Size		marker_key_total = 0;
+	Size		marker_key_free_total = 0;
+	Size		marker_desc_total = 0;
+
+	memset(breakdown, 0, sizeof(*breakdown));
+	breakdown->workers = pglc_worker_memory_bytes();
+	breakdown->descriptors = mul_size((Size) pglc_cache_entries,
+									  sizeof(PgLocalCacheCacheEntry));
+	for (partition = 0; partition < partitions; partition++)
+	{
+		uint32		capacity = pglc_partition_capacity(
+			(uint32) pglc_cache_entries, partition, partitions);
+		uint32		buckets = pglc_index_buckets_for(capacity);
+		uint32		marker_capacity = pglc_partition_capacity(
+			(uint32) pglc_effective_dirty_marker_entries, partition, partitions);
+		uint32		marker_buckets = pglc_index_buckets_for(marker_capacity);
+		uint32		key_slots = pglc_partition_capacity(
+			marker_key_slots, partition, partitions);
+
+		cache_bucket_total = add_size(cache_bucket_total,
+									  mul_size((Size) buckets, sizeof(uint32)));
+		marker_bucket_total = add_size(marker_bucket_total,
+									   mul_size((Size) marker_buckets,
+											 sizeof(uint32)));
+		marker_desc_total = add_size(marker_desc_total,
+									  mul_size((Size) marker_capacity,
+											 sizeof(PgLocalCacheDirtyMarker)));
+		marker_key_total = add_size(marker_key_total,
+									 mul_size((Size) key_slots, PGLC_KEY_MAX));
+		marker_key_free_total = add_size(marker_key_free_total,
+									  mul_size((Size) key_slots, sizeof(uint32)));
+	}
+	breakdown->buckets = cache_bucket_total;
+	breakdown->scratch = cache_bucket_total;
+	breakdown->markers = marker_desc_total;
+	breakdown->marker_buckets = marker_bucket_total;
+	breakdown->marker_scratch = marker_bucket_total;
+	breakdown->marker_keys = marker_key_total;
+	breakdown->marker_key_free_list = marker_key_free_total;
+	breakdown->registry = add_size(
+		hash_estimate_size(pglc_relation_states,
+						   sizeof(PgLocalCacheRelationState)),
+		mul_size((Size) pglc_relation_states,
+				 sizeof(PgLocalCacheRelationSlot)));
+	breakdown->shared_state_and_locks = add_size(
+		MAXALIGN(sizeof(PgLocalCacheSharedState)),
+		mul_size((Size) partitions + 1, sizeof(LWLockPadded)));
+	breakdown->page_descriptors = mul_size(
+		mul_size((Size) pages, partitions), sizeof(PglcArenaPage));
+	breakdown->arena = mul_size(mul_size((Size) pages, partitions),
+								 PGLC_ARENA_PAGE_SIZE);
+	breakdown->total = pglc_estimated_memory_bytes();
+	{
+		Size		components = 0;
+
+		components = add_size(components, breakdown->workers);
+		components = add_size(components, breakdown->descriptors);
+		components = add_size(components, breakdown->buckets);
+		components = add_size(components, breakdown->scratch);
+		components = add_size(components, breakdown->markers);
+		components = add_size(components, breakdown->marker_buckets);
+		components = add_size(components, breakdown->marker_scratch);
+		components = add_size(components, breakdown->marker_keys);
+		components = add_size(components, breakdown->marker_key_free_list);
+		components = add_size(components, breakdown->registry);
+		components = add_size(components, breakdown->shared_state_and_locks);
+		components = add_size(components, breakdown->page_descriptors);
+		components = add_size(components, breakdown->arena);
+		Assert(components <= breakdown->total);
+		breakdown->layout_overhead = breakdown->total - components;
+	}
+}
+
+static int
+pglc_derive_default_cache_entries(void)
+{
+	Size		budget = (Size) 384 * 1024 * 1024;
+	uint32		partitions = (uint32) pglc_lock_partitions;
+	uint32		minimum_pages = (uint32) (((budget / 2) +
+			((Size) partitions * PGLC_ARENA_PAGE_SIZE) - 1) /
+			((Size) partitions * PGLC_ARENA_PAGE_SIZE));
+	int			best = 128;
+	int			candidate;
+
+	for (candidate = 128; candidate <= 16777216; candidate <<= 1)
+	{
+		int			previous_entries = pglc_cache_entries;
+		int			previous_partitions = pglc_active_lock_partitions;
+			Size		need;
+			Size		arena_bytes;
+
+		pglc_cache_entries = candidate;
+		pglc_active_lock_partitions = 0;
+		need = add_size(pglc_common_memory_bytes(), pglc_worker_memory_bytes());
+		need = add_size(need, pglc_cache_storage_bytes(minimum_pages));
+		arena_bytes = mul_size(
+			mul_size((Size) minimum_pages, partitions),
+			PGLC_ARENA_PAGE_SIZE);
+		pglc_cache_entries = previous_entries;
+		pglc_active_lock_partitions = previous_partitions;
+		if (need > budget || arena_bytes < budget / 2)
+			break;
+		best = candidate;
+	}
+	return best;
+}
+
+static void
 pglc_validate_startup_limits(void)
 {
 	Size		budget_bytes;
 	Size		estimated_bytes;
 	uint64		client_slots;
+	PgLocalCacheMemoryBreakdown breakdown;
 
 	if (pglc_port != 0)
 	{
@@ -741,6 +1106,11 @@ pglc_validate_startup_limits(void)
 							   pglc_max_clients_per_worker, client_slots),
 					 errhint("Increase pg_local_cache.workers or pg_local_cache.max_clients_per_worker, or lower pg_local_cache.max_clients.")));
 	}
+	if (pglc_cache_entries < 128 || pglc_cache_entries > 16777216 ||
+		pglc_effective_dirty_marker_entries < 128 ||
+		pglc_effective_dirty_marker_memory_mb < 1)
+		ereport(FATAL,
+				(errmsg("pg_local_cache capacity settings are outside supported bounds")));
 	if (pglc_lock_partitions < 16 ||
 		pglc_lock_partitions > PGLC_MAX_LOCK_PARTITIONS ||
 		(pglc_lock_partitions & (pglc_lock_partitions - 1)) != 0)
@@ -750,12 +1120,23 @@ pglc_validate_startup_limits(void)
 	budget_bytes = mul_size((Size) pglc_memory_budget_mb,
 							(Size) 1024 * 1024);
 	estimated_bytes = pglc_estimated_memory_bytes();
-	if (estimated_bytes > budget_bytes)
-			ereport(FATAL,
-					 (errmsg("pg_local_cache estimated memory exceeds its configured budget"),
-					  errdetail("Estimated deterministic extension memory is %zu bytes; pg_local_cache.memory_budget_mb allows %zu bytes.",
-								estimated_bytes, budget_bytes),
-					 errhint("Raise pg_local_cache.memory_budget_mb; lower cache_entries, relation_states, workers, or max_clients_per_worker; or lower PostgreSQL backend limits.")));
+	pglc_memory_breakdown(&breakdown);
+	if (estimated_bytes > budget_bytes ||
+		pglc_arena_pages_per_partition() == 0)
+		ereport(FATAL,
+				 (errmsg("pg_local_cache configuration does not fit its memory budget"),
+				  errdetail("workers=%zu; descriptors=%zu; buckets=%zu; index scratch=%zu; markers=%zu; marker buckets=%zu; marker scratch=%zu; marker keys=%zu; marker key free list=%zu; registry=%zu; shared state and locks=%zu; page descriptors=%zu; slab arena=%zu; layout alignment=%zu; total=%zu; budget=%zu bytes.",
+							breakdown.workers, breakdown.descriptors,
+							breakdown.buckets, breakdown.scratch,
+							breakdown.markers, breakdown.marker_buckets,
+							breakdown.marker_scratch, breakdown.marker_keys,
+							breakdown.marker_key_free_list,
+							breakdown.registry,
+							breakdown.shared_state_and_locks,
+							breakdown.page_descriptors, breakdown.arena,
+							breakdown.layout_overhead, breakdown.total,
+							budget_bytes),
+				 errhint("Lower cache_entries, marker limits, workers, or client slots; or raise memory_budget_mb.")));
 }
 
 static void
@@ -775,12 +1156,21 @@ static void
 pglc_shmem_startup(void)
 {
 	bool		found;
+	bool		shared_found;
+	bool		storage_found;
 	HASHCTL		control;
 	int		worker_index;
 	int		partition;
 	int			partitions = pglc_cache_partition_count();
-	Size		per_partition = pglc_cache_entries_per_partition(partitions);
-	char		name[64];
+	uint32		pages_per_partition = pglc_arena_pages_per_partition();
+	uint32		marker_key_slots = (uint32) Min(
+			(Size) pglc_effective_dirty_marker_entries,
+			mul_size((Size) pglc_effective_dirty_marker_memory_mb,
+					 (Size) 1024 * 1024) /
+			PGLC_KEY_MAX);
+	Size		offset = 0;
+	PglcArenaPage *all_pages;
+	char	   *all_arena_memory;
 
 	if (previous_shmem_startup_hook)
 		previous_shmem_startup_hook();
@@ -789,8 +1179,9 @@ pglc_shmem_startup(void)
 
 	pglc_shared = ShmemInitStruct("pg_local_cache shared state",
 								 sizeof(PgLocalCacheSharedState),
-								 &found);
-	if (!found)
+								 &shared_found);
+	found = shared_found;
+	if (!shared_found)
 	{
 		memset(pglc_shared, 0, sizeof(PgLocalCacheSharedState));
 		pglc_shared->registry_lock =
@@ -799,8 +1190,6 @@ pglc_shmem_startup(void)
 		{
 			pglc_shared->partitions[partition].lock =
 				&(GetNamedLWLockTranche("pg_local_cache"))[partition + 1].lock;
-			pglc_shared->partitions[partition].capacity =
-				(uint32) per_partition;
 		}
 		pg_atomic_init_u64(&pglc_shared->clock, 0);
 		pg_atomic_init_u64(&pglc_shared->relation_incarnation_counter, 0);
@@ -840,6 +1229,10 @@ pglc_shmem_startup(void)
 			pg_atomic_init_u64(
 				&pglc_shared->worker_mapping_generations[worker_index], 0);
 		pg_atomic_init_u64(&pglc_shared->cache_admission_rejections, 0);
+		pg_atomic_init_u64(&pglc_shared->arena_admission_rejections_total, 0);
+		pg_atomic_init_u64(&pglc_shared->dirty_marker_entries, 0);
+		pg_atomic_init_u64(&pglc_shared->dirty_marker_highwater, 0);
+		pg_atomic_init_u64(&pglc_shared->dirty_marker_fallbacks_total, 0);
 		pg_atomic_init_u64(&pglc_shared->relation_state_admission_rejections, 0);
 		pg_atomic_init_u64(&pglc_shared->dirty_key_limit_fallbacks, 0);
 		pg_atomic_init_u64(&pglc_shared->mapping_reload_attempts, 0);
@@ -890,6 +1283,120 @@ pglc_shmem_startup(void)
 		}
 	}
 
+	pglc_cache_storage = ShmemInitStruct("pg_local_cache cache storage",
+											 pglc_cache_storage_bytes(
+											 pages_per_partition),
+											 &storage_found);
+	if (shared_found != storage_found)
+		ereport(FATAL,
+				(errmsg("pg_local_cache shared-memory layout is incomplete")));
+	for (partition = 0; partition < partitions; partition++)
+	{
+		PgLocalCachePartition *cache_partition =
+			&pglc_shared->partitions[partition];
+		uint32		capacity = pglc_partition_capacity(
+			(uint32) pglc_cache_entries, (uint32) partition,
+			(uint32) partitions);
+		uint32		bucket_count = pglc_index_buckets_for(capacity);
+		uint32		marker_capacity = pglc_partition_capacity(
+			(uint32) pglc_effective_dirty_marker_entries, (uint32) partition,
+			(uint32) partitions);
+		uint32		marker_bucket_count = pglc_index_buckets_for(marker_capacity);
+		uint32		key_capacity = pglc_partition_capacity(
+			marker_key_slots, (uint32) partition, (uint32) partitions);
+		uint32		entry_index;
+
+		cache_partition->entries = pglc_storage_take(
+			&offset, mul_size((Size) capacity,
+							 sizeof(PgLocalCacheCacheEntry)));
+		cache_partition->index.buckets = pglc_storage_take(
+			&offset, mul_size((Size) bucket_count, sizeof(uint32)));
+		cache_partition->index.scratch = pglc_storage_take(
+			&offset, mul_size((Size) bucket_count, sizeof(uint32)));
+		cache_partition->markers = pglc_storage_take(
+			&offset, mul_size((Size) marker_capacity,
+							 sizeof(PgLocalCacheDirtyMarker)));
+		cache_partition->marker_index.buckets = pglc_storage_take(
+			&offset, mul_size((Size) marker_bucket_count, sizeof(uint32)));
+		cache_partition->marker_index.scratch = pglc_storage_take(
+			&offset, mul_size((Size) marker_bucket_count, sizeof(uint32)));
+		cache_partition->marker_key_arena = pglc_storage_take(
+			&offset, mul_size((Size) key_capacity, PGLC_KEY_MAX));
+		cache_partition->marker_key_free_next = pglc_storage_take(
+			&offset, mul_size((Size) key_capacity, sizeof(uint32)));
+		cache_partition->capacity = capacity;
+		cache_partition->marker_capacity = marker_capacity;
+		cache_partition->marker_key_capacity = key_capacity;
+		cache_partition->lock =
+			&(GetNamedLWLockTranche("pg_local_cache"))[partition + 1].lock;
+		if (!storage_found)
+		{
+			pglc_index_init(&cache_partition->index,
+							cache_partition->index.buckets,
+							cache_partition->index.scratch, bucket_count);
+			pglc_index_init(&cache_partition->marker_index,
+							cache_partition->marker_index.buckets,
+							cache_partition->marker_index.scratch,
+							marker_bucket_count);
+			memset(cache_partition->entries, 0,
+				   mul_size((Size) capacity, sizeof(PgLocalCacheCacheEntry)));
+			for (entry_index = 0; entry_index < capacity; entry_index++)
+			{
+				cache_partition->entries[entry_index].free_next =
+					entry_index + 1 < capacity ? entry_index + 2 : 0;
+				pg_atomic_init_u64(
+					&cache_partition->entries[entry_index].last_access, 0);
+			}
+			cache_partition->free_entry_head = capacity > 0 ? 1 : 0;
+			memset(cache_partition->markers, 0,
+				   mul_size((Size) marker_capacity,
+							 sizeof(PgLocalCacheDirtyMarker)));
+			for (entry_index = 0; entry_index < marker_capacity; entry_index++)
+				cache_partition->markers[entry_index].free_next =
+					entry_index + 1 < marker_capacity ? entry_index + 2 : 0;
+			cache_partition->marker_free_head = marker_capacity > 0 ? 1 : 0;
+			for (entry_index = 0; entry_index < key_capacity; entry_index++)
+				cache_partition->marker_key_free_next[entry_index] =
+					entry_index + 1 < key_capacity ? entry_index + 2 : 0;
+			cache_partition->marker_key_free_head = key_capacity > 0 ? 1 : 0;
+			cache_partition->entry_count = 0;
+			cache_partition->marker_count = 0;
+		}
+	}
+	(void) pglc_storage_take(&offset, MAXALIGN(64));
+	all_pages = pglc_storage_take(
+		&offset, mul_size(mul_size((Size) pages_per_partition,
+									  (Size) partitions), sizeof(PglcArenaPage)));
+	all_arena_memory = pglc_storage_take(
+		&offset, mul_size(mul_size((Size) pages_per_partition,
+								  (Size) partitions),
+						PGLC_ARENA_PAGE_SIZE));
+	for (partition = 0; partition < partitions; partition++)
+	{
+		PgLocalCachePartition *cache_partition =
+			&pglc_shared->partitions[partition];
+		PglcArenaPage *partition_pages = all_pages +
+			(Size) partition * pages_per_partition;
+		char	   *partition_memory = all_arena_memory +
+			(Size) partition * pages_per_partition * PGLC_ARENA_PAGE_SIZE;
+
+		if (!storage_found &&
+			!pglc_arena_init(&cache_partition->arena, partition_memory,
+							 partition_pages, pages_per_partition))
+			ereport(FATAL,
+					(errmsg("pg_local_cache arena exceeds its 32-bit block-reference limit"),
+					 errdetail("partition_pages=%u; page_size=%u; partition_capacity_bytes=%llu.",
+							   pages_per_partition, PGLC_ARENA_PAGE_SIZE,
+							   (unsigned long long) pages_per_partition *
+							   PGLC_ARENA_PAGE_SIZE)));
+		else
+		{
+			cache_partition->arena.memory = (uint8 *) partition_memory;
+			cache_partition->arena.pages = partition_pages;
+			cache_partition->arena.page_count = pages_per_partition;
+		}
+	}
+
 	pglc_relation_slots = ShmemInitStruct("pg_local_cache relation slots",
 											 mul_size((Size) pglc_relation_states,
 											  sizeof(PgLocalCacheRelationSlot)),
@@ -909,21 +1416,6 @@ pglc_shmem_startup(void)
 	}
 
 	memset(&control, 0, sizeof(control));
-	control.keysize = sizeof(PgLocalCacheCacheKey);
-	control.entrysize = sizeof(PgLocalCacheCacheEntry);
-	control.hash = pglc_cache_key_hash;
-	control.match = pglc_cache_key_match;
-	for (partition = 0; partition < partitions; partition++)
-	{
-		snprintf(name, sizeof(name), "pg_local_cache cache %d", partition);
-		pglc_cache_hashes[partition] = ShmemInitHash(name,
-												per_partition,
-												per_partition,
-												&control,
-												HASH_ELEM | HASH_FUNCTION |
-												HASH_COMPARE);
-	}
-	memset(&control, 0, sizeof(control));
 	control.keysize = sizeof(PgLocalCacheRelationKey);
 	control.entrysize = sizeof(PgLocalCacheRelationState);
 	pglc_relation_hash = ShmemInitHash("pg_local_cache relation state",
@@ -939,7 +1431,8 @@ void
 pglc_require_preload(void)
 {
 	if (!pglc_was_preloaded || pglc_shared == NULL ||
-		pglc_cache_hashes[0] == NULL || pglc_relation_hash == NULL ||
+		pglc_shared->partitions[0].entries == NULL ||
+		pglc_relation_hash == NULL ||
 		pglc_relation_slots == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -972,56 +1465,23 @@ pglc_worker_stat_add(pg_atomic_uint64 *fallback, Size offset, uint64 amount)
 		amount);
 }
 
-/*
- * Cache keys reserve room for the largest supported namespace and encoded
- * primary key.  Hashing the entire fixed-size struct would process more than
- * a kilobyte for every lookup even when the key itself is only a few bytes.
- * Hash and compare only the initialized fields; dynahash still verifies the
- * complete logical key, so hash collisions cannot alias entries.
- */
-static uint32
-pglc_cache_key_hash(const void *key, Size keysize)
+static uint64_t
+cache_key_hash64(Oid database_oid, const char *nspace,
+				 const char *key, uint16 key_len)
 {
-	const PgLocalCacheCacheKey *cache_key =
-		(const PgLocalCacheCacheKey *) key;
-	Size		namespace_len;
-	Size		key_len;
-	uint64		hash;
+	Size		namespace_len = strnlen(nspace, PGLC_NAMESPACE_MAX);
+	uint64_t	hash = hash_bytes_extended((const unsigned char *) &database_oid,
+										 sizeof(database_oid), 0);
 
-	namespace_len = strnlen(cache_key->nspace, sizeof(cache_key->nspace));
-	key_len = strnlen(cache_key->key, sizeof(cache_key->key));
-	hash = hash_bytes_extended((const unsigned char *) &cache_key->database_oid,
-								 sizeof(cache_key->database_oid), 0);
-	hash = hash_bytes_extended((const unsigned char *) cache_key->nspace,
-								 namespace_len, hash);
-	hash = hash_bytes_extended((const unsigned char *) cache_key->key,
-								 key_len, hash);
-	(void) keysize;
-	return (uint32) (hash ^ (hash >> 32));
-}
-
-static int
-pglc_cache_key_match(const void *left, const void *right, Size keysize)
-{
-	const PgLocalCacheCacheKey *left_key =
-		(const PgLocalCacheCacheKey *) left;
-	const PgLocalCacheCacheKey *right_key =
-		(const PgLocalCacheCacheKey *) right;
-
-	(void) keysize;
-	if (left_key->database_oid != right_key->database_oid)
-		return 1;
-	if (strncmp(left_key->nspace, right_key->nspace,
-				 sizeof(left_key->nspace)) != 0)
-		return 1;
-	return strncmp(left_key->key, right_key->key,
-				   sizeof(left_key->key));
+	hash = hash_bytes_extended((const unsigned char *) nspace, namespace_len,
+								hash);
+	return hash_bytes_extended((const unsigned char *) key, key_len, hash);
 }
 
 static uint32
 pglc_cache_partition(const PgLocalCacheCacheKey *key)
 {
-	uint32		hash;
+	uint64		hash;
 	uint32		partition_bits = 0;
 	uint32		partition_count = (uint32) pglc_cache_partition_count();
 
@@ -1032,9 +1492,11 @@ pglc_cache_partition(const PgLocalCacheCacheKey *key)
 		partition_bits++;
 		partition_count >>= 1;
 	}
-	/* dynahash selects buckets from low hash bits; route partitions from high. */
-	hash = pglc_cache_key_hash(key, sizeof(*key));
-	return hash >> (32 - partition_bits);
+	/* Keep partition routing on high hash bits to distribute related hash lanes. */
+	hash = cache_key_hash64(key->database_oid, key->nspace,
+						 key->key, (uint16) strnlen(key->key,
+															 sizeof(key->key)));
+	return (uint32) (hash >> (64 - partition_bits));
 }
 
 static void
@@ -1368,9 +1830,6 @@ read_fence_snapshot(const PgLocalCacheMapping *mapping,
 		entry != NULL ? entry->relation_incarnation : 0;
 	snapshot->entry_slot_generation =
 		entry != NULL ? entry->slot_generation : 0;
-#ifdef PGLC_TEST_HOOKS
-	pglc_test_pause_at("after_snapshot_first_read");
-#endif
 	pg_read_barrier();
 	global_version_after = pg_atomic_read_u64(&pglc_shared->global_version);
 	relation_version_after = pg_atomic_read_u64(&slot->version);
@@ -1472,117 +1931,258 @@ cache_load_is_active_locked(PgLocalCacheCacheEntry *entry, TimestampTz now,
 	return false;
 }
 
-static int
-evict_cache_entries(uint32 partition)
+typedef struct PgLocalCacheEntryQuery
 {
-	HASH_SEQ_STATUS sequence;
+	PgLocalCachePartition *partition;
+	uint64_t	hash;
+	const char *key;
+	uint16		key_len;
+	Oid			database_oid;
+	Oid			relation_oid;
+	uint32		relation_slot;
+	uint64		slot_generation;
+	uint32		expected_id;
+	uint32		corrupt_entry_id;
+	bool		corrupt;
+} PgLocalCacheEntryQuery;
+
+static bool
+cache_entry_block(PgLocalCachePartition *partition,
+				  PgLocalCacheCacheEntry *entry, const char **block_out)
+{
+	uint32		class_size;
+	uint32		request_size;
+	const char *block;
+
+	if (partition == NULL || entry == NULL || !entry->in_use ||
+		entry->key_len > PGLC_KEY_MAX || entry->value_len > PGLC_VALUE_MAX ||
+		(entry->negative && entry->value_len != 0))
+		return false;
+	if (entry->value_len > UINT32_MAX - (uint32) entry->key_len)
+		return false;
+	request_size = (uint32) entry->key_len + (uint32) entry->value_len;
+	if (request_size != entry->block_len)
+		return false;
+	class_size = pglc_arena_block_class(&partition->arena, entry->block_ref);
+	if (class_size == 0 || entry->block_len > class_size)
+		return false;
+	block = (const char *) pglc_arena_block(&partition->arena, entry->block_ref);
+	if (block == NULL)
+		return false;
+	if (block_out != NULL)
+		*block_out = block;
+	return true;
+}
+
+static uint64_t
+cache_entry_hash_by_id(uint32 entry_id, void *opaque)
+{
+	PgLocalCacheEntryQuery *query = (PgLocalCacheEntryQuery *) opaque;
+	PgLocalCachePartition *partition = query->partition;
+
+	if (entry_id == 0 || entry_id > partition->capacity ||
+		!partition->entries[entry_id - 1].in_use)
+	{
+		query->corrupt = true;
+		return 0;
+	}
+
+	return partition->entries[entry_id - 1].key_hash;
+}
+
+static bool
+cache_entry_matches_query(uint32 entry_id, void *opaque)
+{
+	PgLocalCacheEntryQuery *query = (PgLocalCacheEntryQuery *) opaque;
 	PgLocalCacheCacheEntry *entry;
-	PgLocalCachePartition *cache_partition = &pglc_shared->partitions[partition];
-	HTAB	   *cache_hash = pglc_cache_hashes[partition];
-	PgLocalCacheCacheKey victims[PGLC_EVICTION_BATCH];
-	PgLocalCacheCacheKey candidates[PGLC_EVICTION_BATCH];
+	const char *entry_key;
+
+	if (entry_id == 0 || entry_id > query->partition->capacity)
+	{
+		query->corrupt = true;
+		return false;
+	}
+	entry = &query->partition->entries[entry_id - 1];
+	if (!entry->in_use)
+	{
+		query->corrupt = true;
+		return false;
+	}
+	if (!cache_entry_block(query->partition, entry, &entry_key))
+	{
+		query->corrupt = true;
+		query->corrupt_entry_id = entry_id;
+		return false;
+	}
+	if (entry->database_oid != query->database_oid ||
+		entry->relation_oid != query->relation_oid ||
+		entry->relation_slot != query->relation_slot ||
+		entry->slot_generation != query->slot_generation ||
+		entry->key_len != query->key_len)
+		return false;
+	return memcmp(entry_key, query->key, query->key_len) == 0;
+}
+
+static bool
+cache_entry_matches_id(uint32 entry_id, void *opaque)
+{
+	PgLocalCacheEntryQuery *query = (PgLocalCacheEntryQuery *) opaque;
+
+	if (entry_id == 0 || entry_id > query->partition->capacity)
+	{
+		query->corrupt = true;
+		return false;
+	}
+	return entry_id == query->expected_id;
+}
+
+static bool
+rebuild_cache_index(uint32 partition)
+{
+	PgLocalCachePartition *cache_partition =
+		&pglc_shared->partitions[partition];
+	PgLocalCacheEntryQuery query;
+	bool		ok;
+
+	memset(&query, 0, sizeof(query));
+	query.partition = cache_partition;
+	ok = pglc_index_rebuild_existing(&cache_partition->index,
+									 cache_entry_hash_by_id, &query);
+	return ok && !query.corrupt;
+}
+
+static void
+cache_admission_rejected(bool arena)
+{
+	pglc_worker_stat_add(&pglc_shared->cache_admission_rejections,
+						 offsetof(PgLocalCacheWorkerStats,
+								  cache_admission_rejections), 1);
+	if (arena)
+		(void) pg_atomic_fetch_add_u64(
+			&pglc_shared->arena_admission_rejections_total, 1);
+}
+
+static bool
+cache_entry_remove_locked(uint32 partition, uint32 entry_id)
+{
+	PgLocalCachePartition *cache_partition =
+		&pglc_shared->partitions[partition];
+	PgLocalCacheCacheEntry *entry;
+	PgLocalCacheEntryQuery query;
+	uint32		removed;
+	uint32		request_size;
+
+	if (entry_id == 0 || entry_id > cache_partition->capacity)
+		return false;
+	entry = &cache_partition->entries[entry_id - 1];
+	if (!entry->in_use)
+		return false;
+	if (cache_partition->free_entry_head > cache_partition->capacity ||
+		!cache_entry_block(cache_partition, entry, NULL))
+		return false;
+	memset(&query, 0, sizeof(query));
+	query.partition = cache_partition;
+	query.hash = entry->key_hash;
+	query.expected_id = entry_id;
+	removed = pglc_index_remove(&cache_partition->index, entry->key_hash,
+								cache_entry_hash_by_id,
+								cache_entry_matches_id, &query);
+	if (removed != entry_id)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pg_local_cache cache descriptor missing from index")));
+	request_size = entry->block_len;
+	if (!pglc_arena_free(&cache_partition->arena, entry->block_ref,
+						 request_size))
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pg_local_cache slab block metadata is inconsistent")));
+	entry->in_use = false;
+	entry->valid = false;
+	entry->loading = false;
+	entry->dirty_writers = 0;
+	entry->key_len = 0;
+	entry->value_len = 0;
+	entry->block_len = 0;
+	entry->block_ref = PGLC_ARENA_NO_BLOCK;
+	entry->free_next = cache_partition->free_entry_head;
+	cache_partition->free_entry_head = entry_id;
+	Assert(cache_partition->entry_count > 0);
+	cache_partition->entry_count--;
+	release_cache_entry();
+	if (pglc_index_needs_rebuild(&cache_partition->index))
+		(void) rebuild_cache_index(partition);
+	return true;
+}
+
+static int
+evict_cache_entries(uint32 partition, uint32 required_class,
+					uint32 excluded_entry_id)
+{
+	PgLocalCachePartition *cache_partition =
+		&pglc_shared->partitions[partition];
+	uint32		victims[PGLC_EVICTION_BATCH];
+	uint32		candidate_ids[PGLC_EVICTION_BATCH];
 	uint64		candidate_access[PGLC_EVICTION_BATCH];
-	uint32		initial_cursor = cache_partition->eviction_bucket_cursor;
-	uint32		start_bucket;
-	int			victim_count = 0;
-	int			candidate_count = 0;
+	uint32		victim_count = 0;
+	uint32		candidate_count = 0;
+	uint32		scan_count = Min(cache_partition->capacity,
+								(uint32) PGLC_EVICTION_SAMPLE);
+	uint32		start = cache_partition->eviction_bucket_cursor;
+	uint32		scanned;
 	int			removed = 0;
-	int			scanned = 0;
-	int			pass;
-	int			i;
-	bool		sample_limited = false;
 	TimestampTz now = GetCurrentTimestamp();
 
-	/*
-	 * Scan only this partition.  Relation and global tags are atomic, so no
-	 * registry lock is needed while the partition lock is held.
-	 */
-	for (pass = 0; pass < 2; pass++)
+	for (scanned = 0; scanned < scan_count; scanned++)
 	{
-		if (pass == 1 && initial_cursor == 0)
-			break;
-		start_bucket = pass == 0 ? initial_cursor : 0;
-		hash_seq_init(&sequence, cache_hash);
-		sequence.curBucket = start_bucket;
-		while ((entry = hash_seq_search(&sequence)) != NULL)
+		uint32		entry_index = (start + scanned) % cache_partition->capacity;
+		uint32		entry_id = entry_index + 1;
+		PgLocalCacheCacheEntry *entry = &cache_partition->entries[entry_index];
+		uint32		class_size;
+		uint64		last_access;
+		uint32		position;
+
+		if (!entry->in_use || entry_id == excluded_entry_id ||
+			entry->dirty_writers != 0 ||
+			cache_load_is_active_locked(entry, now, partition))
+			continue;
+		class_size = pglc_arena_block_class(&cache_partition->arena,
+											entry->block_ref);
+		if (required_class != 0 && class_size != required_class)
+			continue;
+		if (!cache_entry_is_current_slot_locked(entry))
 		{
-			uint64		last_access;
-			int			position;
-
-			scanned++;
-			if (entry->dirty_writers == 0 &&
-				!cache_load_is_active_locked(entry, now, partition))
-			{
-				if (!cache_entry_is_current_slot_locked(entry))
-				{
-					if (victim_count < PGLC_EVICTION_BATCH)
-						victims[victim_count++] = entry->key;
-				}
-				else
-				{
-					last_access = pg_atomic_read_u64(&entry->last_access);
-					if (candidate_count < PGLC_EVICTION_BATCH ||
-						last_access < candidate_access[candidate_count - 1])
-					{
-						if (candidate_count < PGLC_EVICTION_BATCH)
-						{
-							position = candidate_count;
-							candidate_count++;
-						}
-						else
-							position = PGLC_EVICTION_BATCH - 1;
-						while (position > 0 &&
-							   candidate_access[position - 1] > last_access)
-						{
-							candidate_access[position] =
-								candidate_access[position - 1];
-							candidates[position] = candidates[position - 1];
-							position--;
-						}
-						candidate_access[position] = last_access;
-						candidates[position] = entry->key;
-					}
-				}
-			}
-
-			/* Finish the current chain before advancing the bucket cursor. */
-			if (scanned >= PGLC_EVICTION_SAMPLE &&
-				sequence.curEntry == NULL)
-			{
-				cache_partition->eviction_bucket_cursor = sequence.curBucket;
-				hash_seq_term(&sequence);
-				sample_limited = true;
-				break;
-			}
+			if (victim_count < PGLC_EVICTION_BATCH)
+				victims[victim_count++] = entry_id;
+			continue;
 		}
-		if (sample_limited)
-			break;
-
-		/* hash_seq_search reached the end and terminated the scan. */
-		cache_partition->eviction_bucket_cursor = 0;
-		if (victim_count > 0 || candidate_count > 0 || start_bucket == 0 ||
-			scanned >= PGLC_EVICTION_SAMPLE)
-			break;
+		last_access = pg_atomic_read_u64(&entry->last_access);
+		if (candidate_count == PGLC_EVICTION_BATCH &&
+			last_access >= candidate_access[candidate_count - 1])
+			continue;
+		position = candidate_count < PGLC_EVICTION_BATCH ?
+			candidate_count++ : PGLC_EVICTION_BATCH - 1;
+		while (position > 0 && candidate_access[position - 1] > last_access)
+		{
+			candidate_access[position] = candidate_access[position - 1];
+			candidate_ids[position] = candidate_ids[position - 1];
+			position--;
+		}
+		candidate_access[position] = last_access;
+		candidate_ids[position] = entry_id;
 	}
-
-	entry = NULL;
-	for (i = 0; i < candidate_count &&
-		 victim_count < PGLC_EVICTION_BATCH; i++)
-		victims[victim_count++] = candidates[i];
-
-	for (i = 0; i < victim_count; i++)
-	{
-		if (hash_search(cache_hash, &victims[i], HASH_REMOVE, NULL) != NULL)
+	cache_partition->eviction_bucket_cursor = cache_partition->capacity == 0 ?
+		0 : (start + scan_count) % cache_partition->capacity;
+	for (scanned = 0; scanned < candidate_count &&
+		 victim_count < PGLC_EVICTION_BATCH; scanned++)
+		victims[victim_count++] = candidate_ids[scanned];
+	for (scanned = 0; scanned < victim_count; scanned++)
+		if (cache_entry_remove_locked(partition, victims[scanned]))
 		{
 			pglc_worker_stat_add(&pglc_shared->evictions,
-							 offsetof(PgLocalCacheWorkerStats, evictions), 1);
-			if (cache_partition->entry_count > 0)
-				cache_partition->entry_count--;
-			Assert(pg_atomic_read_u64(&pglc_shared->cache_entry_count) > 0);
-			(void) pg_atomic_fetch_sub_u64(&pglc_shared->cache_entry_count, 1);
+								 offsetof(PgLocalCacheWorkerStats, evictions), 1);
 			removed++;
 		}
-	}
 	return removed;
 }
 
@@ -1613,94 +2213,503 @@ release_cache_entry(void)
 }
 
 static PgLocalCacheCacheEntry *
-get_cache_entry(Oid database_oid, Oid relation_oid,
-				const char *nspace, const char *key, bool create)
+get_cache_entry_internal(Oid database_oid, Oid relation_oid,
+						 const char *nspace, const char *key,
+						 uint32 relation_slot, uint64 slot_generation,
+						 bool create, uint32 *corrupt_entry_id)
 {
 	PgLocalCacheCacheKey cache_key;
 	PgLocalCacheCacheEntry *entry;
 	PgLocalCachePartition *cache_partition;
-	HTAB	   *cache_hash;
+	PgLocalCacheEntryQuery query;
 	uint32		partition;
-	bool		found;
+	uint32		entry_id;
+	uint16		key_len;
+	uint64		hash;
+	uint32		block_ref;
+	uint32		class_size;
+	PglcIndexInsertResult insert_result;
 
-	make_cache_key(&cache_key, database_oid, nspace, key, create);
+	if (corrupt_entry_id != NULL)
+		*corrupt_entry_id = 0;
+	key_len = (uint16) strnlen(key, PGLC_KEY_MAX);
+	if (key_len == PGLC_KEY_MAX)
+		return NULL;
+	make_cache_key(&cache_key, database_oid, nspace, key, false);
 	partition = pglc_cache_partition(&cache_key);
 	cache_partition = &pglc_shared->partitions[partition];
-	cache_hash = pglc_cache_hashes[partition];
-	entry = hash_search(cache_hash, &cache_key, HASH_FIND, NULL);
-	found = entry != NULL;
+	hash = cache_key_hash64(database_oid, nspace, key, key_len);
+	memset(&query, 0, sizeof(query));
+	query.partition = cache_partition;
+	query.hash = hash;
+	query.key = key;
+	query.key_len = key_len;
+	query.database_oid = database_oid;
+	query.relation_oid = relation_oid;
+	query.relation_slot = relation_slot;
+	query.slot_generation = slot_generation;
+	entry_id = pglc_index_find(&cache_partition->index, hash,
+							   cache_entry_hash_by_id,
+							   cache_entry_matches_query, &query);
+	if (query.corrupt || entry_id > cache_partition->capacity)
+	{
+		if (corrupt_entry_id != NULL)
+			*corrupt_entry_id = query.corrupt_entry_id;
+		return NULL;
+	}
+	entry = entry_id == 0 ? NULL :
+		&cache_partition->entries[entry_id - 1];
 	if (entry == NULL && create)
 	{
-		/* Enforce the local bound; dynahash does not do so by default. */
-		if (cache_partition->entry_count >= cache_partition->capacity &&
-			!evict_cache_entries(partition))
+		if (pglc_index_needs_rebuild(&cache_partition->index) &&
+			!rebuild_cache_index(partition))
+			return NULL;
+		if (cache_marker_find(partition, hash, key, key_len, relation_slot,
+						   slot_generation) != 0)
+			return NULL;
+		while (!pglc_arena_alloc(&cache_partition->arena, key_len,
+								&block_ref, &class_size))
 		{
-			pglc_worker_stat_add(
-				&pglc_shared->cache_admission_rejections,
-				offsetof(PgLocalCacheWorkerStats,
-							 cache_admission_rejections), 1);
+			if (evict_cache_entries(partition,
+									pglc_arena_class_size(key_len), 0) == 0)
+			{
+				cache_admission_rejected(true);
+				return NULL;
+			}
+		}
+		if (cache_partition->free_entry_head == 0 &&
+			evict_cache_entries(partition, 0, 0) == 0)
+		{
+			if (!pglc_arena_free(&cache_partition->arena, block_ref,
+								 key_len))
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("pg_local_cache failed to release unindexed key block")));
+			cache_admission_rejected(false);
 			return NULL;
 		}
 		while (!reserve_cache_entry())
 		{
-			if (evict_cache_entries(partition) == 0)
+			if (evict_cache_entries(partition, 0, 0) == 0)
 			{
-				pglc_worker_stat_add(
-					&pglc_shared->cache_admission_rejections,
-					offsetof(PgLocalCacheWorkerStats,
-							 cache_admission_rejections), 1);
+				if (!pglc_arena_free(&cache_partition->arena, block_ref,
+									 key_len))
+					ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("pg_local_cache failed to release unindexed key block")));
+				cache_admission_rejected(false);
 				return NULL;
 			}
 		}
-		entry = hash_search(cache_hash, &cache_key,
-							HASH_ENTER_NULL, &found);
-		if (entry == NULL)
+		entry_id = cache_partition->free_entry_head;
+		if (entry_id == 0 || entry_id > cache_partition->capacity)
 		{
+			(void) pglc_arena_free(&cache_partition->arena, block_ref, key_len);
 			release_cache_entry();
-			pglc_worker_stat_add(
-				&pglc_shared->cache_admission_rejections,
-				offsetof(PgLocalCacheWorkerStats,
-						 cache_admission_rejections), 1);
-		}
-		else if (!found)
-			cache_partition->entry_count++;
-		else
-			release_cache_entry();
-	}
-
-	if (entry != NULL && !found)
-	{
-		PgLocalCacheCacheKey saved_key = entry->key;
-
-		memset(entry, 0, sizeof(*entry));
-		entry->key = saved_key;
-		entry->relation_oid = relation_oid;
-		entry->relation_slot = UINT32_MAX;
-		entry->version = next_entry_generation(partition);
-		pg_atomic_init_u64(&entry->last_access, 0);
-	}
-	else if (entry != NULL && create && OidIsValid(relation_oid) &&
-			 entry->relation_oid != relation_oid)
-	{
-		/* A published keyed handle keeps its placeholder identity pinned. */
-		if (entry->dirty_writers != 0)
+			cache_admission_rejected(false);
 			return NULL;
-
-		/*
-		 * Retagging a valid entry would let a value read from the old
-		 * relation become a hit for the new relation.
-		 */
-		entry->valid = false;
-		entry->version = next_entry_generation(partition);
-		entry->loading = false;
-		entry->load_id++;
-		entry->relation_incarnation = 0;
-		entry->load_relation_incarnation = 0;
-		entry->relation_slot = UINT32_MAX;
-		entry->slot_generation = 0;
+		}
+		entry = &cache_partition->entries[entry_id - 1];
+		if (entry->free_next > cache_partition->capacity)
+		{
+			(void) pglc_arena_free(&cache_partition->arena, block_ref, key_len);
+			release_cache_entry();
+			cache_admission_rejected(false);
+			return NULL;
+		}
+		cache_partition->free_entry_head = entry->free_next;
+		memset(entry, 0, sizeof(*entry));
+		pg_atomic_init_u64(&entry->last_access, 0);
+		entry->in_use = true;
+		entry->key_hash = hash;
+		entry->database_oid = database_oid;
+		entry->block_ref = block_ref;
+		entry->key_len = key_len;
+		entry->block_len = key_len;
 		entry->relation_oid = relation_oid;
+		entry->relation_slot = relation_slot;
+		entry->slot_generation = slot_generation;
+		entry->version = next_entry_generation(partition);
+		{
+			void *block = pglc_arena_block(&cache_partition->arena, block_ref);
+
+			if (block == NULL)
+			{
+				entry->in_use = false;
+				entry->free_next = cache_partition->free_entry_head;
+				cache_partition->free_entry_head = entry_id;
+				cache_partition->entry_count--;
+				release_cache_entry();
+				cache_admission_rejected(true);
+				return NULL;
+			}
+			memcpy(block, key, key_len);
+		}
+		cache_partition->entry_count++;
+		query.expected_id = entry_id;
+		if (pglc_index_needs_rebuild(&cache_partition->index))
+		{
+			if (rebuild_cache_index(partition))
+				insert_result = pglc_index_insert(&cache_partition->index, hash,
+											  entry_id, cache_entry_hash_by_id,
+										  cache_entry_matches_query, &query);
+			else
+				insert_result = PGLC_INDEX_PROBE_LIMIT;
+		}
+		else
+			insert_result = pglc_index_insert(&cache_partition->index, hash,
+										  entry_id, cache_entry_hash_by_id,
+									  cache_entry_matches_query, &query);
+		if (insert_result == PGLC_INDEX_PROBE_LIMIT)
+		{
+			if (rebuild_cache_index(partition))
+				insert_result = pglc_index_insert(&cache_partition->index, hash,
+											  entry_id, cache_entry_hash_by_id,
+										  cache_entry_matches_query, &query);
+		}
+		if (insert_result != PGLC_INDEX_INSERTED || query.corrupt)
+		{
+			if (!pglc_arena_free(&cache_partition->arena, block_ref, key_len))
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("pg_local_cache failed to release rejected key block")));
+			entry->in_use = false;
+			entry->key_len = 0;
+			entry->block_len = 0;
+			entry->block_ref = PGLC_ARENA_NO_BLOCK;
+			entry->free_next = cache_partition->free_entry_head;
+			cache_partition->free_entry_head = entry_id;
+			Assert(cache_partition->entry_count > 0);
+			cache_partition->entry_count--;
+			release_cache_entry();
+			cache_admission_rejected(false);
+			return NULL;
+		}
 	}
 	return entry;
+}
+
+static PgLocalCacheCacheEntry *
+get_cache_entry(Oid database_oid, Oid relation_oid,
+				const char *nspace, const char *key,
+				uint32 relation_slot, uint64 slot_generation, bool create)
+{
+	return get_cache_entry_internal(database_oid, relation_oid, nspace, key,
+									relation_slot, slot_generation, create, NULL);
+}
+
+typedef struct PgLocalCacheMarkerQuery
+{
+	PgLocalCachePartition *partition;
+	uint64_t	hash;
+	const char *key;
+	uint16		key_len;
+	uint64	relation_slot_generation;
+	uint32	relation_slot;
+	uint32		expected_id;
+    bool corrupt;
+} PgLocalCacheMarkerQuery;
+
+static bool
+marker_key_offset(PgLocalCachePartition *partition, uint32 key_slot,
+				  Size *offset)
+{
+	if (partition == NULL || offset == NULL || key_slot == 0 ||
+		key_slot > partition->marker_key_capacity ||
+		partition->marker_key_arena == NULL)
+		return false;
+#if SIZE_MAX < UINT64_MAX
+	if (partition->marker_key_capacity > SIZE_MAX / PGLC_KEY_MAX)
+		return false;
+#endif
+	*offset = (Size) (key_slot - 1) * PGLC_KEY_MAX;
+	return *offset <= SIZE_MAX - PGLC_KEY_MAX;
+}
+
+static uint64_t
+marker_hash_by_id(uint32 marker_id, void *opaque)
+{
+	PgLocalCacheMarkerQuery *query = (PgLocalCacheMarkerQuery *) opaque;
+	PgLocalCacheDirtyMarker *marker;
+
+	if (marker_id == 0 || marker_id > query->partition->marker_capacity)
+	{
+		query->corrupt = true;
+		return 0;
+	}
+	marker = &query->partition->markers[marker_id - 1];
+	if (!marker->in_use)
+	{
+		query->corrupt = true;
+		return 0;
+	}
+	return marker->key_hash;
+}
+
+static bool
+marker_matches_query(uint32 marker_id, void *opaque)
+{
+	PgLocalCacheMarkerQuery *query = (PgLocalCacheMarkerQuery *) opaque;
+	PgLocalCacheDirtyMarker *marker;
+	const char *marker_key;
+	Size		offset;
+
+	if (marker_id == 0 || marker_id > query->partition->marker_capacity)
+	{
+		query->corrupt = true;
+		return false;
+	}
+	marker = &query->partition->markers[marker_id - 1];
+	if (!marker->in_use)
+	{
+		query->corrupt = true;
+		return false;
+	}
+	if (marker->key_len > PGLC_KEY_MAX || query->key_len > PGLC_KEY_MAX ||
+		!marker_key_offset(query->partition, marker->key_slot, &offset))
+	{
+		query->corrupt = true;
+		return false;
+	}
+	if (marker->key_hash != query->hash ||
+		marker->relation_slot != query->relation_slot ||
+		marker->relation_slot_generation != query->relation_slot_generation ||
+		marker->key_len != query->key_len)
+		return false;
+	marker_key = query->partition->marker_key_arena + offset;
+	return memcmp(marker_key, query->key, query->key_len) == 0;
+}
+
+static bool
+marker_matches_id(uint32 marker_id, void *opaque)
+{
+	PgLocalCacheMarkerQuery *query = (PgLocalCacheMarkerQuery *) opaque;
+
+	if (marker_id == 0 || marker_id > query->partition->marker_capacity)
+	{
+		query->corrupt = true;
+		return false;
+	}
+	return marker_id == query->expected_id;
+}
+
+static bool
+rebuild_marker_index(uint32 partition)
+{
+	PgLocalCachePartition *cache_partition =
+		&pglc_shared->partitions[partition];
+	PgLocalCacheMarkerQuery query;
+	bool		ok;
+
+	memset(&query, 0, sizeof(query));
+	query.partition = cache_partition;
+	ok = pglc_index_rebuild_existing(&cache_partition->marker_index,
+									 marker_hash_by_id, &query);
+	return ok && !query.corrupt;
+}
+
+static uint32
+cache_marker_find(uint32 partition, uint64 hash, const char *key,
+				  uint16 key_len, uint32 relation_slot,
+				  uint64 relation_slot_generation)
+{
+	PgLocalCachePartition *cache_partition =
+		&pglc_shared->partitions[partition];
+	PgLocalCacheMarkerQuery query;
+
+	memset(&query, 0, sizeof(query));
+	query.partition = cache_partition;
+	query.hash = hash;
+	query.key = key;
+	query.key_len = key_len;
+	query.relation_slot = relation_slot;
+	query.relation_slot_generation = relation_slot_generation;
+	{
+		uint32		marker_id = pglc_index_find(&cache_partition->marker_index,
+										 hash, marker_hash_by_id,
+										 marker_matches_query, &query);
+
+		return query.corrupt ? PGLC_INDEX_TOMBSTONE : marker_id;
+	}
+}
+
+static bool
+reserve_cache_marker(uint32 partition,
+					 const PgLocalCacheLocalDirtyEntry *local,
+					 uint32 *marker_id, uint64 *marker_generation)
+{
+	PgLocalCachePartition *cache_partition =
+		&pglc_shared->partitions[partition];
+	PgLocalCacheMarkerQuery query;
+	uint16		key_len = (uint16) strnlen(local->key.key,
+												 sizeof(local->key.key));
+	uint64		hash;
+	uint32		found_id;
+	uint32		id;
+	uint32		key_slot;
+	Size		key_offset;
+	PgLocalCacheDirtyMarker *marker;
+	PglcIndexInsertResult insert_result;
+	uint64		observed;
+	uint64		current_count;
+
+	if ((Size) key_len == sizeof(local->key.key))
+		return false;
+	hash = cache_key_hash64(local->key.database_oid, local->key.nspace,
+						local->key.key, key_len);
+	memset(&query, 0, sizeof(query));
+	query.partition = cache_partition;
+	query.hash = hash;
+	query.key = local->key.key;
+	query.key_len = key_len;
+	query.relation_slot = local->shared_slot;
+	query.relation_slot_generation = local->shared_slot_generation;
+	found_id = pglc_index_find(&cache_partition->marker_index, hash,
+							  marker_hash_by_id, marker_matches_query, &query);
+	if (query.corrupt || found_id > cache_partition->marker_capacity)
+		return false;
+	if (found_id != 0)
+	{
+		marker = &cache_partition->markers[found_id - 1];
+		if (marker->writer_count == (uint32) -1)
+			return false;
+		marker->writer_count++;
+		*marker_id = found_id;
+		*marker_generation = marker->generation;
+		return true;
+	}
+#ifdef PGLC_TEST_HOOKS
+	if (pglc_test_dirty_marker_limit > 0 &&
+		pg_atomic_read_u64(&pglc_shared->dirty_marker_entries) >=
+		(uint64) pglc_test_dirty_marker_limit)
+		return false;
+#endif
+	if (cache_partition->marker_free_head == 0 ||
+		cache_partition->marker_free_head > cache_partition->marker_capacity ||
+		cache_partition->marker_key_free_head == 0 ||
+		cache_partition->marker_key_free_head >
+		cache_partition->marker_key_capacity ||
+		cache_partition->marker_key_free_next == NULL ||
+		cache_partition->marker_key_arena == NULL ||
+		cache_partition->marker_generation == (uint64) -1)
+		return false;
+	if (pglc_index_needs_rebuild(&cache_partition->marker_index) &&
+		!rebuild_marker_index(partition))
+		return false;
+	id = cache_partition->marker_free_head;
+	marker = &cache_partition->markers[id - 1];
+	if (marker->free_next > cache_partition->marker_capacity)
+		return false;
+	cache_partition->marker_free_head = marker->free_next;
+	key_slot = cache_partition->marker_key_free_head;
+	if (!marker_key_offset(cache_partition, key_slot, &key_offset))
+	{
+		cache_partition->marker_free_head = id;
+		return false;
+	}
+	if (cache_partition->marker_key_free_next[key_slot - 1] >
+		cache_partition->marker_key_capacity)
+	{
+		cache_partition->marker_free_head = id;
+		return false;
+	}
+	cache_partition->marker_key_free_head =
+		cache_partition->marker_key_free_next[key_slot - 1];
+	memset(marker, 0, sizeof(*marker));
+	marker->key_hash = hash;
+	marker->key_slot = key_slot;
+	marker->key_len = key_len;
+	marker->relation_slot = local->shared_slot;
+	marker->relation_slot_generation = local->shared_slot_generation;
+	marker->relation_incarnation = local->shared_relation_incarnation;
+	marker->generation = ++cache_partition->marker_generation;
+	marker->writer_count = 1;
+	marker->in_use = true;
+	memcpy(cache_partition->marker_key_arena + key_offset,
+		   local->key.key, key_len);
+	query.expected_id = id;
+	insert_result = pglc_index_insert(&cache_partition->marker_index, hash,
+									  id, marker_hash_by_id,
+									  marker_matches_id, &query);
+	if (insert_result == PGLC_INDEX_PROBE_LIMIT)
+	{
+		if (rebuild_marker_index(partition))
+			insert_result = pglc_index_insert(&cache_partition->marker_index,
+										  hash, id, marker_hash_by_id,
+										  marker_matches_id, &query);
+	}
+	if (insert_result != PGLC_INDEX_INSERTED)
+	{
+		marker->in_use = false;
+		marker->free_next = cache_partition->marker_free_head;
+		cache_partition->marker_free_head = id;
+		cache_partition->marker_key_free_next[key_slot - 1] =
+			cache_partition->marker_key_free_head;
+		cache_partition->marker_key_free_head = key_slot;
+		return false;
+	}
+	cache_partition->marker_count++;
+	current_count = pg_atomic_fetch_add_u64(
+		&pglc_shared->dirty_marker_entries, 1) + 1;
+	observed = pg_atomic_read_u64(&pglc_shared->dirty_marker_highwater);
+	while (current_count > observed &&
+		   !pg_atomic_compare_exchange_u64(
+			   &pglc_shared->dirty_marker_highwater, &observed,
+			   current_count))
+		;
+	*marker_id = id;
+	*marker_generation = marker->generation;
+	return true;
+}
+
+static void
+release_cache_marker(uint32 partition, uint32 marker_id, uint64 generation)
+{
+	PgLocalCachePartition *cache_partition =
+		&pglc_shared->partitions[partition];
+	PgLocalCacheDirtyMarker *marker;
+	PgLocalCacheMarkerQuery query;
+	uint32		removed;
+	uint32		key_slot;
+
+	if (marker_id == 0 || marker_id > cache_partition->marker_capacity)
+		return;
+	marker = &cache_partition->markers[marker_id - 1];
+	if (!marker->in_use || marker->generation != generation ||
+		marker->writer_count == 0 || marker->key_slot == 0 ||
+		marker->key_slot > cache_partition->marker_key_capacity ||
+		marker->key_len > PGLC_KEY_MAX ||
+		cache_partition->marker_key_free_next == NULL ||
+		cache_partition->marker_free_head > cache_partition->marker_capacity ||
+		cache_partition->marker_key_free_head >
+		cache_partition->marker_key_capacity)
+		return;
+	marker->writer_count--;
+	if (marker->writer_count != 0)
+		return;
+	memset(&query, 0, sizeof(query));
+	query.partition = cache_partition;
+	query.expected_id = marker_id;
+	removed = pglc_index_remove(&cache_partition->marker_index,
+								marker->key_hash, marker_hash_by_id,
+								marker_matches_id, &query);
+	if (removed != marker_id)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pg_local_cache dirty marker missing from index")));
+	key_slot = marker->key_slot;
+	marker->in_use = false;
+	marker->key_len = 0;
+	marker->key_slot = 0;
+	marker->free_next = cache_partition->marker_free_head;
+	cache_partition->marker_free_head = marker_id;
+	cache_partition->marker_key_free_next[key_slot - 1] =
+		cache_partition->marker_key_free_head;
+	cache_partition->marker_key_free_head = key_slot;
+	cache_partition->marker_count--;
+	(void) pg_atomic_fetch_sub_u64(&pglc_shared->dirty_marker_entries, 1);
+	if (pglc_index_needs_rebuild(&cache_partition->marker_index))
+		(void) rebuild_marker_index(partition);
 }
 
 static uint64
@@ -1714,29 +2723,43 @@ invalidate_all_locked(void)
 static bool
 cache_retire_malformed_entry_locked(const PgLocalCacheMapping *mapping,
 									const char *canonical_key,
-									uint32 partition)
+									uint32 partition,
+									uint32 corrupt_entry_id)
 {
 	PgLocalCacheCacheEntry *entry;
 	PgLocalCacheFenceSnapshot snapshot;
+	PgLocalCachePartition *cache_partition = &pglc_shared->partitions[partition];
+	uint64		expected_hash;
 
-	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
-							mapping->nspace, canonical_key, false);
-	if (entry == NULL ||
-		entry->value_len <= PGLC_VALUE_MAX ||
+	if (corrupt_entry_id == 0 ||
+		corrupt_entry_id > cache_partition->capacity)
+		return false;
+	entry = &cache_partition->entries[corrupt_entry_id - 1];
+	expected_hash = cache_key_hash64(MyDatabaseId, mapping->nspace,
+									canonical_key,
+									strnlen(canonical_key, PGLC_KEY_MAX));
+	if (!entry->in_use || entry->database_oid != MyDatabaseId ||
+		entry->key_hash != expected_hash ||
+		entry->relation_oid != mapping->relation_oid ||
+		entry->relation_slot != mapping->relation_slot ||
+		entry->slot_generation != mapping->relation_slot_generation ||
 		!read_fence_snapshot(mapping, entry, &snapshot) ||
 		!cache_entry_is_current_slot_locked(entry))
 		return false;
 
+	if (entry->valid)
+	{
+		pglc_worker_stat_add(&pglc_shared->invalidations,
+							 offsetof(PgLocalCacheWorkerStats, invalidations), 1);
+		pglc_worker_stat_add(&pglc_shared->key_invalidations,
+							 offsetof(PgLocalCacheWorkerStats, key_invalidations), 1);
+	}
 	entry->valid = false;
 	entry->loading = false;
 	entry->load_id++;
 	entry->version = next_entry_generation(partition);
 	entry->source_xmin = InvalidTransactionId;
 	entry->source_observed_full_xid = 0;
-	pglc_worker_stat_add(&pglc_shared->invalidations,
-						 offsetof(PgLocalCacheWorkerStats, invalidations), 1);
-	pglc_worker_stat_add(&pglc_shared->key_invalidations,
-						 offsetof(PgLocalCacheWorkerStats, key_invalidations), 1);
 	return true;
 }
 
@@ -1747,43 +2770,32 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 					char *value, Size value_capacity, Size *value_len,
 					bool *negative, TransactionId *source_xmin,
 					PgLocalCacheReadToken *token,
-					bool create, bool *complete, bool *malformed)
+					bool create, bool *complete, bool *malformed,
+					uint32 *corrupt_entry_id)
 {
 	PgLocalCacheCacheEntry *entry;
 	PgLocalCacheFenceSnapshot before;
 	PgLocalCacheFenceSnapshot after;
+	const char *entry_block;
 	bool		stable;
 	bool		mapping_matches;
 	bool		hit = false;
 
 	*malformed = false;
+	*corrupt_entry_id = 0;
 	if (mapping->relation_slot >= (uint32) pglc_relation_states)
 	{
 		*complete = true;
 		token->cacheable = false;
 		return false;
 	}
-	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
-							mapping->nspace, canonical_key, create);
-	if (entry != NULL && create)
-	{
-		if (entry->dirty_writers != 0 &&
-			(entry->relation_slot != mapping->relation_slot ||
-			 entry->slot_generation != mapping->relation_slot_generation))
-			entry = NULL;
-		else if (entry->relation_oid != mapping->relation_oid ||
-				 entry->relation_slot != mapping->relation_slot ||
-				 entry->slot_generation != mapping->relation_slot_generation)
-		{
-			entry->valid = false;
-			entry->loading = false;
-			entry->load_id++;
-			entry->version = next_entry_generation(partition);
-			entry->relation_oid = mapping->relation_oid;
-			entry->relation_slot = mapping->relation_slot;
-			entry->slot_generation = mapping->relation_slot_generation;
-		}
-	}
+	entry = get_cache_entry_internal(MyDatabaseId, mapping->relation_oid,
+									 mapping->nspace, canonical_key,
+									 mapping->relation_slot,
+									 mapping->relation_slot_generation,
+									 create, corrupt_entry_id);
+	if (*corrupt_entry_id != 0)
+		*malformed = true;
 	mapping_matches = entry != NULL &&
 		entry->relation_oid == mapping->relation_oid &&
 		entry->relation_slot == mapping->relation_slot &&
@@ -1807,7 +2819,8 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 	{
 		uint64		access_clock;
 
-		if (entry->value_len > PGLC_VALUE_MAX)
+		if (!cache_entry_block(&pglc_shared->partitions[partition], entry,
+							   &entry_block))
 			*malformed = true;
 		else if (entry->negative)
 		{
@@ -1816,13 +2829,9 @@ cache_lookup_locked(const PgLocalCacheMapping *mapping,
 		}
 		else if (entry->value_len <= value_capacity)
 		{
-#ifdef PGLC_TEST_HOOKS
-			pglc_test_pause_at("before_lookup_copy");
-#endif
-			memcpy(value, entry->value, entry->value_len);
-#ifdef PGLC_TEST_HOOKS
-			pglc_test_pause_at("after_lookup_copy");
-#endif
+			const char *payload = entry_block + entry->key_len;
+
+			memcpy(value, payload, entry->value_len);
 			hit = true;
 		}
 		if (hit)
@@ -1866,27 +2875,40 @@ pglc_cache_lookup_internal(const PgLocalCacheMapping *mapping,
 {
 	bool		complete = false;
 	bool		malformed = false;
+	uint32		corrupt_entry_id = 0;
 	bool		hit;
+	PgLocalCacheCacheKey cache_key;
+	uint32		partition;
+#ifdef PGLC_TEST_HOOKS
+	bool		rechecked_after_pause = false;
+#endif
 
 	pglc_require_preload();
+	make_cache_key(&cache_key, MyDatabaseId, mapping->nspace,
+				   canonical_key, false);
+	partition = pglc_cache_partition(&cache_key);
+#ifdef PGLC_TEST_HOOKS
+lookup_again:
+#endif
+	complete = false;
+	malformed = false;
+	corrupt_entry_id = 0;
 	memset(token, 0, sizeof(*token));
 	*negative = false;
 	*value_len = 0;
 	*source_xmin = InvalidTransactionId;
 
-	{
-		PgLocalCacheCacheKey cache_key;
-		uint32		partition;
-
-		make_cache_key(&cache_key, MyDatabaseId, mapping->nspace,
-					   canonical_key, false);
-		partition = pglc_cache_partition(&cache_key);
-		pglc_partition_lock_acquire(partition, LW_SHARED);
+#ifdef PGLC_TEST_HOOKS
+	if (!rechecked_after_pause)
+		(void) pglc_test_pause_at("before_lookup_lock");
+#endif
+	pglc_partition_lock_acquire(partition, LW_SHARED);
 	hit = cache_lookup_locked(mapping, canonical_key, partition,
 							  value, value_capacity, value_len,
 							  negative, source_xmin, token,
-							  false, &complete, &malformed);
-		pglc_partition_lock_release(partition);
+							  false, &complete, &malformed,
+							  &corrupt_entry_id);
+	pglc_partition_lock_release(partition);
 
 	if (malformed)
 	{
@@ -1895,11 +2917,12 @@ pglc_cache_lookup_internal(const PgLocalCacheMapping *mapping,
 		*value_len = 0;
 		pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 		(void) cache_retire_malformed_entry_locked(mapping, canonical_key,
-											 partition);
+												 partition, corrupt_entry_id);
 		hit = cache_lookup_locked(mapping, canonical_key, partition,
 								  value, value_capacity, value_len,
 								  negative, source_xmin, token,
-								  false, &complete, &malformed);
+								  false, &complete, &malformed,
+								  &corrupt_entry_id);
 		pglc_partition_lock_release(partition);
 	}
 	else if (!complete)
@@ -1908,14 +2931,21 @@ pglc_cache_lookup_internal(const PgLocalCacheMapping *mapping,
 		*value_len = 0;
 		pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 		hit = cache_lookup_locked(mapping, canonical_key, partition,
-								  value, value_capacity, value_len,
-								  negative, source_xmin, token,
-								  true, &complete, &malformed);
+							  value, value_capacity, value_len,
+							  negative, source_xmin, token,
+							  true, &complete, &malformed,
+							  &corrupt_entry_id);
 		pglc_partition_lock_release(partition);
-	}
 	}
 
 #ifdef PGLC_TEST_HOOKS
+	if (!rechecked_after_pause &&
+		pglc_test_pause_at("after_lookup_unlock"))
+	{
+		rechecked_after_pause = true;
+		goto lookup_again;
+	}
+
 	if (token->cacheable)
 		pglc_test_pause_at("after_token");
 #endif
@@ -1976,11 +3006,10 @@ pglc_cache_retire_positive(const PgLocalCacheMapping *mapping,
 	partition = cache_partition_for(MyDatabaseId, mapping->nspace,
 									 canonical_key);
 	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
-#ifdef PGLC_TEST_HOOKS
-	pglc_test_pause_at("after_store_lock");
-#endif
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
-							mapping->nspace, canonical_key, false);
+							mapping->nspace, canonical_key,
+							mapping->relation_slot,
+							mapping->relation_slot_generation, false);
 	if (entry != NULL && read_fence_snapshot(mapping, entry, &snapshot) &&
 		fence_snapshot_matches_token(&snapshot, token) &&
 		entry->relation_oid == mapping->relation_oid &&
@@ -2015,6 +3044,12 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 	bool		stored = false;
 	uint64		observed_full_xid;
 	uint32		partition;
+	uint32		entry_id;
+	uint32		new_block_len;
+	uint32		requested_class;
+#ifdef PGLC_TEST_HOOKS
+	bool		copied = false;
+#endif
 
 	if (!token->cacheable || !token->has_entry || value_len > PGLC_VALUE_MAX ||
 		mapping->config_generation != token->config_generation ||
@@ -2038,34 +3073,139 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 
 	partition = cache_partition_for(MyDatabaseId, mapping->nspace,
 									 canonical_key);
+#ifdef PGLC_TEST_HOOKS
+	pglc_test_pause_at("before_store_lock");
+#endif
 	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
-							mapping->nspace, canonical_key, false);
+							mapping->nspace, canonical_key,
+							mapping->relation_slot,
+							mapping->relation_slot_generation, false);
 
 	if (entry != NULL && read_fence_snapshot(mapping, entry, &before) &&
 		fence_snapshot_matches_token(&before, token) &&
 		entry->relation_oid == mapping->relation_oid &&
-		entry->relation_oid == mapping->relation_oid &&
 		entry->relation_slot == mapping->relation_slot &&
 		entry->slot_generation == mapping->relation_slot_generation &&
 		load_id != 0 && entry->loading && entry->load_id == load_id &&
-		entry->load_relation_incarnation == token->relation_incarnation &&
+		entry->global_epoch == token->global_version &&
+		entry->relation_version == token->relation_version &&
+		entry->relation_incarnation == token->relation_incarnation &&
 		entry->version == token->key_version)
 	{
-		entry->negative = negative;
-		entry->value_len = negative ? 0 : value_len;
-		entry->source_xmin = negative ? InvalidTransactionId : source_xmin;
-		entry->source_observed_full_xid = observed_full_xid;
+		PgLocalCachePartition *cache_partition =
+			&pglc_shared->partitions[partition];
+		uint32		old_block_ref = entry->block_ref;
+		uint32		old_block_len = entry->block_len;
+		uint32		old_class = pglc_arena_block_class(
+			&cache_partition->arena, old_block_ref);
+		uint32		new_block_ref = old_block_ref;
+		uint32		new_value_len = negative ? 0 : (uint32) value_len;
+		char	   *block;
+		const char *old_block;
+
+		entry_id = (uint32) (entry - cache_partition->entries) + 1;
+		if (entry->key_len > UINT32_MAX - new_value_len ||
+			entry->key_len > UINT16_MAX - new_value_len)
+		{
+			entry->valid = false;
+			entry->loading = false;
+			entry->load_id++;
+			cache_admission_rejected(true);
+			goto store_done;
+		}
+		new_block_len = (uint32) entry->key_len + new_value_len;
+		requested_class = pglc_arena_class_size(new_block_len);
+		if (requested_class == 0 || old_class == 0 ||
+			old_block_len != entry->key_len + entry->value_len ||
+			old_block_len > old_class ||
+			entry->key_len > new_block_len ||
+			new_value_len > new_block_len - entry->key_len)
+		{
+			entry->valid = false;
+			entry->loading = false;
+			entry->load_id++;
+			cache_admission_rejected(true);
+			goto store_done;
+		}
+		if (requested_class > old_class)
+		{
+			uint32		new_class;
+
+			while (!pglc_arena_alloc(&cache_partition->arena, new_block_len,
+									 &new_block_ref, &new_class))
+			{
+				if (evict_cache_entries(partition, requested_class,
+										entry_id) == 0)
+				{
+					entry->loading = false;
+					entry->load_id++;
+					cache_admission_rejected(true);
+					goto store_done;
+				}
+			}
+			block = (char *) pglc_arena_block(&cache_partition->arena,
+												new_block_ref);
+			old_block = (const char *) pglc_arena_block(
+				&cache_partition->arena, old_block_ref);
+			if (block == NULL || old_block == NULL ||
+				new_class < new_block_len)
+			{
+				(void) pglc_arena_free(&cache_partition->arena, new_block_ref,
+										new_block_len);
+				entry->valid = false;
+				entry->loading = false;
+				entry->load_id++;
+				cache_admission_rejected(true);
+				goto store_done;
+			}
+			memcpy(block, old_block, entry->key_len);
+			entry->block_ref = new_block_ref;
+			entry->block_len = (uint16) new_block_len;
+			if (!pglc_arena_free(&cache_partition->arena, old_block_ref,
+								 old_block_len))
+			{
+				entry->valid = false;
+				entry->loading = false;
+				entry->load_id++;
+				cache_admission_rejected(true);
+				goto store_done;
+			}
+		}
+		else if (!pglc_arena_resize(&cache_partition->arena, old_block_ref,
+									old_block_len, new_block_len))
+		{
+			entry->valid = false;
+			entry->loading = false;
+			entry->load_id++;
+			cache_admission_rejected(true);
+			goto store_done;
+		}
+		else
+			entry->block_len = (uint16) new_block_len;
+		block = (char *) pglc_arena_block(&cache_partition->arena,
+											entry->block_ref);
+		if (block == NULL ||
+			pglc_arena_block_class(&cache_partition->arena,
+								 entry->block_ref) < new_block_len)
+		{
+			entry->valid = false;
+			entry->loading = false;
+			entry->load_id++;
+			cache_admission_rejected(true);
+			goto store_done;
+		}
 		if (!negative && value_len > 0)
 		{
+			memcpy(block + entry->key_len, value, value_len);
 #ifdef PGLC_TEST_HOOKS
-			pglc_test_pause_at("before_store_copy");
-#endif
-			memcpy(entry->value, value, value_len);
-#ifdef PGLC_TEST_HOOKS
-			pglc_test_pause_at("after_store_copy");
+			copied = true;
 #endif
 		}
+		entry->negative = negative;
+		entry->value_len = (uint16) new_value_len;
+		entry->source_xmin = negative ? InvalidTransactionId : source_xmin;
+		entry->source_observed_full_xid = observed_full_xid;
 		entry->global_epoch = token->global_epoch;
 		entry->relation_version = token->relation_version;
 		entry->relation_incarnation = token->relation_incarnation;
@@ -2094,7 +3234,12 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 			&entry->last_access,
 			pg_atomic_fetch_add_u64(&pglc_shared->clock, 1) + 1);
 	}
+store_done:
 	pglc_partition_lock_release(partition);
+#ifdef PGLC_TEST_HOOKS
+	if (copied)
+		pglc_test_pause_at("after_store_unlock");
+#endif
 	if (stored && negative)
 		pglc_worker_stat_add(&pglc_shared->negative_writes,
 						 offsetof(PgLocalCacheWorkerStats, negative_writes), 1);
@@ -2111,8 +3256,11 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 	PgLocalCacheFenceSnapshot before;
 	PgLocalCacheFenceSnapshot after;
 	PgLocalCacheLoadClaim result = PGLC_LOAD_BYPASS;
+	bool		snapshot_stable;
 	TimestampTz now = GetCurrentTimestamp();
 	uint32		partition;
+	uint32		marker_id;
+	uint16		key_len;
 
 	*load_id = 0;
 	if (!token->cacheable || !token->has_entry)
@@ -2124,50 +3272,67 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 
 	partition = cache_partition_for(MyDatabaseId, mapping->nspace,
 									 canonical_key);
-	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 #ifdef PGLC_TEST_HOOKS
-	pglc_test_pause_at("after_claim_lock");
+	pglc_test_pause_at("before_claim_lock");
 #endif
+	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
+	if (mapping->relation_slot >= (uint32) pglc_relation_states)
+		goto done;
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
-							mapping->nspace, canonical_key, false);
-	if (entry == NULL ||
-		!read_fence_snapshot(mapping, entry, &before) ||
-		!fence_snapshot_fences_match_token(&before, token) ||
-		entry->relation_oid != mapping->relation_oid ||
-		entry->relation_slot != mapping->relation_slot ||
-		entry->slot_generation != mapping->relation_slot_generation ||
-		entry->relation_oid != mapping->relation_oid ||
-		entry->dirty_writers != 0)
+							mapping->nspace, canonical_key,
+							mapping->relation_slot,
+							mapping->relation_slot_generation, false);
+	snapshot_stable = read_fence_snapshot(mapping, entry, &before);
+	if (before.config_generation != mapping->config_generation ||
+		before.slot_generation != mapping->relation_slot_generation ||
+		before.relation_incarnation == 0 ||
+		(entry != NULL &&
+		 (entry->relation_oid != mapping->relation_oid ||
+		  entry->relation_slot != mapping->relation_slot ||
+		  entry->slot_generation != mapping->relation_slot_generation)))
 		goto done;
 
-	/*
-	 * A follower can observe the miss and then be descheduled until the owner
-	 * publishes a value.  A successful publish advances entry->version, so the
-	 * follower's token is stale even though the entry is now usable.  Let the
-	 * caller repeat its quiet lookup instead of bypassing to a duplicate SQL
-	 * read.  An invalid entry with a changed generation reaches the explicit
-	 * version retry immediately below.  That retry must also happen before
-	 * loader cleanup: a stale follower must not cancel a newer owner.  Global/
-	 * relation and dirty-writer fences above stay conservative because they
-	 * represent transaction invalidation, not an owner completing this load.
-	 */
+	key_len = (uint16) strnlen(canonical_key, PGLC_KEY_MAX);
+	if (key_len == PGLC_KEY_MAX)
+		goto done;
+	marker_id = cache_marker_find(partition,
+								  cache_key_hash64(MyDatabaseId, mapping->nspace,
+											   canonical_key, key_len),
+								  canonical_key, key_len, mapping->relation_slot,
+								  mapping->relation_slot_generation);
+	if (pg_atomic_read_u64(&pglc_shared->global_dirty_writers) != 0 ||
+		pg_atomic_read_u64(
+			&pglc_relation_slots[mapping->relation_slot].dirty_writers) != 0 ||
+		(entry != NULL && entry->dirty_writers != 0) || marker_id != 0)
+		goto done;
+
+	/* A quiet stale token must refresh before any lease state can change. */
+	if (!snapshot_stable || entry == NULL ||
+		before.config_generation != token->config_generation ||
+		before.global_version != token->global_version ||
+		before.global_epoch != token->global_epoch ||
+		before.relation_version != token->relation_version ||
+		before.relation_incarnation != token->relation_incarnation ||
+		before.slot_generation != token->slot_generation ||
+		before.relation_slot != token->relation_slot ||
+		before.key_version != token->key_version)
+	{
+		result = PGLC_LOAD_RETRY;
+		goto done;
+	}
+
+	/* A current value wins; never let a follower replace it with another read. */
 	if (cache_entry_is_current_slot_locked(entry))
 	{
 		result = PGLC_LOAD_RETRY;
 		goto done;
 	}
-	if (entry->version != token->key_version)
-	{
-		result = PGLC_LOAD_RETRY;
-		goto done;
-	}
-
 	if (entry->loading &&
-		(entry->load_global_version != token->global_version ||
-		 entry->load_relation_version != token->relation_version ||
-		 entry->load_relation_incarnation !=
+		(entry->global_epoch != token->global_version ||
+		 entry->relation_version != token->relation_version ||
+		 entry->relation_incarnation !=
 		 token->relation_incarnation ||
-		 entry->load_key_version != token->key_version))
+		 entry->version != token->key_version))
 	{
 		entry->loading = false;
 		entry->load_id++;
@@ -2187,18 +3352,16 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 
 	entry->loading = true;
 	entry->load_started = now;
-	entry->load_global_version = token->global_version;
-	entry->load_relation_version = token->relation_version;
-	entry->load_relation_incarnation = token->relation_incarnation;
-	entry->load_key_version = token->key_version;
+	/* Lease tags replace payload fences; old bytes must become ineligible first. */
+	entry->valid = false;
+	entry->global_epoch = token->global_version;
+	entry->relation_version = token->relation_version;
+	entry->relation_incarnation = token->relation_incarnation;
 	entry->load_id++;
 	if (entry->load_id == 0)
 		entry->load_id = 1;
 	*load_id = entry->load_id;
 	result = PGLC_LOAD_OWNER;
-#ifdef PGLC_TEST_HOOKS
-	pglc_test_pause_at("after_claim_owner");
-#endif
 	pg_read_barrier();
 	if (!read_fence_snapshot(mapping, entry, &after) ||
 		!fence_snapshot_matches_token(&after, token))
@@ -2218,6 +3381,10 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 
 done:
 	pglc_partition_lock_release(partition);
+#ifdef PGLC_TEST_HOOKS
+	if (result == PGLC_LOAD_OWNER)
+		pglc_test_pause_at("after_claim_unlock");
+#endif
 	return result;
 }
 
@@ -2238,21 +3405,18 @@ pglc_cache_release_load(const PgLocalCacheMapping *mapping,
 									 canonical_key);
 	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
-							mapping->nspace, canonical_key, false);
+							mapping->nspace, canonical_key,
+							mapping->relation_slot,
+							mapping->relation_slot_generation, false);
 	if (entry != NULL &&
-		entry->key.database_oid == MyDatabaseId &&
-		strcmp(entry->key.nspace, mapping->nspace) == 0 &&
-		strcmp(entry->key.key, canonical_key) == 0 &&
 		entry->relation_oid == mapping->relation_oid &&
 		entry->relation_slot == mapping->relation_slot &&
 		entry->slot_generation == mapping->relation_slot_generation &&
 		entry->version == claim_token->key_version &&
 		entry->loading && entry->load_id == load_id &&
-		entry->load_global_version == claim_token->global_version &&
-		entry->load_relation_version == claim_token->relation_version &&
-		entry->load_relation_incarnation ==
-		claim_token->relation_incarnation &&
-		entry->load_key_version == claim_token->key_version)
+		entry->global_epoch == claim_token->global_version &&
+		entry->relation_version == claim_token->relation_version &&
+		entry->relation_incarnation == claim_token->relation_incarnation)
 		entry->loading = false;
 	pglc_partition_lock_release(partition);
 }
@@ -2331,15 +3495,18 @@ pglc_cache_invalidate_namespace(Oid database_oid, const char *nspace)
 		for (partition = 0; partition < (uint32) pglc_cache_partition_count();
 			 partition++)
 		{
-			HASH_SEQ_STATUS sequence;
-			PgLocalCacheCacheEntry *entry;
+			PgLocalCachePartition *cache_partition =
+				&pglc_shared->partitions[partition];
+			uint32		entry_index;
 
 			pglc_partition_lock_acquire(partition, LW_SHARED);
-			hash_seq_init(&sequence, pglc_cache_hashes[partition]);
-			while ((entry = hash_seq_search(&sequence)) != NULL)
-				if (entry->key.database_oid == database_oid &&
-					strncmp(entry->key.nspace, nspace,
-							PGLC_NAMESPACE_MAX) == 0 &&
+			for (entry_index = 0; entry_index < cache_partition->capacity;
+				 entry_index++)
+			{
+				PgLocalCacheCacheEntry *entry =
+					&cache_partition->entries[entry_index];
+
+				if (entry->in_use && entry->database_oid == database_oid &&
 					slot_index != UINT32_MAX && entry->valid &&
 					entry->relation_slot == slot_index &&
 					entry->slot_generation == slot_generation &&
@@ -2347,6 +3514,7 @@ pglc_cache_invalidate_namespace(Oid database_oid, const char *nspace)
 					entry->relation_incarnation == relation_incarnation &&
 					entry->relation_version == relation_version)
 					count++;
+			}
 			pglc_partition_lock_release(partition);
 		}
 	}
@@ -2396,7 +3564,9 @@ pglc_cache_invalidate_key(const PgLocalCacheMapping *mapping,
 									 canonical_key);
 	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
 	entry = get_cache_entry(MyDatabaseId, mapping->relation_oid,
-						mapping->nspace, canonical_key, false);
+						mapping->nspace, canonical_key,
+						mapping->relation_slot,
+							mapping->relation_slot_generation, false);
 	if (entry != NULL && cache_entry_is_current_slot_locked(entry))
 		count = 1;
 	if (entry != NULL)
@@ -2420,7 +3590,6 @@ uint64
 pglc_cache_invalidate_database(Oid database_oid)
 {
 	HASH_SEQ_STATUS relation_sequence;
-	PgLocalCacheCacheEntry *entry;
 	PgLocalCacheRelationState *relation_state;
 	uint32		partition;
 	uint64		count = 0;
@@ -2429,14 +3598,21 @@ pglc_cache_invalidate_database(Oid database_oid)
 	for (partition = 0; partition < (uint32) pglc_cache_partition_count();
 		 partition++)
 	{
-		HASH_SEQ_STATUS cache_sequence;
+		PgLocalCachePartition *cache_partition =
+			&pglc_shared->partitions[partition];
+		uint32		entry_index;
 
 		pglc_partition_lock_acquire(partition, LW_SHARED);
-		hash_seq_init(&cache_sequence, pglc_cache_hashes[partition]);
-		while ((entry = hash_seq_search(&cache_sequence)) != NULL)
-			if (entry->key.database_oid == database_oid &&
+		for (entry_index = 0; entry_index < cache_partition->capacity;
+			 entry_index++)
+		{
+			PgLocalCacheCacheEntry *entry =
+				&cache_partition->entries[entry_index];
+
+			if (entry->in_use && entry->database_oid == database_oid &&
 				cache_entry_is_current_slot_locked(entry))
 				count++;
+		}
 		pglc_partition_lock_release(partition);
 	}
 	LWLockAcquire(pglc_shared->registry_lock, LW_EXCLUSIVE);
@@ -2474,14 +3650,20 @@ pglc_cache_invalidate_all(void)
 	for (partition = 0; partition < (uint32) pglc_cache_partition_count();
 		 partition++)
 	{
-		HASH_SEQ_STATUS sequence;
-		PgLocalCacheCacheEntry *entry;
+		PgLocalCachePartition *cache_partition =
+			&pglc_shared->partitions[partition];
+		uint32		entry_index;
 
 		pglc_partition_lock_acquire(partition, LW_SHARED);
-		hash_seq_init(&sequence, pglc_cache_hashes[partition]);
-		while ((entry = hash_seq_search(&sequence)) != NULL)
-			if (cache_entry_is_current_slot_locked(entry))
+		for (entry_index = 0; entry_index < cache_partition->capacity;
+			 entry_index++)
+		{
+			PgLocalCacheCacheEntry *entry =
+				&cache_partition->entries[entry_index];
+
+			if (entry->in_use && cache_entry_is_current_slot_locked(entry))
 				count++;
+		}
 		pglc_partition_lock_release(partition);
 	}
 	(void) invalidate_all_locked();
@@ -2677,6 +3859,7 @@ collect_dirty(PgLocalCacheDirtyKind kind, Oid database_oid, Oid relation_oid,
 	{
 		entry->relation_oid = relation_oid;
 		entry->shared_marker_reserved = false;
+		entry->shared_entry_reserved = false;
 		entry->shared_relation_reserved = false;
 		entry->shared_relation_fence_published = false;
 		entry->shared_identity_pin = false;
@@ -2684,6 +3867,8 @@ collect_dirty(PgLocalCacheDirtyKind kind, Oid database_oid, Oid relation_oid,
 		entry->shared_slot_generation = 0;
 		entry->shared_relation_incarnation = 0;
 		entry->target_relation_incarnation = 0;
+		entry->shared_marker_id = 0;
+		entry->shared_marker_generation = 0;
 	}
 	return entry;
 }
@@ -2742,13 +3927,16 @@ pg_local_cache_test_hash_bucket(PG_FUNCTION_ARGS)
 	Oid			database_oid = PG_GETARG_OID(0);
 	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(2));
-	PgLocalCacheCacheKey cache_key;
+	uint32		partition;
+	uint32		bucket_count;
+	uint64		hash;
 
 	pglc_require_preload();
-	make_cache_key(&cache_key, database_oid, nspace, key, false);
-	/* dynahash selects its buckets from the hash value's low-order bits. */
-	PG_RETURN_INT32((int32) (pglc_cache_key_hash(&cache_key,
-											 sizeof(cache_key)) & 0xff));
+	partition = cache_partition_for(database_oid, nspace, key);
+	bucket_count = pglc_shared->partitions[partition].index.bucket_count;
+	hash = cache_key_hash64(database_oid, nspace, key,
+							(uint16) strnlen(key, PGLC_KEY_MAX));
+	PG_RETURN_INT32((int32) (hash & (bucket_count - 1U)));
 }
 
 Datum
@@ -2863,13 +4051,27 @@ pg_local_cache_test_corrupt_value_len(PG_FUNCTION_ARGS)
 	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(2));
 	PgLocalCacheCacheEntry *entry;
+	PgLocalCacheRelationState *state;
+	uint32		relation_slot = UINT32_MAX;
+	uint64		slot_generation = 0;
 	uint32		partition;
 	bool		corrupted = false;
 
 	pglc_require_preload();
+	LWLockAcquire(pglc_shared->registry_lock, LW_SHARED);
+	state = get_relation_state(MyDatabaseId, relation_oid, nspace, false);
+	if (state != NULL && state->relation_oid == relation_oid)
+	{
+		relation_slot = state->slot;
+		slot_generation = state->slot_generation;
+	}
+	LWLockRelease(pglc_shared->registry_lock);
+	if (relation_slot == UINT32_MAX)
+		PG_RETURN_BOOL(false);
 	partition = cache_partition_for(MyDatabaseId, nspace, key);
 	pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
-	entry = get_cache_entry(MyDatabaseId, relation_oid, nspace, key, false);
+	entry = get_cache_entry(MyDatabaseId, relation_oid, nspace, key,
+							relation_slot, slot_generation, false);
 	if (entry != NULL && entry->relation_oid == relation_oid && entry->valid)
 	{
 		entry->value_len = PGLC_VALUE_MAX + 1;
@@ -3179,34 +4381,48 @@ reserve_key_entries(PgLocalCacheLocalDirtyEntry **ordered, Size count)
 			PgLocalCacheLocalDirtyEntry *local = ordered[index];
 			PgLocalCacheCacheEntry *entry = get_cache_entry(
 				local->key.database_oid, local->relation_oid,
-				local->key.nspace, local->key.key, true);
+				local->key.nspace, local->key.key,
+				local->shared_slot, local->shared_slot_generation, false);
 
-			if (entry == NULL || entry->dirty_writers == (uint32) -1)
+			if (entry == NULL)
 			{
-				ok = false;
-				break;
+				if (!reserve_cache_marker(partition, local,
+									 &local->shared_marker_id,
+									 &local->shared_marker_generation))
+				{
+					(void) pg_atomic_fetch_add_u64(
+						&pglc_shared->dirty_marker_fallbacks_total, 1);
+					ok = false;
+					break;
+				}
+				local->shared_marker_reserved = true;
 			}
-			if (entry->dirty_writers != 0 &&
-				(entry->relation_slot != local->shared_slot ||
-				 entry->slot_generation != local->shared_slot_generation))
+			else
 			{
-				ok = false;
-				break;
-			}
-			if (entry->relation_oid != local->relation_oid ||
-				entry->relation_slot != local->shared_slot ||
-				entry->slot_generation != local->shared_slot_generation)
-			{
+				if (entry->dirty_writers == (uint32) -1)
+				{
+					ok = false;
+					break;
+				}
+				if (entry->valid)
+				{
+					pglc_worker_stat_add(&pglc_shared->invalidations,
+										 offsetof(PgLocalCacheWorkerStats,
+										  invalidations), 1);
+					pglc_worker_stat_add(&pglc_shared->key_invalidations,
+										 offsetof(PgLocalCacheWorkerStats,
+										  key_invalidations), 1);
+				}
 				entry->valid = false;
 				entry->loading = false;
 				entry->load_id++;
 				entry->version = next_entry_generation(partition);
-				entry->relation_oid = local->relation_oid;
-				entry->relation_slot = local->shared_slot;
-				entry->slot_generation = local->shared_slot_generation;
+				entry->source_xmin = InvalidTransactionId;
+				entry->source_observed_full_xid = 0;
+				entry->dirty_writers++;
+				local->shared_entry_reserved = true;
+				local->shared_marker_reserved = true;
 			}
-			entry->dirty_writers++;
-			local->shared_marker_reserved = true;
 #ifdef PGLC_TEST_HOOKS
 			if (pglc_test_abort_after_reservation)
 			{
@@ -3257,7 +4473,6 @@ pglc_publish_dirty(void)
 	Size		count;
 	Size		index;
 	uint64		invalidated = 0;
-	uint64		key_invalidated = 0;
 	uint64		table_invalidated = 0;
 	bool		global_fallback;
 
@@ -3319,20 +4534,18 @@ pglc_publish_dirty(void)
 				PgLocalCacheLocalDirtyEntry *local = ordered[index];
 				PgLocalCacheCacheEntry *entry;
 
-				if (!local->shared_marker_reserved)
+				if (!local->shared_entry_reserved)
 					continue;
 				entry = get_cache_entry(local->key.database_oid,
 										local->relation_oid,
 										local->key.nspace,
-										local->key.key, false);
+										local->key.key,
+										local->shared_slot,
+											local->shared_slot_generation,
+											false);
 				Assert(entry != NULL && entry->dirty_writers > 0);
 				if (entry != NULL)
 				{
-					if (entry->valid)
-					{
-						invalidated++;
-						key_invalidated++;
-					}
 					entry->valid = false;
 					entry->loading = false;
 					entry->load_id++;
@@ -3353,9 +4566,6 @@ pglc_publish_dirty(void)
 	pglc_worker_stat_add(&pglc_shared->invalidations,
 						 offsetof(PgLocalCacheWorkerStats, invalidations),
 						 invalidated);
-	pglc_worker_stat_add(&pglc_shared->key_invalidations,
-						 offsetof(PgLocalCacheWorkerStats, key_invalidations),
-						 key_invalidated);
 	pglc_worker_stat_add(&pglc_shared->table_invalidations,
 						 offsetof(PgLocalCacheWorkerStats, table_invalidations),
 						 table_invalidated);
@@ -3428,16 +4638,29 @@ pglc_finish_dirty(bool committed)
 
 				if (!local->shared_marker_reserved)
 					continue;
-				entry = get_cache_entry(local->key.database_oid,
-										local->relation_oid,
-										local->key.nspace,
-										local->key.key, false);
-				if (entry != NULL && entry->dirty_writers > 0)
+				if (local->shared_entry_reserved)
 				{
-					entry->valid = false;
-					entry->dirty_writers--;
+					entry = get_cache_entry(local->key.database_oid,
+											local->relation_oid,
+											local->key.nspace,
+											local->key.key,
+											local->shared_slot,
+											local->shared_slot_generation,
+											false);
+					if (entry != NULL && entry->dirty_writers > 0)
+					{
+						entry->valid = false;
+						entry->dirty_writers--;
+					}
 				}
+				else if (local->shared_marker_id != 0)
+					release_cache_marker(partition,
+										 local->shared_marker_id,
+										 local->shared_marker_generation);
 				local->shared_marker_reserved = false;
+				local->shared_entry_reserved = false;
+				local->shared_marker_id = 0;
+				local->shared_marker_generation = 0;
 			}
 			pglc_partition_lock_release(partition);
 		}
@@ -3719,20 +4942,44 @@ count_namespace_entries(Oid database_oid, const char *nspace)
 {
 	uint32		partition;
 	uint64		count = 0;
+	PgLocalCacheRelationKey relation_key;
+	PgLocalCacheRelationState *relation_state;
+	uint32		relation_slot = UINT32_MAX;
+	uint64		slot_generation = 0;
+
+	make_relation_key(&relation_key, database_oid, nspace);
+	LWLockAcquire(pglc_shared->registry_lock, LW_SHARED);
+	relation_state = hash_search(pglc_relation_hash, &relation_key,
+								 HASH_FIND, NULL);
+	if (relation_state != NULL)
+	{
+		relation_slot = relation_state->slot;
+		slot_generation = relation_state->slot_generation;
+	}
+	LWLockRelease(pglc_shared->registry_lock);
+	if (relation_slot == UINT32_MAX)
+		return 0;
 
 	for (partition = 0; partition < (uint32) pglc_cache_partition_count();
 		 partition++)
 	{
-		HASH_SEQ_STATUS sequence;
-		PgLocalCacheCacheEntry *entry;
+		PgLocalCachePartition *cache_partition =
+			&pglc_shared->partitions[partition];
+		uint32		entry_index;
 
 		pglc_partition_lock_acquire(partition, LW_SHARED);
-		hash_seq_init(&sequence, pglc_cache_hashes[partition]);
-		while ((entry = hash_seq_search(&sequence)) != NULL)
-			if (entry->key.database_oid == database_oid &&
-				strncmp(entry->key.nspace, nspace, PGLC_NAMESPACE_MAX) == 0 &&
+		for (entry_index = 0; entry_index < cache_partition->capacity;
+			 entry_index++)
+		{
+			PgLocalCacheCacheEntry *entry =
+				&cache_partition->entries[entry_index];
+
+			if (entry->in_use && entry->database_oid == database_oid &&
+				entry->relation_slot == relation_slot &&
+				entry->slot_generation == slot_generation &&
 				cache_entry_is_current_slot_locked(entry))
 				count++;
+		}
 		pglc_partition_lock_release(partition);
 	}
 	return count;
@@ -3808,8 +5055,6 @@ pglc_stats_json(void)
 {
 	StringInfoData expanded;
 	uint32		partition;
-	HASH_SEQ_STATUS sequence;
-	PgLocalCacheCacheEntry *entry;
 	uint64		positive = 0;
 	uint64		negative = 0;
 	uint64		dirty = 0;
@@ -3841,6 +5086,11 @@ pglc_stats_json(void)
 	HASH_SEQ_STATUS relation_sequence;
 	PgLocalCacheRelationState *relation_state;
 	uint64		global_dirty_writers;
+	uint64		arena_used = 0;
+	uint64		arena_slack = 0;
+	uint64		arena_capacity = 0;
+	uint64		marker_entries;
+	Size		marker_key_capacity;
 	TimestampTz now = GetCurrentTimestamp();
 
 	pglc_require_preload();
@@ -3850,10 +5100,23 @@ pglc_stats_json(void)
 	for (partition = 0; partition < (uint32) pglc_cache_partition_count();
 		 partition++)
 	{
+		PgLocalCachePartition *cache_partition =
+			&pglc_shared->partitions[partition];
+		uint32		entry_index;
+
 		pglc_partition_lock_acquire(partition, LW_SHARED);
-		hash_seq_init(&sequence, pglc_cache_hashes[partition]);
-		while ((entry = hash_seq_search(&sequence)) != NULL)
+		arena_used += cache_partition->arena.used_bytes;
+		arena_slack += cache_partition->arena.class_slack_bytes;
+		arena_capacity += (uint64) cache_partition->arena.page_count *
+			PGLC_ARENA_PAGE_SIZE;
+		for (entry_index = 0; entry_index < cache_partition->capacity;
+			 entry_index++)
 		{
+			PgLocalCacheCacheEntry *entry =
+				&cache_partition->entries[entry_index];
+
+			if (!entry->in_use)
+				continue;
 			if (cache_entry_is_current_slot_locked(entry) && entry->negative)
 				negative++;
 			else if (cache_entry_is_current_slot_locked(entry))
@@ -3935,6 +5198,12 @@ pglc_stats_json(void)
 	worker_starts = pg_atomic_read_u64(&pglc_shared->worker_starts);
 	workers_with_incomplete_mappings =
 		pglc_workers_without_current_mappings();
+	marker_entries = pg_atomic_read_u64(&pglc_shared->dirty_marker_entries);
+	marker_key_capacity = mul_size(
+		Min((Size) pglc_effective_dirty_marker_entries,
+			mul_size((Size) pglc_effective_dirty_marker_memory_mb,
+					 (Size) 1024 * 1024) / PGLC_KEY_MAX),
+		PGLC_KEY_MAX);
 
 	expanded.data = psprintf(
 		"{\"entries\":" UINT64_FORMAT
@@ -3966,6 +5235,13 @@ pglc_stats_json(void)
 		",\"output_backpressure_events\":" UINT64_FORMAT
 		",\"slow_client_drops\":" UINT64_FORMAT
 		",\"worker_starts\":" UINT64_FORMAT
+		",\"cache_memory_capacity_bytes\":%zu"
+		",\"cache_memory_used_bytes\":%zu"
+		",\"cache_fragmentation_bytes\":%zu"
+		",\"arena_admission_rejections_total\":" UINT64_FORMAT
+		",\"dirty_marker_entries\":" UINT64_FORMAT
+		",\"dirty_marker_highwater\":" UINT64_FORMAT
+		",\"dirty_marker_fallbacks_total\":" UINT64_FORMAT
 		",\"cache_hit\":" UINT64_FORMAT
 		",\"cache_miss\":" UINT64_FORMAT
 		",\"cache_evict\":" UINT64_FORMAT
@@ -3980,7 +5256,12 @@ pglc_stats_json(void)
 		singleflight_reuses, singleflight_timeouts,
 		active_clients, rejected_connections, authentication_failures,
 		protocol_errors, output_backpressure_events, slow_client_drops,
-		worker_starts,
+		worker_starts, (Size) arena_capacity, (Size) arena_used,
+		(Size) arena_slack,
+		pg_atomic_read_u64(&pglc_shared->arena_admission_rejections_total),
+		marker_entries,
+		pg_atomic_read_u64(&pglc_shared->dirty_marker_highwater),
+		pg_atomic_read_u64(&pglc_shared->dirty_marker_fallbacks_total),
 		cache_hits, cache_misses, evictions, database_reads);
 	expanded.len = strlen(expanded.data);
 	expanded.maxlen = expanded.len + 1;
@@ -3990,6 +5271,10 @@ pglc_stats_json(void)
 	appendStringInfo(
 		&expanded,
 		",\"cache_capacity\":%d"
+		",\"dirty_marker_capacity\":%d"
+		",\"dirty_marker_entries_effective\":%d"
+		",\"dirty_marker_memory_mb_effective\":%d"
+		",\"dirty_marker_memory_capacity_bytes\":%zu"
 		",\"lock_partitions\":%d"
 		",\"relation_state_capacity\":%d"
 		",\"max_clients\":%d"
@@ -4032,7 +5317,11 @@ pglc_stats_json(void)
 		",\"sql_result_reuses\":" UINT64_FORMAT
 		",\"tls_handshakes_total\":" UINT64_FORMAT
 		",\"tls_handshake_failures_total\":" UINT64_FORMAT "}",
-		pglc_cache_entries, pglc_cache_partition_count(), pglc_relation_states,
+		pglc_cache_entries, pglc_effective_dirty_marker_entries,
+		pglc_effective_dirty_marker_entries,
+		pglc_effective_dirty_marker_memory_mb,
+		marker_key_capacity,
+		pglc_cache_partition_count(), pglc_relation_states,
 		pglc_port == 0 ? 0 : pglc_max_clients,
 		pglc_port == 0 ? 0 : pglc_max_clients_per_worker,
 		pglc_port == 0 ? 0 :
@@ -4058,8 +5347,7 @@ pglc_stats_json(void)
 		pg_atomic_read_u64(&pglc_shared->mapping_reload_failures),
 		pg_atomic_read_u64(
 			&pglc_shared->mapping_reload_incomplete_retries),
-		mul_size((Size) (positive + negative),
-				 sizeof(PgLocalCacheCacheEntry)),
+		(Size) arena_used,
 		pg_atomic_read_u64(&pglc_shared->client_connects),
 		pg_atomic_read_u64(&pglc_shared->client_disconnects),
 		pglc_worker_stat_total(&pglc_shared->client_requests,

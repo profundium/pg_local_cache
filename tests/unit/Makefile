@@ -15,10 +15,13 @@ SOURCES = resp_test.c ../../src/resp.c
 FUZZ_SOURCE = ../../fuzz/resp_parse_fuzzer.c
 FUZZ_CORPUS = ../../fuzz/corpus/resp_parse
 ROW_PAYLOAD_SOURCES = row_payload_test.c ../../src/row_payload.c
+CACHE_STORAGE_SOURCES = cache_arena_test.c ../../src/cache_arena.c ../../src/cache_index.c
+CACHE_INDEX_SOURCES = cache_index_test.c ../../src/cache_index.c
 TARGET = resp_test
 SANITIZED_TARGET = resp_test_sanitized
-TARGETS = $(TARGET) row_payload_test
-SANITIZED_TARGETS = $(SANITIZED_TARGET) row_payload_test_sanitized
+TARGETS = $(TARGET) row_payload_test cache_arena_test cache_index_test
+SANITIZED_TARGETS = $(SANITIZED_TARGET) row_payload_test_sanitized \
+	cache_arena_test_sanitized cache_index_test_sanitized
 FUZZ_REPLAY_TARGET = resp_parse_replay
 FUZZ_REPLAY_SANITIZED_TARGET = resp_parse_replay_sanitized
 
@@ -32,6 +35,22 @@ $(TARGET): $(SOURCES) ../../src/resp.h ../../src/resp_limits.h
 row_payload_test: $(ROW_PAYLOAD_SOURCES) ../../src/row_payload.h ../../src/pg_local_cache.h
 	$(CC) $(ROW_PAYLOAD_CPPFLAGS) $(ROW_PAYLOAD_CFLAGS) $(CFLAGS) \
 		$(ROW_PAYLOAD_SOURCES) $(LDFLAGS) -o $@
+
+cache_arena_test: $(CACHE_STORAGE_SOURCES) ../../src/cache_arena.h ../../src/cache_index.h
+	$(CC) $(CPPFLAGS) $(COMMON_CFLAGS) $(CFLAGS) $(CACHE_STORAGE_SOURCES) $(LDFLAGS) -o $@
+
+cache_arena_test_sanitized: $(CACHE_STORAGE_SOURCES) ../../src/cache_arena.h ../../src/cache_index.h
+	$(CC) $(CPPFLAGS) $(COMMON_CFLAGS) -O1 -fsanitize=address,undefined \
+		-fno-omit-frame-pointer $(CFLAGS) $(CACHE_STORAGE_SOURCES) $(LDFLAGS) \
+		-fsanitize=address,undefined -o $@
+
+cache_index_test: $(CACHE_INDEX_SOURCES) ../../src/cache_index.h
+	$(CC) $(CPPFLAGS) $(COMMON_CFLAGS) $(CFLAGS) $(CACHE_INDEX_SOURCES) $(LDFLAGS) -o $@
+
+cache_index_test_sanitized: $(CACHE_INDEX_SOURCES) ../../src/cache_index.h
+	$(CC) $(CPPFLAGS) $(COMMON_CFLAGS) -O1 -fsanitize=address,undefined \
+		-fno-omit-frame-pointer $(CFLAGS) $(CACHE_INDEX_SOURCES) $(LDFLAGS) \
+		-fsanitize=address,undefined -o $@
 
 $(SANITIZED_TARGET): $(SOURCES) ../../src/resp.h ../../src/resp_limits.h
 	$(CC) $(CPPFLAGS) $(COMMON_CFLAGS) -O1 \
@@ -58,6 +77,8 @@ $(FUZZ_REPLAY_SANITIZED_TARGET): $(FUZZ_SOURCE) ../../src/resp.c ../../src/resp.
 check: $(TARGETS) $(FUZZ_REPLAY_TARGET)
 	./$(TARGET)
 	./row_payload_test
+	./cache_arena_test
+	./cache_index_test
 	./$(FUZZ_REPLAY_TARGET) $(FUZZ_CORPUS)
 
 sanitize: $(SANITIZED_TARGETS) $(FUZZ_REPLAY_SANITIZED_TARGET)
@@ -67,6 +88,12 @@ sanitize: $(SANITIZED_TARGETS) $(FUZZ_REPLAY_SANITIZED_TARGET)
 	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=0:strict_string_checks=1} \
 	UBSAN_OPTIONS=$${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1} \
 	./row_payload_test_sanitized
+	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=0:strict_string_checks=1} \
+	UBSAN_OPTIONS=$${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1} \
+	./cache_arena_test_sanitized
+	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=0:strict_string_checks=1} \
+	UBSAN_OPTIONS=$${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1} \
+	./cache_index_test_sanitized
 	ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=0:strict_string_checks=1} \
 	UBSAN_OPTIONS=$${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1} \
 	./$(FUZZ_REPLAY_SANITIZED_TARGET) $(FUZZ_CORPUS)
