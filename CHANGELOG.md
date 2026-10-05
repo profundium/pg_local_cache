@@ -17,6 +17,15 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 ### Changed
 
+- Cache entries now use compact descriptors, bounded open-addressed indexes,
+  and on-demand 64 KiB slab pages instead of fixed-width key/value slots.
+- Uncached dirty keys use a separate bounded marker table; marker exhaustion
+  widens relation/global fences without evicting cached values.
+- Dirty-marker entry and key-memory limits now auto-size from `cache_entries`
+  and `memory_budget_mb`; explicit limits remain available and budget-checked.
+- `cache_entries` now sizes the descriptor pool from the memory budget, with
+  arena capacity, class slack, admission rejection, and marker counters in
+  cache stats.
 - RESP row-cache payloads now store validated JSON only, with descriptor identity
   and CRC32C; rows above the payload limit are returned uncached.
 - RESP `MGET` deduplicates cache misses, reads them in one snapshot, and defers

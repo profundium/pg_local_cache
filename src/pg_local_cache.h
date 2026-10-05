@@ -12,6 +12,8 @@
 #include "storage/lwlock.h"
 #include "utils/hsearch.h"
 
+#include "cache_arena.h"
+#include "cache_index.h"
 #include "resp_limits.h"
 
 #define PGLC_VERSION "3.1.0"
@@ -45,31 +47,47 @@ typedef struct PgLocalCacheCacheKey
 
 typedef struct PgLocalCacheCacheEntry
 {
-	PgLocalCacheCacheKey key;
-	Oid			relation_oid;
-	uint32		relation_slot;
+	uint64_t	key_hash;
 	uint64		slot_generation;
 	uint64		global_epoch;
 	uint64		relation_version;
 	uint64		relation_incarnation;
 	uint64		version;
 	uint64		load_id;
-	uint64		load_global_version;
-	uint64		load_relation_version;
-	uint64		load_relation_incarnation;
-	uint64		load_key_version;
 	TimestampTz load_started;
 	pg_atomic_uint64 last_access;
-	uint32		dirty_writers;
-	uint32		value_len;
-	TransactionId source_xmin;
-	/* Full-XID horizon observed when source_xmin was admitted. */
 	uint64		source_observed_full_xid;
+	Oid			database_oid;
+	Oid			relation_oid;
+	uint32		relation_slot;
+	uint32		dirty_writers;
+	uint32		block_ref;
+	uint16		key_len;
+	uint16		value_len;
+	uint16		block_len;
+	uint16		reserved;
+	TransactionId source_xmin;
 	bool		valid;
 	bool		negative;
 	bool		loading;
-	char		value[PGLC_VALUE_MAX];
+	bool		in_use;
+	uint32		free_next;
 } PgLocalCacheCacheEntry;
+
+typedef struct PgLocalCacheDirtyMarker
+{
+	uint64_t	key_hash;
+	uint64		relation_slot_generation;
+	uint64		relation_incarnation;
+	uint64		generation;
+	uint32		relation_slot;
+	uint32		writer_count;
+	uint32		key_slot;
+	uint16		key_len;
+	uint16		reserved;
+	uint32		free_next;
+	bool		in_use;
+} PgLocalCacheDirtyMarker;
 
 typedef struct PgLocalCacheRelationKey
 {
@@ -99,10 +117,24 @@ typedef struct PgLocalCacheRelationSlot
 typedef struct PgLocalCachePartition
 {
 	LWLock	   *lock;
+	PgLocalCacheCacheEntry *entries;
+	PgLocalCacheDirtyMarker *markers;
+	PglcCacheIndex index;
+	PglcCacheIndex marker_index;
+	PglcArena	arena;
+	char	   *marker_key_arena;
+	uint32	  *marker_key_free_next;
 	uint64		entry_generation;
+	uint64		marker_generation;
 	uint32		eviction_bucket_cursor;
 	uint32		entry_count;
 	uint32		capacity;
+	uint32		free_entry_head;
+	uint32		marker_capacity;
+	uint32		marker_free_head;
+	uint32		marker_key_capacity;
+	uint32		marker_key_free_head;
+	uint32		marker_count;
 } PgLocalCachePartition;
 
 typedef struct PgLocalCacheWorkerStats
@@ -172,6 +204,10 @@ typedef struct PgLocalCacheSharedState
 	/* Generation fully loaded by each statically registered RESP worker. */
 	pg_atomic_uint64 worker_mapping_generations[PGLC_MAX_WORKERS];
 	pg_atomic_uint64 cache_admission_rejections;
+	pg_atomic_uint64 arena_admission_rejections_total;
+	pg_atomic_uint64 dirty_marker_entries;
+	pg_atomic_uint64 dirty_marker_highwater;
+	pg_atomic_uint64 dirty_marker_fallbacks_total;
 	pg_atomic_uint64 relation_state_admission_rejections;
 	pg_atomic_uint64 dirty_key_limit_fallbacks;
 	pg_atomic_uint64 mapping_reload_attempts;
@@ -247,6 +283,8 @@ typedef struct PgLocalCacheMapping
 extern int	pglc_port;
 extern int	pglc_worker_count;
 extern int	pglc_cache_entries;
+extern int	pglc_dirty_marker_entries;
+extern int	pglc_dirty_marker_memory_mb;
 extern int	pglc_lock_partitions;
 extern int	pglc_relation_states;
 extern int	pglc_max_clients;

@@ -72,10 +72,27 @@ class PsqlSession:
         assert self.process.stdout is not None
         self.pending = bytearray()
 
+    def _failure_output(self, lines: list[str] | None = None) -> str:
+        parts = list(lines or [])
+        if self.pending:
+            parts.append(self.pending.decode("utf-8", "replace"))
+        if self.process.stdout is not None:
+            descriptor = self.process.stdout.fileno()
+            while select.select([descriptor], [], [], 0)[0]:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    break
+                parts.append(chunk.decode("utf-8", "replace"))
+        return "\n".join(part for part in parts if part)
+
     def query(self, statement: str, timeout: float = PSQL_TIMEOUT) -> list[str]:
         if self.process.poll() is not None:
-            raise RuntimeError(f"psql exited with status {self.process.returncode}")
-        assert self.process.stdin is not None
+            raise RuntimeError(
+                f"psql exited with status {self.process.returncode}: "
+                f"{self._failure_output()}"
+            )
+        if self.process.stdin is None:
+            raise RuntimeError(f"psql stdin closed: {self._failure_output()}")
         assert self.process.stdout is not None
         marker = f"PGLC_STRESS_{uuid.uuid4().hex}".encode()
         statement = statement.strip().rstrip(";")
@@ -84,7 +101,9 @@ class PsqlSession:
                 f"{statement};\n\\echo {marker.decode()}\n".encode()
             )
         except BrokenPipeError as error:
-            raise RuntimeError("psql writer pipe closed") from error
+            raise RuntimeError(
+                f"psql writer pipe closed: {self._failure_output()}"
+            ) from error
 
         output: list[str] = []
         deadline = time.monotonic() + timeout
@@ -99,18 +118,22 @@ class PsqlSession:
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                detail = self._failure_output(output)
                 self.close()
-                raise TimeoutError(f"psql statement timed out: {statement[:120]}")
+                raise TimeoutError(
+                    f"psql statement timed out: {statement[:120]}\n{detail}"
+                )
             readable, _, _ = select.select([self.process.stdout], [], [], remaining)
             if not readable:
+                detail = self._failure_output(output)
                 self.close()
-                raise TimeoutError(f"psql statement timed out: {statement[:120]}")
+                raise TimeoutError(
+                    f"psql statement timed out: {statement[:120]}\n{detail}"
+                )
             chunk = os.read(self.process.stdout.fileno(), 65536)
             if not chunk:
                 status = self.process.poll()
-                detail = "\n".join(
-                    output + [self.pending.decode("utf-8", "replace")]
-                )
+                detail = self._failure_output(output)
                 raise RuntimeError(f"psql exited ({status}): {detail}")
             self.pending.extend(chunk)
 
@@ -129,30 +152,60 @@ class PsqlSession:
                 self.process.wait(timeout=2)
 
 
+class PsqlError(subprocess.CalledProcessError):
+    """A psql failure whose exception text includes captured output."""
+
+    def __str__(self) -> str:
+        return (
+            f"{super().__str__()}\nstdout:\n{self.stdout or ''}"
+            f"\nstderr:\n{self.stderr or ''}"
+        )
+
+
 def sql(query: str, timeout: float = PSQL_TIMEOUT) -> str:
-    result = subprocess.run(
-        [
-            PSQL,
-            "-X",
-            "-q",
-            "-A",
-            "-t",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-h",
-            PGHOST,
-            "-p",
-            PGPORT,
-            "-d",
-            PGDATABASE,
-            "-c",
-            query,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    arguments = [
+        PSQL,
+        "-X",
+        "-q",
+        "-A",
+        "-t",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-h",
+        PGHOST,
+        "-p",
+        PGPORT,
+        "-d",
+        PGDATABASE,
+        "-c",
+        query,
+    ]
+    try:
+        result = subprocess.run(
+            arguments,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        raise RuntimeError(
+            f"psql timed out after {timeout}s for {query!r}\n"
+            f"stdout:\n{stdout}\nstderr:\n{stderr}"
+        ) from error
+    if result.returncode != 0:
+        raise PsqlError(
+            result.returncode,
+            arguments,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
     return result.stdout.strip()
 
 

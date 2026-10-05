@@ -140,6 +140,21 @@ for integration in whole_row_integration pipeline_integration \
     echo "==> $integration"
     python3 "$repo/tests/$integration.py"
 done
+
+# Verify compact-entry capacity with a sized arena and a full 200k-row pass.
+sed -i 's/pg_local_cache.cache_entries = 512/pg_local_cache.cache_entries = 262144/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.memory_budget_mb = 64/pg_local_cache.memory_budget_mb = 256/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+pg_ctlcluster "$PG" ci restart
+echo "==> capacity_integration"
+python3 "$repo/tests/capacity_integration.py"
+sed -i 's/pg_local_cache.cache_entries = 262144/pg_local_cache.cache_entries = 512/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+sed -i 's/pg_local_cache.memory_budget_mb = 256/pg_local_cache.memory_budget_mb = 64/' \
+    /etc/postgresql/"$PG"/ci/pglc.conf
+pg_ctlcluster "$PG" ci restart
+
 echo "==> stress_integration over plaintext RESP"
 python3 "$repo/tests/stress_integration.py"
 
@@ -155,8 +170,8 @@ sed -i 's/pg_local_cache.lock_timeout_ms = 3000/pg_local_cache.lock_timeout_ms =
 sed -i 's/pg_local_cache.singleflight_wait_ms = 25/pg_local_cache.singleflight_wait_ms = 1000/' \
     /etc/postgresql/"$PG"/ci/pglc.conf
 pg_ctlcluster "$PG" ci restart
-echo "==> pipeline MGET claims with four workers"
-PGLC_MGET_CONCURRENCY_ONLY=1 python3 "$repo/tests/pipeline_integration.py"
+echo "==> pipeline multi-worker cases with four workers"
+PGLC_MULTI_WORKER_ONLY=1 python3 "$repo/tests/pipeline_integration.py"
 sed -i 's/pg_local_cache.memory_budget_mb = 128/pg_local_cache.memory_budget_mb = 64/' \
     /etc/postgresql/"$PG"/ci/pglc.conf
 sed -i 's/pg_local_cache.workers = 4/pg_local_cache.workers = 2/' \
