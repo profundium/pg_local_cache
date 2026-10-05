@@ -6,7 +6,7 @@ title: "Кэш строк PostgreSQL | pg_local_cache"
 seo_title: "Расширение кэша строк PostgreSQL | pg_local_cache"
 description: Кэшируйте строки PostgreSQL по первичному ключу в общей памяти и читайте их через аутентифицированный RESP MGET. Обычный SQL по-прежнему выполняет PostgreSQL, а записи инвалидируют затронутые элементы кэша.
 image: /assets/social-card.png
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-06"
 home: true
 permalink: /ru/
 ---
@@ -23,6 +23,7 @@ permalink: /ru/
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Сравнить с SQL <span aria-hidden="true">→</span></a>
       </div>
       <p class="hero-note">Аутентифицированный RESP API · PostgreSQL 14–18 · Открытый исходный код</p>
+      <p class="hero-note">В версии 3.1.0 ёмкость арены измеряется в байтах, что при подходящем бюджете позволяет хранить миллионы небольших ключей. Добавлены секционные блокировки, попадания по одному ключу без аллокаций, дешёвый учёт записей и отложенные промахи при блокировках отношений. <a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">Руководство по обновлению</a>.</p>
     </div>
     <figure class="hero-benchmark" aria-label="Локальный бенчмарк одного ключа: RESP в сравнении с SQL">
       <p class="benchmark-label">Измерено локально · 15 сентября 2026</p>
@@ -124,7 +125,7 @@ docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build
       <details><summary>Заменяет ли это shared_buffers?</summary><p>Нет. PostgreSQL кэширует страницы базы данных. Это расширение отдельно кэширует сериализованные целые строки по первичному ключу. См. <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">сравнение путей чтения</a>.</p></details>
       <details><summary>Кэширует ли оно обычные запросы SELECT?</summary><p>Нет. Общий кэш строк использует только аутентифицированный RESP MGET. Существующие запросы сохраняют обычный путь выполнения PostgreSQL.</p></details>
       <details><summary>Заменяет ли это Redis?</summary><p>Нет. Конечная точка RESP2 ограничена. Здесь нет универсального набора команд Redis, TTL, pub/sub или распределённой координации. Сравните <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">пути cache-aside для PostgreSQL и Redis</a>.</p></details>
-      <details><summary>Как проверить обновления и откат?</summary><p><a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">Руководство по инвалидации</a> описывает работу триггеров. <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">Руководство по обновлению</a> описывает переход с 2.x на 3.0.0.</p></details>
+      <details><summary>Как проверить обновления и откат?</summary><p><a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">Руководство по инвалидации</a> описывает работу триггеров. <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">Руководство по обновлению</a> описывает переход с 3.0.0 на 3.1.0, а также прежнюю миграцию с 2.x.</p></details>
     </div>
   </section>
 </main>

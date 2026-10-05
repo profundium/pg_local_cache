@@ -6,7 +6,7 @@ title: "Extensión de caché de filas para PostgreSQL | pg_local_cache"
 seo_title: "Extensión de caché de filas de PostgreSQL | pg_local_cache"
 description: Almacena filas de PostgreSQL por clave primaria en memoria compartida y léelas con RESP MGET autenticado. El SQL habitual sigue usando PostgreSQL y las escrituras invalidan las entradas afectadas.
 image: /assets/social-card.png
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-06"
 home: true
 permalink: /es/
 ---
@@ -23,6 +23,7 @@ permalink: /es/
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Comparar con SQL <span aria-hidden="true">→</span></a>
       </div>
       <p class="hero-note">API RESP autenticada · PostgreSQL 14–18 · Código abierto</p>
+      <p class="hero-note">La versión 3.1.0 usa capacidad en bytes para millones de claves pequeñas si el presupuesto lo permite. Añade bloqueos particionados, aciertos de una clave sin asignaciones, seguimiento de escrituras más barato y fallos aplazados por bloqueos de relación. <a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">Guía de actualización</a>.</p>
     </div>
     <figure class="hero-benchmark" aria-label="Benchmark local de una sola clave: comparación de RESP con SQL">
       <p class="benchmark-label">Medido localmente · 15 sep 2026</p>
@@ -124,7 +125,7 @@ docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build
       <details><summary>¿Esto reemplaza shared_buffers?</summary><p>No. PostgreSQL almacena en caché las páginas de la base de datos. Esta extensión almacena por separado filas completas serializadas por clave primaria. Consulta la <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">comparación de recorridos de lectura</a>.</p></details>
       <details><summary>¿Almacena en caché las consultas SELECT habituales?</summary><p>No. Solo RESP MGET autenticado usa la caché de filas compartida. Las consultas existentes mantienen el recorrido normal de PostgreSQL.</p></details>
       <details><summary>¿Reemplaza a Redis?</summary><p>No. El endpoint RESP2 es limitado. No ofrece un conjunto general de comandos de Redis, TTL, pub/sub ni coordinación distribuida. Compara los <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">recorridos de caché aparte de PostgreSQL y Redis</a>.</p></details>
-      <details><summary>¿Cómo compruebo las actualizaciones y el rollback?</summary><p>La <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">guía de invalidación</a> explica el comportamiento de las escrituras. La <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">guía de actualización</a> cubre el paso de 2.x a 3.0.0.</p></details>
+      <details><summary>¿Cómo compruebo las actualizaciones y el rollback?</summary><p>La <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">guía de invalidación</a> explica el comportamiento de las escrituras. La <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">guía de actualización</a> cubre el paso de 3.0.0 a 3.1.0 y la migración anterior desde 2.x.</p></details>
     </div>
   </section>
 </main>

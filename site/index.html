@@ -6,7 +6,7 @@ title: "PostgreSQL row cache extension | pg_local_cache"
 seo_title: "PostgreSQL Row Cache Extension | pg_local_cache"
 description: Cache PostgreSQL primary-key rows in shared memory and read them with authenticated RESP MGET. Ordinary SQL continues to use PostgreSQL, and writes invalidate affected cache entries.
 image: /assets/social-card.png
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-06"
 home: true
 permalink: /
 ---
@@ -23,6 +23,7 @@ permalink: /
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Compare with SQL <span aria-hidden="true">→</span></a>
       </div>
       <p class="hero-note">Authenticated RESP API · PostgreSQL 14–18 · Open source</p>
+      <p class="hero-note">3.1.0 adds byte-based slab capacity for millions of small keys when the budget fits, partitioned locks, allocation-free single-key hits, cheaper write tracking, and deferred locked misses. <a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">Upgrade guide</a>.</p>
     </div>
     <figure class="hero-benchmark" aria-label="Local single-key benchmark: RESP compared with SQL">
       <p class="benchmark-label">Measured locally · 15 Sep 2026</p>
@@ -124,7 +125,7 @@ docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build
       <details><summary>Does this replace shared_buffers?</summary><p>No. PostgreSQL caches database pages. This extension separately caches serialized whole rows by primary key. See the <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">read-path comparison</a>.</p></details>
       <details><summary>Does it cache ordinary SELECT queries?</summary><p>No. Only authenticated RESP MGET uses the shared row cache. Your existing queries keep PostgreSQL’s normal execution path.</p></details>
       <details><summary>Does it replace Redis?</summary><p>No. The RESP2 endpoint is limited. There is no general-purpose Redis command set, TTL, pub/sub, or distributed coordination. Compare the <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">PostgreSQL and Redis cache-aside paths</a>.</p></details>
-      <details><summary>How do I check updates and rollback?</summary><p>The <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">invalidation guide</a> explains write behavior. The <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">upgrade guide</a> covers 2.x to 3.0.0.</p></details>
+      <details><summary>How do I check updates and rollback?</summary><p>The <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">invalidation guide</a> explains write behavior. The <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">upgrade guide</a> covers 3.0.0 to 3.1.0 and the earlier 2.x migration.</p></details>
     </div>
   </section>
 </main>

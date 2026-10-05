@@ -25,6 +25,12 @@ Los cambios DDL requieren reconciliar las asignaciones. Consulte [Instalación](
 
 Cada clave de RESP `MGET` se valida y canoniza antes de buscarla. Un acierto apto devuelve la fila completa en JSON. Si no hay acierto, el worker lee la tabla de origen en una transacción breve y solo publica la carga si su barrera de lectura sigue vigente. Las filas inexistentes devuelven `nil`. Las filas cuya carga no cabe en la caché compartida aún pueden devolverse desde PostgreSQL si su JSON cabe en el límite de valores RESP.
 
+Los aciertos de una sola clave primaria entera o de texto admitida usan una ruta rápida sin asignaciones. Lee del búfer de solicitud y escribe directamente en el búfer de salida del cliente; otras formas y las solicitudes con varias claves usan la ruta general.
+
+### Fallos aplazados y plazos de bloqueo {#deferred-misses-and-lock-deadlines}
+
+Antes de SPI, el worker intenta obtener sin espera el `AccessShareLock` de la relación de origen. Si está ocupado, libera la reserva, aborta la transacción y encola la solicitud por worker: como máximo `pg_local_cache.max_deferred_misses` (predeterminado `8`) y 512 KiB de bytes retenidos por worker. Cada cliente puede tener una sola solicitud aplazada. Si la cola está llena, responde en orden `-ERR busy: relation locked, retry`. Los comandos posteriores de ese cliente esperan, pero los demás clientes del worker siguen. El reintento valida la generación del mapping y respeta el `statement_timeout` restante; al vencer responde `-ERR MGET deadline exceeded`. Solo cubre el bloqueo inicial de la relación. RESP `STAT` informa los contadores del worker `deferred_misses_total`, `deferred_misses_current`, `deferred_timeouts_total` y `deferred_rejections_total`.
+
 ## Coherencia transaccional {#transaction-consistency}
 
 ![Invalidación de escrituras: las barreras previas al commit protegen las escrituras confirmadas; un rollback anterior a publicar la barrera conserva válidas las entradas anteriores.](../../docs/diagrams/write-invalidation.svg)
@@ -33,9 +39,15 @@ Los triggers de fila y de sentencia de las tablas asignadas recopilan las claves
 
 Las lecturas RESP usan `pg_local_cache.role` en transacciones breves e independientes. No comparten el rol SQL, la transacción, las escrituras sin confirmar ni la instantánea del cliente.
 
+La caché, los índices, los markers y las arenas usan bloqueos de partición independientes. Las escrituras recopilan claves deduplicadas; una barrera por clave protege la entrada existente y un marker protege la clave sin entrada y bloquea nuevos fills mientras lo retenga el writer. Si se agotan markers o límites transaccionales, la barrera se amplía a la relación; si no hay estado para ella, al ámbito global. Es una barrera de generación, no un único bloqueo global de caché.
+
 ## Memoria y configuración {#shared-memory-and-configuration}
 
 La extensión preasigna una caché compartida acotada y el estado de asignaciones, workers y clientes al iniciar PostgreSQL. `memory_budget_mb` limita la asignación determinista de memoria de la extensión. Los fallos de admisión y la expulsión no superan la capacidad configurada; las lecturas recurren a PostgreSQL.
+
+`cache_entries` cuenta descriptores, no slots fijos por fila. Las claves y el JSON viven en arenas por partición; se asignan páginas de 64 KiB bajo demanda a clases de 256 bytes–16 KiB. Si no hay bloque disponible, PostgreSQL devuelve la fila sin admitirla en caché. `lock_partitions` tiene valor predeterminado `64` y acepta potencias de dos de `16` a `256`; las cachés pequeñas usan menos particiones. Los límites automáticos de markers son `min(16384, max(1024, floor(cache_entries / 4)))` entradas y `min(16, max(1, floor(memory_budget_mb / 25)))` MiB para claves; `-1` activa el cálculo automático. El valor predeterminado integrado de `cache_entries` es `262144`, calculado con 384 MiB y reservando al menos la mitad para la arena; rango `128`–`16777216`. Con memoria suficiente y filas pequeñas, puede alojar millones de claves. Todos los componentes se comprueban contra el presupuesto.
+
+El límite suave `RLIMIT_NOFILE` de cada worker RESP debe ser al menos `min(max_clients, max_clients_per_worker) + 33`; eleve el límite `nofile` del proceso/contenedor al aumentar los slots.
 
 | Ajuste | Valor predeterminado | Rango | Recarga |
 |---|---:|---|---|
@@ -48,15 +60,19 @@ La extensión preasigna una caché compartida acotada y el estado de asignacione
 | `pg_local_cache.tls_min_protocol_version` | `TLSv1.2` | `TLSv1.2` / `TLSv1.3` | Reinicio |
 | `pg_local_cache.port` | `6380` | `0`–`65535`; `0` desactiva RESP | Reinicio |
 | `pg_local_cache.workers` | `4` | `1`–`32` | Reinicio |
-| `pg_local_cache.cache_entries` | `16384` | `128`–`65536` | Reinicio |
+| `pg_local_cache.cache_entries` | `262144` | `128`–`16777216` | Reinicio |
+| `pg_local_cache.dirty_marker_entries` | `-1` | `-1` o `128`–`1048576` | Reinicio |
+| `pg_local_cache.dirty_marker_memory_mb` | `-1` | `-1` o `1`–`1024` MiB | Reinicio |
+| `pg_local_cache.lock_partitions` | `64` | potencia de dos `16`–`256`; las cachés pequeñas usan menos | Reinicio |
 | `pg_local_cache.relation_states` | `1024` | `128`–`8192` | Reinicio |
 | `pg_local_cache.max_clients` | `256` | `1`–`4096`; como máximo, el número de slots de worker | Reinicio |
-| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`128` | Reinicio |
+| `pg_local_cache.max_clients_per_worker` | `64` | `1`–`4096` | Reinicio |
 | `pg_local_cache.memory_budget_mb` | `384` | `64`–`8192` MB | Reinicio |
 | `pg_local_cache.idle_timeout_ms` | `300000` | `1000`–`86400000` | Reinicio |
 | `pg_local_cache.statement_timeout_ms` | `2000` | `100`–`60000` | Reinicio |
 | `pg_local_cache.lock_timeout_ms` | `250` | `10`–`60000` | Reinicio |
 | `pg_local_cache.singleflight_wait_ms` | `25` | `0`–`1000` | Reinicio |
+| `pg_local_cache.max_deferred_misses` | `8` | `1`–`64` per worker | Reinicio |
 | `pg_local_cache.max_pipeline_commands` | `256` | `1`–`4096` | Reinicio |
 | `pg_local_cache.max_dirty_keys` | `4096` | `128`–`16384` | Reinicio |
 | `pg_local_cache.bind_address` | `127.0.0.1` | Dirección IPv4 | Reinicio |
@@ -89,5 +105,8 @@ Con TLS desactivado, un listener de texto claro fuera de loopback requiere `allo
 `local_cache.health()` informa de la disponibilidad, el estado de la caché y la convergencia de asignaciones. `local_cache.stats()` devuelve contadores JSON; `local_cache.metrics()` devuelve la fila tipada para el exporter.
 
 Las métricas incluyen aciertos, fallos y aciertos negativos de caché; lecturas y escrituras de origen; invalidaciones y expulsiones; líderes, esperas, reutilizaciones y tiempos de espera de singleflight; clientes activos y máximos; rechazos por límite de conexiones; errores de autenticación y protocolo; contrapresión de salida y desconexiones de clientes lentos; inicios de workers; fallbacks por claves modificadas; fallos y reintentos al recargar asignaciones; handshakes y fallos TLS. Los indicadores incluyen capacidades de entradas y relaciones, recuentos de clientes y workers, convergencia de asignaciones, memoria compartida, de workers y estimada, y el presupuesto configurado.
+
+
+Los nuevos campos de `stats()` incluyen `fast_path_hits`, `fast_path_fallbacks` y sus motivos; `cache_memory_capacity_bytes`, `cache_memory_used_bytes`, `cache_fragmentation_bytes`, `arena_admission_rejections_total`; capacidad, uso, máximo y fallbacks de markers, además de sus límites efectivos.
 
 A continuación: [inicio rápido](QUICKSTART.md), [instalación](INSTALL_EXISTING.md) y [actualización](UPGRADING.md).

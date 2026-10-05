@@ -6,7 +6,7 @@ title: "PostgreSQL-Zeilen-Cache-Erweiterung | pg_local_cache"
 seo_title: "PostgreSQL-Zeilen-Cache-Erweiterung | pg_local_cache"
 description: Cachen Sie PostgreSQL-Zeilen nach Primärschlüssel im Shared Memory und lesen Sie sie mit authentifiziertem RESP MGET. Gewöhnliches SQL nutzt PostgreSQL; Schreibvorgänge invalidieren betroffene Cache-Einträge.
 image: /assets/social-card.png
-last_modified_at: "2026-09-22"
+last_modified_at: "2026-10-06"
 home: true
 permalink: /de/
 ---
@@ -23,6 +23,7 @@ permalink: /de/
         <a class="button" href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Mit SQL vergleichen <span aria-hidden="true">→</span></a>
       </div>
       <p class="hero-note">Authentifizierte RESP-API · PostgreSQL 14–18 · Open Source</p>
+      <p class="hero-note">3.1.0 nutzt Byte-Kapazität für Millionen kleiner Schlüssel, wenn das Speicherbudget reicht. Neu sind partitionierte Sperren, allokationsfreie Einzel-Key-Treffer, günstigere Schreibverfolgung und aufgeschobene Fehltreffer bei Relationssperren. <a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">Upgrade-Leitfaden</a>.</p>
     </div>
     <figure class="hero-benchmark" aria-label="Lokaler Benchmark mit einem Schlüssel: RESP im Vergleich zu SQL">
       <p class="benchmark-label">Lokal gemessen · 15. Sep. 2026</p>
@@ -124,7 +125,7 @@ docker compose -f examples/compose.yaml -f examples/compose.resp.yaml up --build
       <details><summary>Ersetzt das shared_buffers?</summary><p>Nein. PostgreSQL cached Datenbankseiten. Diese Erweiterung cached separat serialisierte vollständige Zeilen per Primärschlüssel. Siehe den <a href="{{ '/docs/row-cache-vs-shared-buffers.html' | prepend: locale.prefix | relative_url }}">Vergleich der Lesepfade</a>.</p></details>
       <details><summary>Cached es gewöhnliche SELECT-Abfragen?</summary><p>Nein. Nur authentifiziertes RESP MGET verwendet den gemeinsamen Zeilen-Cache. Bestehende Abfragen behalten den normalen PostgreSQL-Ausführungspfad.</p></details>
       <details><summary>Ersetzt es Redis?</summary><p>Nein. Der RESP2-Endpunkt ist begrenzt. Es gibt weder einen allgemeinen Redis-Befehlssatz noch TTL, Pub/Sub oder verteilte Koordination. Vergleichen Sie die <a href="{{ '/docs/postgresql-redis-cache.html' | prepend: locale.prefix | relative_url }}">PostgreSQL- und Redis-Cache-aside-Pfade</a>.</p></details>
-      <details><summary>Wie prüfe ich Updates und Rollback?</summary><p>Der <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">Invalidation-Leitfaden</a> erklärt Schreibvorgänge. Der <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">Upgrade-Leitfaden</a> behandelt den Wechsel von 2.x zu 3.0.0.</p></details>
+      <details><summary>Wie prüfe ich Updates und Rollback?</summary><p>Der <a href="{{ '/docs/cache-invalidation.html' | prepend: locale.prefix | relative_url }}">Invalidation-Leitfaden</a> erklärt Schreibvorgänge. Der <a href="{{ '/docs/UPGRADING.html' | prepend: locale.prefix | relative_url }}">Upgrade-Leitfaden</a> behandelt den Wechsel von 3.0.0 zu 3.1.0 und die frühere Migration von 2.x.</p></details>
     </div>
   </section>
 </main>

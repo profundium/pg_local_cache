@@ -2,6 +2,8 @@
 
 pg_local_cache is a PostgreSQL extension that serves complete rows by primary key over authenticated RESP2 MGET. It keeps PostgreSQL as the source of truth and stores bounded row entries in shared memory.
 
+Version 3.1.0 replaces fixed-width row slots with compact descriptors and on-demand 64 KiB slabs, so byte capacity follows the configured memory budget and can hold millions of small keys when row sizes fit. It partitions cache locks, adds an allocation-free single-key hit path and cheaper write tracking, defers misses blocked by relation locks, and closes stale-read races with pre-commit fences.
+
 ![Architecture: RESP readers use a bounded shared cache; SQL writers invalidate entries at commit.](docs/diagrams/architecture.svg)
 
 ## Benchmarks
@@ -20,7 +22,7 @@ Stop the demo with `docker compose -f examples/compose.yaml -f examples/compose.
 
 ## Install
 
-Use verified Debian or RPM packages, or build from source: [installation guide](docs/INSTALL_EXISTING.md).
+Install the 3.1.0 package for your PostgreSQL major version, or build from source: [installation guide](docs/INSTALL_EXISTING.md). From 3.0.0, replace the library and restart PostgreSQL, then run `ALTER EXTENSION pg_local_cache UPDATE;` in each database; the 3.1.0 SQL migration is a no-op. See [upgrade guide](docs/UPGRADING.md#upgrade-from-300).
 
 ## Fit
 
@@ -36,7 +38,7 @@ Use verified Debian or RPM packages, or build from source: [installation guide](
 - [RESP clients](docs/resp.md)
 - [Benchmarks](docs/BENCHMARKS.md)
 - [Technical reference](docs/TECHNICAL.md)
-- [Upgrading to 3.0](docs/UPGRADING.md)
+- [Upgrading to 3.1.0](docs/UPGRADING.md)
 - [PostgreSQL caching guide](docs/postgresql-caching.md)
 - [PostgreSQL and Redis](docs/postgresql-redis-cache.md)
 - [Batch primary-key lookups](docs/batch-primary-key-lookups.md)
