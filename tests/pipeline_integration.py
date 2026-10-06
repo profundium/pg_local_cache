@@ -41,6 +41,8 @@ _NEXT_TEST_ROW_ID = 10_000_000_000 + (os.getpid() % 100_000) * 100_000
 BACKPRESSURE_VALUE_BYTES = 3_900
 MAX_PIPELINE_INPUT_BYTES = 65_536
 MAX_RESPONSE_BYTES = 65_536 + 1_024
+# Mirrors PGLC_OUTPUT_BUFFER_MAX in src/pg_local_cache_worker.c.
+PGLC_OUTPUT_BUFFER_MAX_BYTES = MAX_RESPONSE_BYTES + 16 * 1024
 
 if WORKER_ROLE and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]{0,62}", WORKER_ROLE):
     raise ValueError("PG_LOCAL_CACHE_TEST_ROLE is not a safe SQL identifier")
@@ -1644,6 +1646,34 @@ def test_pipeline_budget_is_a_fairness_yield() -> None:
         client.close()
 
 
+def test_interleaved_client_pipelines_preserve_order() -> None:
+    clients = [RespConnection()]
+    try:
+        clients.extend(same_worker_peer(clients[0]) for _ in range(7))
+        count = guc_number("pg_local_cache.max_pipeline_commands") + 17
+
+        for client_index, client in enumerate(clients):
+            client.socket.sendall(
+                b"".join(
+                    client.encode("ECHO", f"client-{client_index}-{index}")
+                    for index in range(count)
+                )
+            )
+
+        for index in range(count):
+            for client_index, client in enumerate(clients):
+                assert client.read_response() == (
+                    f"client-{client_index}-{index}".encode()
+                )
+        for client_index, client in enumerate(clients):
+            assert client.command("ECHO", f"after-{client_index}") == (
+                f"after-{client_index}".encode()
+            )
+    finally:
+        for client in clients:
+            client.close()
+
+
 def test_half_close_drains_final_pipeline(table: str) -> None:
     client = RespConnection()
     try:
@@ -1985,12 +2015,20 @@ def test_backpressure_preserves_every_response(table: str) -> None:
     peer: RespConnection | None = None
     try:
         client.socket.settimeout(20)
-        key = crud_key(table, 2)
-        expected = row_bytes(2, "x" * BACKPRESSURE_VALUE_BYTES)
-        assert mget_one(client, key) == expected
+        row_ids = allocate_test_row_ids(table, 8)
+        keys = [crud_key(table, row_id) for row_id in row_ids]
+        value_bytes = 6_000
+        sql(
+            f"INSERT INTO public.{sql_identifier(table)} (id, value) VALUES "
+            + ", ".join(
+                f"({row_id}, repeat('x', {value_bytes}))" for row_id in row_ids
+            )
+        )
+        expected = [row_bytes(row_id, "x" * value_bytes) for row_id in row_ids]
+        assert client.command("MGET", *keys) == expected
         peer = same_worker_peer(client)
         before = json.loads(peer.command("STAT"))
-        encoded_mget = client.encode("MGET", key)
+        encoded_mget = client.encode("MGET", *keys)
         tail = (
             client.encode("DEL", crud_key(table, 3))
             + client.encode("MGET", crud_key(table, 3))
@@ -1999,7 +2037,13 @@ def test_backpressure_preserves_every_response(table: str) -> None:
             1024,
             (MAX_PIPELINE_INPUT_BYTES - len(tail) - 1) // len(encoded_mget),
         )
-        assert count >= 256
+        expected_mget_reply_bytes = len(f"*{len(expected)}\r\n") + sum(
+            len(value) + len(str(len(value))) + 5 for value in expected
+        )
+        expected_reply_bytes = count * expected_mget_reply_bytes
+        assert expected_reply_bytes >= max(
+            4 * PGLC_OUTPUT_BUFFER_MAX_BYTES, 4 * 1024 * 1024
+        )
         batch = encoded_mget * count + tail
         assert len(batch) < MAX_PIPELINE_INPUT_BYTES
         client.socket.sendall(batch)
@@ -2007,8 +2051,8 @@ def test_backpressure_preserves_every_response(table: str) -> None:
             client.socket.shutdown(socket.SHUT_WR)
 
         # The response is much larger than the deliberately restricted receive
-        # window.  Require an observed EAGAIN, then prove the same event loop
-        # stays serviceable.
+        # window. Require a short write or EAGAIN, then prove the same event
+        # loop stays serviceable.
         deadline = time.monotonic() + 5
         while True:
             progress = json.loads(peer.command("STAT"))
@@ -2022,7 +2066,7 @@ def test_backpressure_preserves_every_response(table: str) -> None:
             time.sleep(0.01)
         assert peer.command("ECHO", "same-worker-live") == b"same-worker-live"
         for _ in range(count):
-            assert client.read_response() == [expected]
+            assert client.read_response() == expected
         # The mutating command is deliberately placed after enough large
         # replies to trigger output backpressure.  Its input cursor may only
         # advance after the integer response is durably queued; replaying DEL
@@ -2035,7 +2079,7 @@ def test_backpressure_preserves_every_response(table: str) -> None:
             after["output_backpressure_events"]
             > before["output_backpressure_events"]
         )
-        assert after["cache_hits"] - before["cache_hits"] == count
+        assert after["cache_hits"] - before["cache_hits"] == count * len(keys)
         assert after["cache_misses"] - before["cache_misses"] == 1
         assert after["database_reads"] - before["database_reads"] == 1
         assert after["database_writes"] - before["database_writes"] == 1

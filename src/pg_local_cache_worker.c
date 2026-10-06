@@ -38,6 +38,7 @@
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
+#include "storage/pmsignal.h"
 #include "utils/builtins.h"
 #include "utils/array.h"
 #include "utils/jsonb.h"
@@ -116,7 +117,10 @@ typedef struct PgLocalCacheClient
 	bool		authenticated;
 	bool		close_after_flush;
 	bool		input_ready;
+	bool		output_ready;
+	bool		output_backpressure_reported;
 	bool		input_eof;
+	bool		peer_hung_up;
 	uint8		authentication_failures;
 	Size		input_start;
 	Size		used;
@@ -173,6 +177,7 @@ static uint64 worker_mapping_generation = 0;
 static TimestampTz worker_next_mapping_retry = 0;
 static uint64 worker_retry_generation = 0;
 static bool worker_mappings_incomplete = false;
+static TimestampTz worker_turn_timestamp = 0;
 static int	worker_slot = -1;
 static char *worker_auth_token = NULL;
 static bool bind_address_is_loopback(const char *address);
@@ -197,7 +202,10 @@ static void initialize_tls_server(void);
 static void run_server(int listener);
 static void close_client(PgLocalCacheClient *client);
 static void compact_client_input(PgLocalCacheClient *client);
+static void record_client_output_backpressure(PgLocalCacheClient *client);
 static bool flush_client_output(PgLocalCacheClient *client);
+static void flush_ready_client_outputs(PgLocalCacheClient *clients,
+									  int client_slots);
 static bool queue_response(PgLocalCacheClient *client,
 						   const char *response, Size response_length,
 						   bool close_after);
@@ -885,13 +893,17 @@ client_send(PgLocalCacheClient *client, const void *buffer, Size length)
 		return -1;
 	}
 #endif
-	return send(client->fd, buffer, length,
-#ifdef MSG_NOSIGNAL
-				MSG_NOSIGNAL
-#else
-				0
+	{
+		int			flags = 0;
+
+#ifdef MSG_DONTWAIT
+		flags |= MSG_DONTWAIT;
 #endif
-		);
+#ifdef MSG_NOSIGNAL
+		flags |= MSG_NOSIGNAL;
+#endif
+		return send(client->fd, buffer, length, flags);
+	}
 }
 
 #ifdef USE_OPENSSL
@@ -1009,6 +1021,8 @@ run_server(int listener)
 		int			step;
 		TimestampTz now = GetCurrentTimestamp();
 
+		worker_turn_timestamp = now;
+
 		worker_process_config_reload();
 		maybe_reload_mappings();
 		retry_deferred_misses();
@@ -1061,6 +1075,7 @@ run_server(int listener)
 		if (ready_clients_processed == 0)
 			next_ready_client =
 				(next_ready_client + 1) % client_slots;
+		flush_ready_client_outputs(clients, client_slots);
 
 		poll_fds[0].fd = listener;
 		poll_fds[0].events = POLLIN;
@@ -1076,7 +1091,7 @@ run_server(int listener)
 				{
 					TimestampTz deadline =
 						tls_handshake_deadline(&clients[i]);
-					TimestampTz current_time = GetCurrentTimestamp();
+					TimestampTz current_time = now;
 					int64		remaining_us;
 
 					if (current_time > deadline)
@@ -1169,18 +1184,28 @@ run_server(int listener)
 					(errcode_for_socket_access(),
 					 errmsg("pg_local_cache poll failed: %m")));
 
-		latch_result = WaitLatch(MyLatch,
+#ifdef USE_POSTMASTER_DEATH_SIGNAL
+		if (poll_result <= 0)
+#endif
+		{
+			latch_result = WaitLatch(MyLatch,
 								 WL_LATCH_SET | WL_TIMEOUT |
 								 WL_POSTMASTER_DEATH,
 								 0,
 								 PG_WAIT_EXTENSION);
-		ResetLatch(MyLatch);
-		if (latch_result & WL_POSTMASTER_DEATH)
+			ResetLatch(MyLatch);
+			if (latch_result & WL_POSTMASTER_DEATH)
+				proc_exit(1);
+		}
+#ifdef USE_POSTMASTER_DEATH_SIGNAL
+		else if (!PostmasterIsAlive())
 			proc_exit(1);
+#endif
 		CHECK_FOR_INTERRUPTS();
 
 		if (poll_result <= 0)
 			continue;
+		worker_turn_timestamp = GetCurrentTimestamp();
 
 		if (poll_fds[0].revents & POLLIN)
 		{
@@ -1209,7 +1234,7 @@ run_server(int listener)
 							 errmsg("pg_local_cache accept failed: %m")));
 					break;
 				}
-				accepted_at = GetCurrentTimestamp();
+				accepted_at = worker_turn_timestamp;
 
 				for (i = 0; i < client_slots; i++)
 				{
@@ -1287,7 +1312,10 @@ run_server(int listener)
 				clients[slot].output_sent = 0;
 				clients[slot].close_after_flush = false;
 				clients[slot].input_ready = false;
+				clients[slot].output_ready = false;
+				clients[slot].output_backpressure_reported = false;
 				clients[slot].input_eof = false;
+				clients[slot].peer_hung_up = false;
 				clients[slot].authentication_failures = 0;
 #ifdef USE_OPENSSL
 				clients[slot].last_activity = ssl == NULL ? accepted_at : 0;
@@ -1460,24 +1488,7 @@ run_server(int listener)
 			}
 #endif
 			if (poll_fds[i].revents & POLLOUT)
-			{
-				if (!flush_client_output(&clients[client_index]) ||
-					(clients[client_index].close_after_flush &&
-					 clients[client_index].output_sent ==
-					 clients[client_index].output_used))
-				{
-					close_client(&clients[client_index]);
-					continue;
-				}
-				if (clients[client_index].output_sent ==
-					clients[client_index].output_used &&
-					(clients[client_index].input_start <
-					 clients[client_index].used ||
-					 clients[client_index].input_eof))
-					clients[client_index].input_ready = true;
-				if (!(poll_fds[i].revents & POLLHUP))
-					continue;
-			}
+				clients[client_index].output_ready = true;
 			if (poll_fds[i].revents & POLLIN)
 			{
 				if (!process_client(&clients[client_index], false))
@@ -1486,33 +1497,9 @@ run_server(int listener)
 			if (clients[client_index].fd < 0)
 				continue;
 			if (poll_fds[i].revents & POLLHUP)
-			{
-				/*
-				 * POLLHUP can accompany the final POLLIN.  Drain complete requests
-				 * already copied into userspace when their replies were flushed.  A
-				 * full hangup with backpressured output cannot make progress and must
-				 * close instead of spinning because poll reports HUP unconditionally.
-				 */
-				if (clients[client_index].input_start <
-					clients[client_index].used &&
-					clients[client_index].output_sent ==
-					clients[client_index].output_used)
-				{
-					clients[client_index].input_ready = true;
-					continue;
-				}
-#ifdef USE_OPENSSL
-				if (client_has_tls_input(&clients[client_index]) &&
-					clients[client_index].output_sent ==
-					clients[client_index].output_used)
-				{
-					clients[client_index].input_ready = true;
-					continue;
-				}
-#endif
-				close_client(&clients[client_index]);
-			}
+				clients[client_index].peer_hung_up = true;
 		}
+		flush_ready_client_outputs(clients, client_slots);
 	}
 
 	for (i = 0; i < client_slots; i++)
@@ -1776,7 +1763,10 @@ close_client(PgLocalCacheClient *client)
 	client->retrying_deferred_miss = false;
 	client->close_after_flush = false;
 	client->input_ready = false;
+	client->output_ready = false;
+	client->output_backpressure_reported = false;
 	client->input_eof = false;
+	client->peer_hung_up = false;
 	client->authentication_failures = 0;
 	client->authenticated = false;
 #ifdef USE_OPENSSL
@@ -1808,10 +1798,28 @@ compact_client_input(PgLocalCacheClient *client)
 	client->input_start = 0;
 }
 
+static void
+record_client_output_backpressure(PgLocalCacheClient *client)
+{
+	if (!client->output_backpressure_reported)
+	{
+		pg_atomic_fetch_add_u64(
+			&pglc_shared->output_backpressure_events, 1);
+		client->output_backpressure_reported = true;
+	}
+}
+
 static bool
 flush_client_output(PgLocalCacheClient *client)
 {
 	bool		wrote = false;
+#ifdef USE_OPENSSL
+	bool		retry_partial = client->ssl != NULL;
+#else
+	bool		retry_partial = false;
+#endif
+
+	client->output_ready = false;
 
 	while (client->output_sent < client->output_used)
 	{
@@ -1823,25 +1831,120 @@ flush_client_output(PgLocalCacheClient *client)
 		{
 			client->output_sent += (Size) written;
 			wrote = true;
-			continue;
+			/* A short nonblocking write is backpressure too.  The old flush loop
+			 * immediately retried until EAGAIN; the readiness loop must record the
+			 * same episode without issuing another write in this turn.
+			 */
+			if (!retry_partial &&
+				client->output_sent < client->output_used)
+				record_client_output_backpressure(client);
+			if (retry_partial)
+				continue;
+			break;
 		}
-		if (written < 0 && errno == EINTR)
+		if (written < 0 && errno == EINTR && retry_partial)
 			continue;
+		if (written < 0 && errno == EINTR)
+			return true;
 		if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
 		{
-			pg_atomic_fetch_add_u64(
-				&pglc_shared->output_backpressure_events, 1);
+			record_client_output_backpressure(client);
 			if (wrote)
-				client->last_activity = GetCurrentTimestamp();
+			{
+#ifdef USE_OPENSSL
+				client->last_activity = client->ssl != NULL ?
+					GetCurrentTimestamp() : worker_turn_timestamp;
+#else
+				client->last_activity = worker_turn_timestamp;
+#endif
+			}
 			return true;
 		}
 		return false;
 	}
 	if (wrote)
-		client->last_activity = GetCurrentTimestamp();
-	client->output_used = 0;
-	client->output_sent = 0;
+	{
+#ifdef USE_OPENSSL
+		client->last_activity = client->ssl != NULL ?
+			GetCurrentTimestamp() : worker_turn_timestamp;
+#else
+		client->last_activity = worker_turn_timestamp;
+#endif
+	}
+	if (client->output_sent == client->output_used)
+	{
+		client->output_used = 0;
+		client->output_sent = 0;
+		client->output_backpressure_reported = false;
+	}
 	return true;
+}
+
+static void
+flush_ready_client_outputs(PgLocalCacheClient *clients, int client_slots)
+{
+	int			i;
+	bool		have_flush_timestamp = false;
+
+	for (i = 0; i < client_slots; i++)
+	{
+		PgLocalCacheClient *client = &clients[i];
+
+		if (client->fd < 0)
+			continue;
+#ifdef USE_OPENSSL
+		/* TLS retains its existing write/retry path. */
+		if (client->ssl != NULL)
+			continue;
+#endif
+		if (client->output_ready &&
+			client->output_sent < client->output_used)
+		{
+			if (!have_flush_timestamp)
+			{
+				worker_turn_timestamp = GetCurrentTimestamp();
+				have_flush_timestamp = true;
+			}
+			if (!flush_client_output(client))
+			{
+				close_client(client);
+				continue;
+			}
+			if (client->close_after_flush &&
+				client->output_sent == client->output_used)
+			{
+				close_client(client);
+				continue;
+			}
+			if (client->output_sent == client->output_used &&
+				(client->input_start < client->used || client->input_eof))
+				client->input_ready = true;
+		}
+
+		if (client->fd < 0)
+			continue;
+		if (client->close_after_flush &&
+			client->output_sent == client->output_used)
+		{
+			close_client(client);
+			continue;
+		}
+		if (client->peer_hung_up)
+		{
+			if (client->output_sent < client->output_used)
+				close_client(client);
+			else if (client->deferred_miss != NULL)
+			{
+				if (!client->input_eof &&
+					client->used < PGLC_REQUEST_MAX)
+					client->input_ready = true;
+			}
+			else if (client->input_start < client->used)
+				client->input_ready = true;
+			else
+				close_client(client);
+		}
+	}
 }
 
 static bool
@@ -1854,6 +1957,7 @@ queue_response(PgLocalCacheClient *client,
 		return false;
 	memcpy(client->output + client->output_used, response, response_length);
 	client->output_used += response_length;
+	client->output_ready = true;
 	client->close_after_flush |= close_after;
 	return true;
 }
@@ -1877,11 +1981,15 @@ finish_client_turn(PgLocalCacheClient *client)
 #ifdef USE_OPENSSL
 	if (client->ssl != NULL && client->tls_write_wait != 0)
 		return true;
+	if (client->ssl != NULL)
+	{
+		if (!flush_client_output(client))
+			return false;
+		return !(client->close_after_flush &&
+				 client->output_sent == client->output_used);
+	}
 #endif
-	if (!flush_client_output(client))
-		return false;
-	return !(client->close_after_flush &&
-			 client->output_sent == client->output_used);
+	return true;
 }
 
 static bool
@@ -1927,7 +2035,7 @@ process_client(PgLocalCacheClient *client, bool retry_tls_read)
 		if (received > 0)
 		{
 			client->used += (Size) received;
-			client->last_activity = GetCurrentTimestamp();
+			client->last_activity = worker_turn_timestamp;
 			return finish_client_turn(client);
 		}
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -1960,14 +2068,25 @@ process_client(PgLocalCacheClient *client, bool retry_tls_read)
 				PGLC_RESPONSE_MAX)
 			{
 #ifdef USE_OPENSSL
-				if (client->ssl != NULL && client->tls_write_wait != 0)
+				if (client->ssl != NULL)
+				{
+					if (client->tls_write_wait != 0)
+					{
+						client->input_ready = true;
+						return true;
+					}
+					if (!flush_client_output(client))
+						return false;
+				}
+				else
 				{
 					client->input_ready = true;
-					return true;
+					return finish_client_turn(client);
 				}
+#else
+				client->input_ready = true;
+				return finish_client_turn(client);
 #endif
-				if (!flush_client_output(client))
-					return false;
 				if (client->output_sent < client->output_used)
 				{
 					client->input_ready = true;
@@ -2160,7 +2279,7 @@ process_client(PgLocalCacheClient *client, bool retry_tls_read)
 			if (received > 0)
 			{
 				client->used += (Size) received;
-				client->last_activity = GetCurrentTimestamp();
+				client->last_activity = worker_turn_timestamp;
 #ifdef USE_OPENSSL
 				if (client->ssl != NULL &&
 					client->output_sent < client->output_used)
