@@ -4,7 +4,7 @@ lang: ru
 translation_key: QUICKSTART
 title: Запустите pg_local_cache локально
 seo_title: "Локальный запуск кэша строк PostgreSQL | pg_local_cache"
-description: "Запустите pg_local_cache 3.0 во временном PostgreSQL, читайте демонстрационные строки через RESP, проверяйте попадания в кэш, тестируйте обновления и удаляйте демонстрацию без изменений существующей базы."
+description: "Запустите pg_local_cache 3.1.0 во временном PostgreSQL, читайте демонстрационные строки через RESP, проверяйте попадания в кэш, тестируйте обновления и удаляйте демонстрацию без изменений существующей базы."
 section: Быстрый старт
 permalink: /ru/docs/QUICKSTART.html
 last_modified_at: "2026-09-16"

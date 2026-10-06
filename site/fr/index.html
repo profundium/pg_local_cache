@@ -62,7 +62,7 @@ MGET CRUD:pglc_demo.public.items:{"id":42} CRUD:pglc_demo.public.items:{"id":7}<
     <div class="proof-item"><strong>RESP MGET</strong><p>Authentifié et limité à 1 024 clés par requête. Les lignes absentes renvoient null.</p></div>
     <div class="proof-item"><strong>Écritures ordinaires</strong><p>INSERT, UPDATE et DELETE invalident les entrées concernées.</p></div>
     <div class="proof-item"><strong>Capacité fixe</strong><p>Allouez le cache de lignes partagé au démarrage de PostgreSQL.</p></div>
-    <div class="proof-item"><strong>Vérifications du snapshot</strong><p>Les lectures non éligibles utilisent la table source selon les règles de visibilité de PostgreSQL.</p></div>
+    <div class="proof-item"><strong>Validation de la génération du fence et de la charge utile</strong><p>Les lectures non éligibles utilisent la table source selon les règles de visibilité de PostgreSQL.</p></div>
   </section>
 
   <section id="benchmarks" class="band" aria-labelledby="benchmark-title">

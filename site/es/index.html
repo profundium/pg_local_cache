@@ -62,7 +62,7 @@ MGET CRUD:pglc_demo.public.items:{"id":42} CRUD:pglc_demo.public.items:{"id":7}<
     <div class="proof-item"><strong>RESP MGET</strong><p>Autenticado y limitado a 1.024 claves por solicitud. Las filas ausentes devuelven null.</p></div>
     <div class="proof-item"><strong>Escrituras habituales</strong><p>INSERT, UPDATE y DELETE invalidan las entradas afectadas.</p></div>
     <div class="proof-item"><strong>Capacidad fija</strong><p>Asigna la caché de filas compartida al iniciar PostgreSQL.</p></div>
-    <div class="proof-item"><strong>Comprobaciones de snapshot</strong><p>Las lecturas no elegibles usan la tabla de origen conforme a las reglas de visibilidad de PostgreSQL.</p></div>
+    <div class="proof-item"><strong>Validación de generación del fence y de la carga útil</strong><p>Las lecturas no elegibles usan la tabla de origen conforme a las reglas de visibilidad de PostgreSQL.</p></div>
   </section>
 
   <section id="benchmarks" class="band" aria-labelledby="benchmark-title">
@@ -83,7 +83,7 @@ MGET CRUD:pglc_demo.public.items:{"id":42} CRUD:pglc_demo.public.items:{"id":7}<
     <div class="fit-columns">
       <section class="fit-group">
         <h3>Vale la pena medir</h3>
-        <ul><li>Consultas repetidas de filas completas por clave primaria.</li><li>Un conjunto pequeño y activo de filas completas.</li><li>READ COMMITTED en una primaria escribible.</li><li>Una aplicación que pueda llamar a la API SQL explícita.</li></ul>
+        <ul><li>Consultas repetidas de filas completas por clave primaria.</li><li>Un conjunto pequeño y activo de filas completas.</li><li>READ COMMITTED en una primaria escribible.</li><li>Una aplicación que pueda usar RESP MGET autenticado.</li></ul>
       </section>
       <section class="fit-group">
         <h3>Conserva el SQL habitual</h3>

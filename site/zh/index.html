@@ -63,7 +63,7 @@ MGET CRUD:pglc_demo.public.items:{"id":42} CRUD:pglc_demo.public.items:{"id":7}<
     <div class="proof-item"><strong>RESP MGET</strong><p>需要身份验证，每个请求最多 1,024 个键。缺失行返回 null。</p></div>
     <div class="proof-item"><strong>普通写入</strong><p>INSERT、UPDATE 和 DELETE 会使受影响的条目失效。</p></div>
     <div class="proof-item"><strong>固定容量</strong><p>在 PostgreSQL 启动时分配共享行缓存。</p></div>
-    <div class="proof-item"><strong>快照检查</strong><p>不符合缓存条件的读取，按 PostgreSQL 可见性规则访问源表。</p></div>
+    <div class="proof-item"><strong>Fence 代次与负载校验</strong><p>不符合缓存条件的读取，按 PostgreSQL 可见性规则访问源表。</p></div>
   </section>
 
   <section id="benchmarks" class="band" aria-labelledby="benchmark-title">

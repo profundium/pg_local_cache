@@ -23,7 +23,7 @@ DDL changes require mapping reconciliation. See [installation](INSTALL_EXISTING.
 
 ![RESP MGET read path: cache hit, fenced source fill, and kill-switch bypass.](diagrams/read-path.svg)
 
-Each RESP `MGET` key is validated and canonicalized before lookup. A single-key hit with a supported integer or text primary key uses a fast path: it parses from the request buffer and writes directly to the client output buffer without per-request allocation. Other key forms, multi-key requests, and unsupported cache states use the general path. On a miss, the worker reads the source table in a short transaction, then publishes a fill only if its read fence is still current. Missing rows return nil. Rows whose payload cannot fit shared cache may still return from PostgreSQL if their JSON fits the RESP value limit.
+Each RESP `MGET` key is validated and canonicalized before lookup. The allocation-free single-key fast path applies only to a table with a one-column primary key of a supported integer, `text`, or unbounded `varchar` type, unrestricted typmod, and key JSON supported by the scanner. Text keys require a UTF-8 database; integer keys remain eligible with other encodings. Other key shapes, multi-key requests, and unsupported cache states use the general path. On a miss, the worker reads the source table in a short transaction, then publishes a fill only if its read fence is still current. Missing rows return nil. Rows whose payload cannot fit shared cache may still return from PostgreSQL if their JSON fits the RESP value limit.
 
 ### Deferred misses and lock deadlines {#deferred-misses-and-lock-deadlines}
 
@@ -59,7 +59,7 @@ RESP `STAT` JSON reports `deferred_misses_total`,
 
 Mapped-table row and statement triggers collect deduplicated dirty keys or a relation in transaction-local state. At pre-commit, keyed fences mark cached entries dirty; a separate marker protects a dirty key that has no cache entry and blocks a new fill while writers hold it. If marker or transaction-local key capacity is exhausted, fencing widens to the relation; if relation state is unavailable, it widens to a global fence. After commit, readers cannot use an old entry, and in-flight fills with stale generations are rejected. A rollback before fence publication discards the dirty state and leaves the prior entry valid. Cache entries, indexes, markers, and arenas use independent partition locks; global fences do not require a single global cache lock.
 
-RESP reads use `pg_local_cache.role` in independent short transactions. They do not share a client's SQL role, transaction, uncommitted writes, or snapshot.
+RESP source reads use `pg_local_cache.role` in short transactions independent of the caller's SQL transaction.
 
 ## Memory sizing and settings {#shared-memory-and-configuration}
 
@@ -74,8 +74,8 @@ from the needed class. If space is unavailable, the row still returns from
 PostgreSQL without cache admission.
 
 `lock_partitions` sets the maximum number of independent cache partitions
-(default `64`; power of two from `16` to `256`). Small caches use fewer
-partitions so each has at least 32 descriptors. Each partition owns its lock,
+(default `64`; power of two from `16` to `256`). Small caches reduce the partition count toward a target of 32 descriptors
+per partition, subject to a 16-partition floor. Each partition owns its lock,
 index, dirty markers, and arena.
 
 Dirty keys without cache entries use a separate bounded marker table and key

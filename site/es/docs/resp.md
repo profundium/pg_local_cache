@@ -32,11 +32,12 @@ CRUD:app.public.orders:{"tenant_id":7,"id":42}
 
 | Límite | Comportamiento |
 |---|---|
-| 1.024 claves por comando | Los lotes mayores devuelven `ERR MGET accepts at most 1024 keys`. |
+| Hasta 1.024 claves por comando | Dentro del límite de bytes, un comando con 1.025 claves devuelve `ERR MGET accepts at most 1024 keys`; con 1.026 o más, el parser devuelve `ERR invalid argument count`. |
+| 65.536 bytes por solicitud codificada | Si el búfer de entrada se llena antes de analizar una solicitud completa, el servidor cierra la conexión. |
 | 65.536 bytes por fila JSON | No se puede devolver por RESP una fila mayor. |
 | 66.560 bytes por respuesta MGET codificada | Las respuestas agregadas mayores devuelven `ERR response exceeds limit`. |
 
-El tamaño del lote está limitado tanto por el número de claves como por los bytes de respuesta. Divida los lotes si una fila grande puede acercarse al límite de respuesta.
+El tamaño del lote está limitado por el número de claves y por los bytes de solicitud y respuesta. Mantenga cada solicitud codificada dentro de 65.536 bytes; divida los lotes si las claves o filas grandes se acercan a cualquiera de esos límites.
 
 ## AUTH {#auth}
 
@@ -199,16 +200,19 @@ client.close()
 |---|---|
 | `NOAUTH Authentication required` | Autentique primero la conexión. |
 | `WRONGPASS invalid authentication token` | El token o el nombre de usuario opcional es incorrecto. |
-| `ERR MGET accepts at most 1024 keys` | Divida el lote. |
+| `ERR MGET accepts at most 1024 keys` | El comando tiene 1.025 claves; divida el lote. |
+| `ERR invalid argument count` | El parser rechazó demasiados argumentos; un MGET con 1.026 claves o más supera el límite de argumentos. |
+| `ERR busy: relation locked, retry` | La cola de fallos aplazados está llena mientras la relación sigue bloqueada; reintente la solicitud. |
 | `ERR response exceeds limit` | Reduzca el tamaño del lote o de la carga de la fila. |
-| `ERR MGET deadline exceeded` | Las lecturas de origen y las esperas por la misma clave superaron el plazo del comando. |
+| `ERR PostgreSQL: …` | Error de PostgreSQL o SPI, incluidos los tiempos de espera o la cancelación de sentencias o bloqueos de PostgreSQL. |
+| `ERR MGET deadline exceeded` | Venció el plazo agregado explícito de MGET, también mientras esperaba en la cola por un bloqueo de relación; es distinto de los tiempos de espera de sentencias o bloqueos de PostgreSQL. |
 | `ERR KVik key targets a different database` | Usa la base de datos configurada para el endpoint RESP. |
 | `ERR unknown KVik table mapping` | Comprueba que la clave nombre un esquema y una tabla asociados. |
 | `ERR key must use CRUD:database.schema.table:{primary-key-json}` | Usa el formato completo de clave CRUD. |
 | `ERR KVik key must end with a primary-key JSON object` | Termina el ámbito de tabla con un objeto JSON de clave primaria. |
 | `ERR invalid CRUD cache scope` | Solo para `INVALIDATE`: el ámbito indicado no es un ámbito CRUD admitido. |
 
-RESP es independiente de la conexión SQL, el rol, la transacción y la instantánea del cliente que realiza la llamada. Para transacciones SQL, use PostgreSQL directamente; consulte la [guía de invalidación](cache-invalidation.md).
+RESP usa una conexión independiente y no forma parte de la transacción SQL del cliente. Para transacciones SQL, use PostgreSQL directamente; consulte la [guía de invalidación](cache-invalidation.md).
 
 ## Limpiar la demostración {#stop-the-demo}
 

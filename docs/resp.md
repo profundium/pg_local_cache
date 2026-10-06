@@ -32,11 +32,12 @@ CRUD:app.public.orders:{"tenant_id":7,"id":42}
 
 | Limit | Behavior |
 |---|---|
-| 1,024 keys per command | Larger batches return `ERR MGET accepts at most 1024 keys`. |
+| Up to 1,024 keys per command | Within the byte limit, 1,025 keys return `ERR MGET accepts at most 1024 keys`; 1,026 or more exceed the parser argument limit and return `ERR invalid argument count`. |
+| 65,536 bytes per encoded request | If the input buffer fills before a complete request is parsed, the server closes the connection. |
 | 65,536 bytes per JSON row | A larger row cannot be returned over RESP. |
 | 66,560 bytes per encoded MGET reply | Larger aggregate replies return `ERR response exceeds limit`. |
 
-Batch size is bounded by both key count and reply bytes. Split batches when a large row can approach the response limit.
+Batch size is bounded by key count, encoded request bytes, and reply bytes. Keep each request within 65,536 bytes and split batches when large keys or rows approach either byte limit.
 
 ## AUTH {#auth}
 
@@ -199,16 +200,19 @@ client.close()
 |---|---|
 | `NOAUTH Authentication required` | Authenticate the connection first. |
 | `WRONGPASS invalid authentication token` | Token or optional username is incorrect. |
-| `ERR MGET accepts at most 1024 keys` | Split the batch. |
+| `ERR MGET accepts at most 1024 keys` | The command has 1,025 keys; split the batch. |
+| `ERR invalid argument count` | The parser rejected a command with too many arguments; an MGET with 1,026 or more keys exceeds its argument limit. |
+| `ERR busy: relation locked, retry` | The deferred-miss queue is full while a relation lock is held; retry the request. |
 | `ERR response exceeds limit` | Reduce batch size or row payload size. |
-| `ERR MGET deadline exceeded` | Source reads and same-key waits exceeded the command deadline. |
+| `ERR PostgreSQL: …` | A PostgreSQL or SPI error, including a PostgreSQL statement or lock timeout/cancellation. |
+| `ERR MGET deadline exceeded` | The explicit aggregate MGET deadline expired, including while queued for a relation lock; this is separate from PostgreSQL statement/lock timeouts. |
 | `ERR KVik key targets a different database` | Use the database configured for the RESP endpoint. |
 | `ERR unknown KVik table mapping` | Check that the key names an attached schema and table. |
 | `ERR key must use CRUD:database.schema.table:{primary-key-json}` | Use the complete CRUD key format. |
 | `ERR KVik key must end with a primary-key JSON object` | End the table scope with a primary-key JSON object. |
 | `ERR invalid CRUD cache scope` | `INVALIDATE` only: the supplied scope is not a supported CRUD scope. |
 
-RESP is independent of the caller's SQL connection, role, transaction, and snapshot. For SQL transactions, use PostgreSQL directly; see the [invalidation guide](cache-invalidation.md).
+RESP uses a separate connection and does not participate in the caller's SQL transaction. For SQL transactions, use PostgreSQL directly; see the [invalidation guide](cache-invalidation.md).
 
 ## Demo cleanup {#stop-the-demo}
 

@@ -32,11 +32,12 @@ CRUD:app.public.orders:{"tenant_id":7,"id":42}
 
 | Limit | Verhalten |
 |---|---|
-| 1.024 Schlüssel pro Befehl | Größere Batches liefern `ERR MGET accepts at most 1024 keys`. |
+| Höchstens 1.024 Schlüssel pro Befehl | Innerhalb des Byte-Limits liefert ein Befehl mit 1.025 Schlüsseln `ERR MGET accepts at most 1024 keys`; ab 1.026 Schlüsseln liefert der Parser `ERR invalid argument count`. |
+| 65.536 Byte pro codierter Anfrage | Ist der Eingabepuffer voll, bevor eine vollständige Anfrage geparst wurde, schließt der Server die Verbindung. |
 | 65.536 Byte pro JSON-Zeile | Eine größere Zeile kann nicht über RESP zurückgegeben werden. |
 | 66.560 Byte pro codierter MGET-Antwort | Größere Gesamtantworten liefern `ERR response exceeds limit`. |
 
-Die Batch-Größe ist sowohl durch die Schlüsselanzahl als auch durch die Antwortgröße begrenzt. Teilen Sie Batches auf, wenn eine große Zeile nahe an das Antwortlimit heranreichen kann.
+Die Batch-Größe ist durch Schlüsselanzahl, codierte Anfragebytes und Antwortbytes begrenzt. Halten Sie jede codierte Anfrage innerhalb des 65.536-Byte-Limits; teilen Sie Batches auf, wenn große Schlüssel oder Zeilen sich einem Byte-Limit nähern.
 
 ## AUTH {#auth}
 
@@ -199,16 +200,19 @@ client.close()
 |---|---|
 | `NOAUTH Authentication required` | Authentifizieren Sie die Verbindung zuerst. |
 | `WRONGPASS invalid authentication token` | Token oder optionaler Benutzername ist falsch. |
-| `ERR MGET accepts at most 1024 keys` | Teilen Sie den Batch auf. |
+| `ERR MGET accepts at most 1024 keys` | Der Befehl enthält 1.025 Schlüssel; teilen Sie ihn auf. |
+| `ERR invalid argument count` | Der Parser hat zu viele Argumente abgelehnt; ein MGET mit mindestens 1.026 Schlüsseln überschreitet sein Argumentlimit. |
+| `ERR busy: relation locked, retry` | Die Deferred-Miss-Queue ist bei gesperrter Relation voll; wiederholen Sie die Anfrage. |
 | `ERR response exceeds limit` | Verringern Sie Batch-Größe oder Zeilen-Payload. |
-| `ERR MGET deadline exceeded` | Quell-Lesevorgänge und Wartezeiten auf denselben Schlüssel haben das Befehlszeitlimit überschritten. |
+| `ERR PostgreSQL: …` | PostgreSQL- oder SPI-Fehler, einschließlich PostgreSQL-Statement- oder Lock-Timeout bzw. Abbruch. |
+| `ERR MGET deadline exceeded` | Die ausdrückliche gemeinsame MGET-Frist lief ab, auch während der Warteschlange auf eine Relationssperre; sie unterscheidet sich von PostgreSQL-Statement-/Lock-Timeouts. |
 | `ERR KVik key targets a different database` | Verwenden Sie die für den RESP-Endpunkt konfigurierte Datenbank. |
 | `ERR unknown KVik table mapping` | Prüfen Sie, ob Schlüssel-Schema und -Tabelle zugeordnet sind. |
 | `ERR key must use CRUD:database.schema.table:{primary-key-json}` | Verwenden Sie das vollständige CRUD-Schlüsselformat. |
 | `ERR KVik key must end with a primary-key JSON object` | Beenden Sie den Tabellenbereich mit einem JSON-Primärschlüsselobjekt. |
 | `ERR invalid CRUD cache scope` | Nur für `INVALIDATE`: Der angegebene Bereich ist kein unterstützter CRUD-Bereich. |
 
-RESP ist unabhängig von SQL-Verbindung, Rolle, Transaktion und Snapshot des Aufrufers. Verwenden Sie für SQL-Transaktionen direkt PostgreSQL; siehe den [Leitfaden zur Invalidierung](cache-invalidation.md).
+RESP verwendet eine separate Verbindung und ist nicht Teil der SQL-Transaktion des Aufrufers. Verwenden Sie für SQL-Transaktionen direkt PostgreSQL; siehe den [Leitfaden zur Invalidierung](cache-invalidation.md).
 
 ## Demo bereinigen {#stop-the-demo}
 

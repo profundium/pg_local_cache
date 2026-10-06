@@ -4,7 +4,7 @@ lang: fr
 translation_key: QUICKSTART
 title: Essayer pg_local_cache localement
 seo_title: "Essayer un cache de lignes PostgreSQL localement | pg_local_cache"
-description: "Exécutez pg_local_cache 3.0 dans un PostgreSQL éphémère, lisez des lignes d’exemple via RESP, observez les hits du cache, testez les mises à jour et supprimez la démo sans modifier une base existante."
+description: "Exécutez pg_local_cache 3.1.0 dans un PostgreSQL éphémère, lisez des lignes d’exemple via RESP, observez les hits du cache, testez les mises à jour et supprimez la démo sans modifier une base existante."
 section: Démarrage rapide
 permalink: /fr/docs/QUICKSTART.html
 last_modified_at: "2026-09-16"

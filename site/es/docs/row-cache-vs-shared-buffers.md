@@ -14,7 +14,7 @@ last_modified_at: "2026-10-04"
 
 Esta guía compara la caché de páginas de PostgreSQL con la caché de filas completas de `pg_local_cache` y muestra qué trabajo conserva cada ruta de lectura.
 
-[`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS) mantiene páginas de la base de datos en memoria. Una página caliente puede evitar E/S de almacenamiento, pero PostgreSQL sigue comprobando la visibilidad de las tuplas, ejecutando la consulta y construyendo el resultado. Un acierto apto de RESP `MGET` puede devolver una carga guardada de la fila completa tras comprobar la clave, la caché y la instantánea.
+[`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS) mantiene páginas de la base de datos en memoria. Una página caliente puede evitar E/S de almacenamiento, pero PostgreSQL sigue comprobando la visibilidad de las tuplas, ejecutando la consulta y construyendo el resultado. Un acierto apto de RESP `MGET` puede devolver una carga guardada de la fila completa tras validar la clave, la generación del fence y la carga útil.
 
 Consulte la [referencia técnica de la ruta de lectura](TECHNICAL.md#read-path-and-safe-fallback).
 
@@ -30,7 +30,7 @@ No. Las cachés de páginas de PostgreSQL almacenan páginas, no resultados fina
 | Acierto apto de RESP `MGET` | Protocolo, conversión de clave, sincronización de caché, comprobaciones de elegibilidad y devolución de la carga |
 | Fallo de RESP o bypass | Comprobaciones de caché y lectura de la tabla de origen; las filas aptas pueden llenar la caché |
 
-Un acierto evita repetir la ejecución sobre la tabla de origen y la serialización de la fila completa. Aun así, usa un worker de PostgreSQL y sincronización de caché. RESP no comparte la transacción SQL ni la instantánea del cliente que realiza la llamada.
+Un acierto evita repetir la ejecución sobre la tabla de origen y la serialización de la fila completa. Aun así, usa un worker de PostgreSQL y sincronización de caché. Las solicitudes RESP se ejecutan de forma independiente de la transacción SQL del cliente.
 
 ## Costes que debe incluir {#costs-to-include}
 

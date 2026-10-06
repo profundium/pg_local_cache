@@ -16,7 +16,7 @@ All notable changes to pg_local_cache are documented here. This project follows
 
 - Single-key hits for supported integer/text keys parse and write RESP output in place; write tracking reuses backend-local state and deduplicates dirty keys.
 - `cache_entries` now controls descriptor count (128–16,777,216); marker limits default to automatic sizing from cache and memory settings.
-- `MGET` deduplicates misses, reads them in one snapshot, and waits for single-flight only after releasing load claims.
+- `MGET` deduplicates misses and reads the initial non-waiting miss batch in one transaction. Single-flight waiters may run later source transactions, so the complete response is not guaranteed to share one snapshot.
 - Cache eviction and admission use bounded work; rows that do not fit remain served from PostgreSQL without cache admission.
 
 ### Fixed

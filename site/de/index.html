@@ -62,7 +62,7 @@ MGET CRUD:pglc_demo.public.items:{"id":42} CRUD:pglc_demo.public.items:{"id":7}<
     <div class="proof-item"><strong>RESP MGET</strong><p>Authentifiziert und auf 1.024 Schlüssel pro Anfrage begrenzt. Fehlende Zeilen geben null zurück.</p></div>
     <div class="proof-item"><strong>Gewöhnliche Schreibvorgänge</strong><p>INSERT, UPDATE und DELETE invalidieren betroffene Einträge.</p></div>
     <div class="proof-item"><strong>Feste Kapazität</strong><p>Allokieren Sie den gemeinsamen Zeilen-Cache beim Start von PostgreSQL.</p></div>
-    <div class="proof-item"><strong>Snapshot-Prüfungen</strong><p>Nicht geeignete Lesevorgänge verwenden die Quelltabelle gemäß den Sichtbarkeitsregeln von PostgreSQL.</p></div>
+    <div class="proof-item"><strong>Prüfung von Fence-Generation und Payload</strong><p>Nicht geeignete Lesevorgänge verwenden die Quelltabelle gemäß den Sichtbarkeitsregeln von PostgreSQL.</p></div>
   </section>
 
   <section id="benchmarks" class="band" aria-labelledby="benchmark-title">

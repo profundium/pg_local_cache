@@ -32,11 +32,12 @@ CRUD:app.public.orders:{"tenant_id":7,"id":42}
 
 | Limite | Comportement |
 |---|---|
-| 1 024 clés par commande | Les lots plus grands renvoient `ERR MGET accepts at most 1024 keys`. |
+| Jusqu’à 1 024 clés par commande | Dans la limite d’octets, une commande de 1 025 clés renvoie `ERR MGET accepts at most 1024 keys` ; à partir de 1 026 clés, l’analyseur renvoie `ERR invalid argument count`. |
+| 65 536 octets par requête encodée | Si le tampon d’entrée est plein avant l’analyse d’une requête complète, le serveur ferme la connexion. |
 | 65 536 octets par ligne JSON | Une ligne plus grande ne peut pas être renvoyée via RESP. |
 | 66 560 octets par réponse MGET encodée | Les réponses plus volumineuses renvoient `ERR response exceeds limit`. |
 
-La taille d’un lot est limitée à la fois par le nombre de clés et par le nombre d’octets de la réponse. Scindez les lots si une ligne volumineuse risque d’approcher la limite de réponse.
+La taille d’un lot est limitée par le nombre de clés et par les octets de la requête et de la réponse. Limitez chaque requête encodée à 65 536 octets maximum ; scindez les lots si de grandes clés ou lignes approchent l’une des limites en octets.
 
 ## AUTH {#auth}
 
@@ -199,16 +200,19 @@ client.close()
 |---|---|
 | `NOAUTH Authentication required` | Authentifiez d’abord la connexion. |
 | `WRONGPASS invalid authentication token` | Le jeton ou le nom d’utilisateur facultatif est incorrect. |
-| `ERR MGET accepts at most 1024 keys` | Scindez le lot. |
+| `ERR MGET accepts at most 1024 keys` | La commande contient 1 025 clés ; scindez le lot. |
+| `ERR invalid argument count` | L’analyseur a rejeté une commande avec trop d’arguments ; un MGET de 1 026 clés ou plus dépasse cette limite. |
+| `ERR busy: relation locked, retry` | La file des misses différés est pleine pendant le verrouillage d’une relation ; réessayez la requête. |
 | `ERR response exceeds limit` | Réduisez la taille du lot ou la charge utile des lignes. |
-| `ERR MGET deadline exceeded` | La lecture source et l’attente sur la même clé ont dépassé le délai de la commande. |
+| `ERR PostgreSQL: …` | Erreur PostgreSQL ou SPI, notamment un délai d’attente ou une annulation de requête ou de verrou PostgreSQL. |
+| `ERR MGET deadline exceeded` | L’échéance globale explicite de MGET a expiré, y compris dans la file d’attente d’un verrou de relation ; c’est distinct des délais d’attente de requête ou de verrou PostgreSQL. |
 | `ERR KVik key targets a different database` | Utilisez la base configurée pour le point de terminaison RESP. |
 | `ERR unknown KVik table mapping` | Vérifiez que la clé désigne un schéma et une table associés. |
 | `ERR key must use CRUD:database.schema.table:{primary-key-json}` | Utilisez le format CRUD complet de la clé. |
 | `ERR KVik key must end with a primary-key JSON object` | Terminez la portée de la table par un objet JSON de clé primaire. |
 | `ERR invalid CRUD cache scope` | `INVALIDATE` uniquement : la portée fournie n’est pas une portée CRUD prise en charge. |
 
-RESP est indépendant de la connexion SQL, du rôle, de la transaction et du snapshot de l’appelant. Pour les transactions SQL, utilisez directement PostgreSQL ; consultez le [guide d’invalidation](cache-invalidation.md).
+RESP utilise une connexion distincte et ne participe pas à la transaction SQL de l’appelant. Pour les transactions SQL, utilisez directement PostgreSQL ; consultez le [guide d’invalidation](cache-invalidation.md).
 
 ## Nettoyage de la démonstration {#stop-the-demo}
 

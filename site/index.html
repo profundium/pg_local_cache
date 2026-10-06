@@ -62,7 +62,7 @@ MGET CRUD:pglc_demo.public.items:{"id":42} CRUD:pglc_demo.public.items:{"id":7}<
     <div class="proof-item"><strong>RESP MGET</strong><p>Authenticated and bounded to 1,024 keys per request. Missing rows return null.</p></div>
     <div class="proof-item"><strong>Ordinary writes</strong><p>INSERT, UPDATE, and DELETE invalidate affected entries.</p></div>
     <div class="proof-item"><strong>Fixed capacity</strong><p>Allocate the shared row cache at PostgreSQL startup.</p></div>
-    <div class="proof-item"><strong>Snapshot checks</strong><p>Ineligible reads use the source table under PostgreSQL visibility rules.</p></div>
+    <div class="proof-item"><strong>Fence-generation and payload validation</strong><p>Ineligible reads use the source table under PostgreSQL visibility rules.</p></div>
   </section>
 
   <section id="benchmarks" class="band" aria-labelledby="benchmark-title">

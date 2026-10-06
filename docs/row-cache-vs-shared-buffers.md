@@ -14,7 +14,7 @@ last_modified_at: "2026-10-04"
 
 This guide compares PostgreSQL page caching with `pg_local_cache` whole-row caching and shows what each read path still does.
 
-[`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS) keeps database pages in memory. A warm page can avoid storage I/O, but PostgreSQL still checks tuple visibility, executes the query, and builds the result. An eligible RESP `MGET` hit can return a stored whole-row payload after key, cache, and snapshot checks.
+[`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS) keeps database pages in memory. A warm page can avoid storage I/O, but PostgreSQL still checks tuple visibility, executes the query, and builds the result. An eligible RESP `MGET` hit can return a stored whole-row payload after key validation, fence-generation checks, and payload validation.
 
 See the [technical read-path reference](TECHNICAL.md#read-path-and-safe-fallback).
 
@@ -30,7 +30,7 @@ No. PostgreSQL page caches store pages, not final query results. A [prepared sta
 | Eligible RESP `MGET` hit | Protocol, key conversion, cache synchronization, eligibility checks, and payload return |
 | RESP miss or bypass | Cache checks and a source-table read; eligible rows may fill the cache |
 
-A hit avoids repeating source-table execution and whole-row serialization. It still uses a PostgreSQL worker and cache synchronization. RESP does not share the caller's SQL transaction or snapshot.
+A hit avoids repeating source-table execution and whole-row serialization. It still uses a PostgreSQL worker and cache synchronization. RESP requests run independently of the caller's SQL transaction.
 
 ## Costs to include {#costs-to-include}
 

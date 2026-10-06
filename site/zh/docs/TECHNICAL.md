@@ -25,8 +25,7 @@ DDL 变更后必须重新协调映射。请参阅[安装指南](INSTALL_EXISTING
 
 每个 RESP `MGET` 键都会在查找前经过校验和规范化。符合条件的缓存命中会返回完整行的 JSON。未命中时，worker 会在一个简短事务中读取源表；只有读取屏障仍有效时才会发布缓存填充。不存在的行返回 `nil`。如果行的负载无法放入共享缓存，只要 JSON 未超过 RESP 值大小限制，仍可由 PostgreSQL 返回。
 
-对于受支持的整数或文本主键单键命中，快速路径不会进行分配。它直接读取请求缓冲区，
-并写入客户端输出缓冲区；其他键格式和多键请求使用通用路径。
+无分配快速路径仅适用于单键请求，且表的主键必须只有一列，类型为受支持的整数、`text` 或无长度上限的 `varchar`，typmod 不受限，并且键 JSON 符合扫描器支持的格式。文本键要求数据库编码为 UTF-8；整数键在其他编码下也可使用快速路径。其他键形式、多键请求和不受支持的缓存状态使用通用路径。
 
 ### 延迟处理未命中与锁期限 {#deferred-misses-and-lock-deadlines}
 
@@ -46,7 +45,7 @@ DDL 变更后必须重新协调映射。请参阅[安装指南](INSTALL_EXISTING
 
 映射表上的行级和语句级触发器会在事务本地状态中记录脏键或受影响的关系。提交前回调会发布失效屏障并递增代数。屏障建立前开始的填充无法发布过期数据。仅在屏障发布前回滚，事务的脏状态才会被丢弃，原缓存项仍然有效。若屏障发布后事务中止，失效不会撤销，受影响的缓存项仍为无效。
 
-RESP 读取在独立的短事务中使用 `pg_local_cache.role`。它们不会共享客户端的 SQL 角色、事务、未提交写入或快照。
+RESP 源读取使用 `pg_local_cache.role`，并在独立于客户端 SQL 事务的短事务中执行。
 
 缓存、索引、marker 和 arena 使用独立分区锁。写入会收集去重后的键；按键 fence 保护已有
 缓存项，独立 marker 保护没有缓存项的键，并在 writer 持有时阻止新填充。marker 或事务键
@@ -59,8 +58,7 @@ fence，不是单一的全局缓存锁。
 
 `cache_entries` 统计描述符，而非固定行槽位。键和行 JSON 位于各分区 arena；按需分配
 64 KiB 页面，块类别为 256 字节至 16 KiB。无可用块时，行仍由 PostgreSQL 返回，但不会
-进入缓存。`lock_partitions` 默认 `64`，范围为 `16` 至 `256` 的 2 次幂；小缓存会使用较少
-分区。Marker 自动上限为 `min(16384, max(1024, floor(cache_entries / 4)))` 个条目和
+进入缓存。`lock_partitions` 默认 `64`，范围为 `16` 至 `256` 的 2 次幂；小缓存减少分区数，以每分区 32 个描述符为目标，但分区数至少为 16。Marker 自动上限为 `min(16384, max(1024, floor(cache_entries / 4)))` 个条目和
 `min(16, max(1, floor(memory_budget_mb / 25)))` MiB 键内存；`-1` 表示自动计算。内置
 `cache_entries` 默认值 `262144` 按 384 MiB 默认预算计算，并至少为 arena 预留一半；范围
 为 `128`–`16777216`。内存充足且行较小时可容纳数百万个键。所有组件都纳入预算检查。
@@ -81,7 +79,7 @@ fence，不是单一的全局缓存锁。
 | `pg_local_cache.cache_entries` | `262144` | `128`–`16777216` | 重启 |
 | `pg_local_cache.dirty_marker_entries` | `-1` | `-1` 或 `128`–`1048576` | 重启 |
 | `pg_local_cache.dirty_marker_memory_mb` | `-1` | `-1` 或 `1`–`1024` MiB | 重启 |
-| `pg_local_cache.lock_partitions` | `64` | `16`–`256` 的 2 次幂；小缓存使用较少 | 重启 |
+| `pg_local_cache.lock_partitions` | `64` | `16`–`256` 的 2 次幂；小缓存使用较少分区 | 重启 |
 | `pg_local_cache.relation_states` | `1024` | `128`–`8192` | 重启 |
 | `pg_local_cache.max_clients` | `256` | `1`–`4096`；不得超过 worker 槽位数 | 重启 |
 | `pg_local_cache.max_clients_per_worker` | `64` | `1`–`4096` | 重启 |
