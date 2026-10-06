@@ -14,7 +14,7 @@ last_modified_at: "2026-10-04"
 
 本指南比较 PostgreSQL 页面缓存和 `pg_local_cache` 整行缓存，并说明每种读取路径仍需执行哪些工作。
 
-[`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS) 将数据库页面保留在内存中。热页面可以避免磁盘 I/O，但 PostgreSQL 仍会检查元组可见性、执行查询并构建结果。符合条件的 RESP `MGET` 命中在检查键、缓存和快照后，可直接返回已存储的整行负载。
+[`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS) 将数据库页面保留在内存中。热页面可以避免磁盘 I/O，但 PostgreSQL 仍会检查元组可见性、执行查询并构建结果。符合条件的 RESP `MGET` 命中在验证键、fence 代次和负载后，可直接返回已存储的整行负载。
 
 请参阅[读取路径技术参考](TECHNICAL.md#read-path-and-safe-fallback)。
 
@@ -30,7 +30,7 @@ last_modified_at: "2026-10-04"
 | 符合条件的 RESP `MGET` 命中 | 协议处理、键转换、缓存同步、资格检查和负载返回 |
 | RESP 未命中或绕过缓存 | 缓存检查和源表读取；符合条件的行可能填充缓存 |
 
-缓存命中可以避免重复执行源表查询和整行序列化，但仍需使用 PostgreSQL worker 并进行缓存同步。RESP 不会共享调用方的 SQL 事务或快照。
+缓存命中可以避免重复执行源表查询和整行序列化，但仍需使用 PostgreSQL worker 并进行缓存同步。RESP 请求独立于调用方的 SQL 事务执行。
 
 ## 需要计入的成本 {#costs-to-include}
 

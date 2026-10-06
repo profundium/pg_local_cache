@@ -175,7 +175,7 @@ Confirma que la extensión está lista y que las asociaciones están actualizada
 
 ## 6. Actualiza {#recover-a-failed-binary-install}
 
-Para actualizar de 2.x a 3.0, sigue primero la [guía de actualización](UPGRADING.md).
+Para actualizar de 3.0.0 a 3.1.0, sigue la [guía de actualización](UPGRADING.md). Si usas 2.x, sigue primero la ruta encadenada de la guía pasando por 3.0.0 hasta 3.1.0.
 Migra las aplicaciones de SQL `mget` a RESP `MGET`, instala el paquete
 3.1.0 correspondiente, reinicia PostgreSQL y actualiza la extensión en cada
 base de datos donde esté instalada:

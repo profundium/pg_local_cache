@@ -25,7 +25,7 @@ Los cambios DDL requieren reconciliar las asignaciones. Consulte [Instalación](
 
 Cada clave de RESP `MGET` se valida y canoniza antes de buscarla. Un acierto apto devuelve la fila completa en JSON. Si no hay acierto, el worker lee la tabla de origen en una transacción breve y solo publica la carga si su barrera de lectura sigue vigente. Las filas inexistentes devuelven `nil`. Las filas cuya carga no cabe en la caché compartida aún pueden devolverse desde PostgreSQL si su JSON cabe en el límite de valores RESP.
 
-Los aciertos de una sola clave primaria entera o de texto admitida usan una ruta rápida sin asignaciones. Lee del búfer de solicitud y escribe directamente en el búfer de salida del cliente; otras formas y las solicitudes con varias claves usan la ruta general.
+La ruta rápida sin asignaciones solo se aplica a una clave de una tabla con una clave primaria de una sola columna, de tipo entero admitido, `text` o `varchar` sin límite de longitud, sin restricción de typmod y con JSON de clave compatible con el analizador. Las claves de texto requieren una base de datos UTF-8; las claves enteras siguen siendo aptas con otras codificaciones. Las demás formas de clave, las solicitudes con varias claves y los estados de caché no admitidos usan la ruta general.
 
 ### Fallos aplazados y plazos de bloqueo {#deferred-misses-and-lock-deadlines}
 
@@ -37,7 +37,7 @@ Antes de SPI, el worker intenta obtener sin espera el `AccessShareLock` de la re
 
 Los triggers de fila y de sentencia de las tablas asignadas recopilan las claves modificadas o una relación afectada en el estado local de la transacción. La función de callback pre-commit publica barreras de invalidación e incrementa las generaciones. Una carga que empezó antes de la barrera no puede publicar datos obsoletos. Un rollback antes de publicar la barrera descarta el estado modificado y conserva válidas las entradas anteriores. Si la transacción se aborta después de la publicación, la invalidación no se revierte y las entradas afectadas siguen siendo inválidas.
 
-Las lecturas RESP usan `pg_local_cache.role` en transacciones breves e independientes. No comparten el rol SQL, la transacción, las escrituras sin confirmar ni la instantánea del cliente.
+Las lecturas de origen por RESP usan `pg_local_cache.role` en transacciones breves, independientes de la transacción SQL del cliente.
 
 La caché, los índices, los markers y las arenas usan bloqueos de partición independientes. Las escrituras recopilan claves deduplicadas; una barrera por clave protege la entrada existente y un marker protege la clave sin entrada y bloquea nuevos fills mientras lo retenga el writer. Si se agotan markers o límites transaccionales, la barrera se amplía a la relación; si no hay estado para ella, al ámbito global. Es una barrera de generación, no un único bloqueo global de caché.
 
@@ -45,7 +45,7 @@ La caché, los índices, los markers y las arenas usan bloqueos de partición in
 
 La extensión preasigna una caché compartida acotada y el estado de asignaciones, workers y clientes al iniciar PostgreSQL. `memory_budget_mb` limita la asignación determinista de memoria de la extensión. Los fallos de admisión y la expulsión no superan la capacidad configurada; las lecturas recurren a PostgreSQL.
 
-`cache_entries` cuenta descriptores, no slots fijos por fila. Las claves y el JSON viven en arenas por partición; se asignan páginas de 64 KiB bajo demanda a clases de 256 bytes–16 KiB. Si no hay bloque disponible, PostgreSQL devuelve la fila sin admitirla en caché. `lock_partitions` tiene valor predeterminado `64` y acepta potencias de dos de `16` a `256`; las cachés pequeñas usan menos particiones. Los límites automáticos de markers son `min(16384, max(1024, floor(cache_entries / 4)))` entradas y `min(16, max(1, floor(memory_budget_mb / 25)))` MiB para claves; `-1` activa el cálculo automático. El valor predeterminado integrado de `cache_entries` es `262144`, calculado con 384 MiB y reservando al menos la mitad para la arena; rango `128`–`16777216`. Con memoria suficiente y filas pequeñas, puede alojar millones de claves. Todos los componentes se comprueban contra el presupuesto.
+`cache_entries` cuenta descriptores, no slots fijos por fila. Las claves y el JSON viven en arenas por partición; se asignan páginas de 64 KiB bajo demanda a clases de 256 bytes–16 KiB. Si no hay bloque disponible, PostgreSQL devuelve la fila sin admitirla en caché. `lock_partitions` tiene valor predeterminado `64` y acepta potencias de dos de `16` a `256`; las cachés pequeñas reducen el número de particiones con un objetivo de 32 descriptores por partición, sujeto a un mínimo de 16 particiones. Los límites automáticos de markers son `min(16384, max(1024, floor(cache_entries / 4)))` entradas y `min(16, max(1, floor(memory_budget_mb / 25)))` MiB para claves; `-1` activa el cálculo automático. El valor predeterminado integrado de `cache_entries` es `262144`, calculado con 384 MiB y reservando al menos la mitad para la arena; rango `128`–`16777216`. Con memoria suficiente y filas pequeñas, puede alojar millones de claves. Todos los componentes se comprueban contra el presupuesto.
 
 El límite suave `RLIMIT_NOFILE` de cada worker RESP debe ser al menos `min(max_clients, max_clients_per_worker) + 33`; eleve el límite `nofile` del proceso/contenedor al aumentar los slots.
 

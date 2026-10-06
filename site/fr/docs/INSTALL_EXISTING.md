@@ -171,7 +171,7 @@ Vérifiez que l'extension est prête et que les associations sont à jour.
 
 ## 6. Mettre à niveau {#recover-a-failed-binary-install}
 
-Pour passer de 2.x à 3.0, suivez d'abord le [guide de mise à niveau](UPGRADING.md).
+Pour passer de 3.0.0 à 3.1.0, suivez le [guide de mise à niveau](UPGRADING.md). Depuis 2.x, suivez d’abord le parcours indiqué dans le guide via 3.0.0 jusqu’à 3.1.0.
 Migrez les applications de SQL `mget` vers RESP `MGET`, installez le
 paquet 3.1.0 correspondant, redémarrez PostgreSQL et mettez à niveau l'extension
 dans chaque base où elle est installée :

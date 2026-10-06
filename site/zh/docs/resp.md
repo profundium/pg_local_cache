@@ -32,11 +32,12 @@ CRUD:app.public.orders:{"tenant_id":7,"id":42}
 
 | 限制 | 行为 |
 |---|---|
-| 每条命令最多 1,024 个键 | 超出时返回 `ERR MGET accepts at most 1024 keys`。 |
+| 每条命令最多 1,024 个键 | 在请求字节未超限时，1,025 个键的命令返回 `ERR MGET accepts at most 1024 keys`；达到 1,026 个键或更多时，解析器返回 `ERR invalid argument count`。 |
+| 每个编码请求最多 65,536 字节 | 若输入缓冲区在完整请求解析前已填满，服务器会关闭连接。 |
 | 每行 JSON 最大 65,536 字节 | 超大行无法通过 RESP 返回。 |
 | 编码后的 MGET 响应最大 66,560 字节 | 聚合响应超出时返回 `ERR response exceeds limit`。 |
 
-批次大小同时受键数量和响应字节数限制。如果大行可能接近响应上限，请拆分批次。
+批次大小同时受键数量、编码请求字节数和响应字节数限制。每个编码请求请控制在 65,536 字节以内；键或行较大、接近任一字节上限时请拆分批次。
 
 ## AUTH {#auth}
 
@@ -199,16 +200,19 @@ client.close()
 |---|---|
 | `NOAUTH Authentication required` | 请先对连接进行身份验证。 |
 | `WRONGPASS invalid authentication token` | 令牌或可选用户名不正确。 |
-| `ERR MGET accepts at most 1024 keys` | 请拆分批次。 |
+| `ERR MGET accepts at most 1024 keys` | 命令包含 1,025 个键；请拆分批次。 |
+| `ERR invalid argument count` | 解析器因参数过多拒绝命令；MGET 达到 1,026 个键或更多时会超过参数上限。 |
+| `ERR busy: relation locked, retry` | 关系锁定期间，延迟未命中队列已满；请重试请求。 |
 | `ERR response exceeds limit` | 请缩小批次或行负载。 |
-| `ERR MGET deadline exceeded` | 源数据读取和等待同一键的操作超过了命令期限。 |
+| `ERR PostgreSQL: …` | PostgreSQL 或 SPI 错误，包括 PostgreSQL 语句或锁超时及取消。 |
+| `ERR MGET deadline exceeded` | 显式的 MGET 总期限已到，包括在队列中等待关系锁释放时；这与 PostgreSQL 语句或锁超时不同。 |
 | `ERR KVik key targets a different database` | 使用 RESP 端点配置的数据库。 |
 | `ERR unknown KVik table mapping` | 检查键中的模式和表是否已映射。 |
 | `ERR key must use CRUD:database.schema.table:{primary-key-json}` | 使用完整的 CRUD 键格式。 |
 | `ERR KVik key must end with a primary-key JSON object` | 在表范围后提供主键 JSON 对象。 |
 | `ERR invalid CRUD cache scope` | 仅适用于 `INVALIDATE`：提供的范围不是受支持的 CRUD 范围。 |
 
-RESP 与调用方的 SQL 连接、角色、事务和快照相互独立。SQL 事务请直接使用 PostgreSQL；参见[失效指南](cache-invalidation.md)。
+RESP 使用独立连接，不参与调用方的 SQL 事务。SQL 事务请直接使用 PostgreSQL；参见[失效指南](cache-invalidation.md)。
 
 ## 清理演示环境 {#stop-the-demo}
 

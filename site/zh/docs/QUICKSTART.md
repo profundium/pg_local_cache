@@ -4,7 +4,7 @@ lang: zh
 translation_key: QUICKSTART
 title: 在本地试用 pg_local_cache
 seo_title: 在本地试用 pg_local_cache | pg_local_cache
-description: "在一次性 PostgreSQL 实例中运行 pg_local_cache 3.0，通过 RESP 读取示例行、检查缓存命中、测试更新并清理演示，不修改现有数据库。"
+description: "在一次性 PostgreSQL 实例中运行 pg_local_cache 3.1.0，通过 RESP 读取示例行、检查缓存命中、测试更新并清理演示，不修改现有数据库。"
 section: 快速开始
 permalink: /zh/docs/QUICKSTART.html
 last_modified_at: '2026-09-16'

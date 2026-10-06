@@ -4,7 +4,7 @@ lang: de
 translation_key: QUICKSTART
 title: pg_local_cache lokal ausprobieren
 seo_title: "Einen PostgreSQL-Zeilen-Cache lokal ausprobieren | pg_local_cache"
-description: "Führen Sie pg_local_cache 3.0 in einem temporären PostgreSQL aus, lesen Sie Beispielzeilen über RESP, prüfen Sie Cache-Treffer, testen Sie Aktualisierungen und entfernen Sie die Demo, ohne eine bestehende Datenbank zu ändern."
+description: "Führen Sie pg_local_cache 3.1.0 in einem temporären PostgreSQL aus, lesen Sie Beispielzeilen über RESP, prüfen Sie Cache-Treffer, testen Sie Aktualisierungen und entfernen Sie die Demo, ohne eine bestehende Datenbank zu ändern."
 section: Schnellstart
 permalink: /de/docs/QUICKSTART.html
 last_modified_at: "2026-09-16"

@@ -4,7 +4,7 @@ lang: es
 translation_key: QUICKSTART
 title: Prueba pg_local_cache localmente
 seo_title: "Prueba localmente una caché de filas de PostgreSQL | pg_local_cache"
-description: "Ejecuta pg_local_cache 3.0 en PostgreSQL desechable, lee filas de ejemplo por RESP, revisa aciertos de caché, prueba actualizaciones y elimina la demo sin modificar una base existente."
+description: "Ejecuta pg_local_cache 3.1.0 en PostgreSQL desechable, lee filas de ejemplo por RESP, revisa aciertos de caché, prueba actualizaciones y elimina la demo sin modificar una base existente."
 section: Inicio rápido
 permalink: /es/docs/QUICKSTART.html
 last_modified_at: "2026-09-16"

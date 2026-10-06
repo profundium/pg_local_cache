@@ -4,7 +4,7 @@ lang: en
 translation_key: QUICKSTART
 title: Try pg_local_cache locally
 seo_title: "Try a PostgreSQL Row Cache Locally | pg_local_cache"
-description: Run pg_local_cache 3.0 in disposable PostgreSQL, read sample rows over RESP, inspect cache hits, test updates, and remove the demo without changing an existing database.
+description: Run pg_local_cache 3.1.0 in disposable PostgreSQL, read sample rows over RESP, inspect cache hits, test updates, and remove the demo without changing an existing database.
 section: Quickstart
 permalink: /docs/QUICKSTART.html
 last_modified_at: "2026-10-04"

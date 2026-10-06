@@ -14,7 +14,7 @@ last_modified_at: "2026-10-04"
 
 Ce guide compare le cache de pages PostgreSQL au cache de lignes complètes de `pg_local_cache` et montre ce que chaque chemin de lecture doit encore faire.
 
-[`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS) conserve les pages de la base en mémoire. Une page chaude peut éviter des E/S de stockage, mais PostgreSQL vérifie toujours la visibilité des tuples, exécute la requête et construit le résultat. Un hit RESP `MGET` admissible peut renvoyer une charge utile de ligne complète stockée après les vérifications de clé, de cache et de snapshot.
+[`shared_buffers`](https://www.postgresql.org/docs/18/runtime-config-resource.html#GUC-SHARED-BUFFERS) conserve les pages de la base en mémoire. Une page chaude peut éviter des E/S de stockage, mais PostgreSQL vérifie toujours la visibilité des tuples, exécute la requête et construit le résultat. Un hit RESP `MGET` admissible peut renvoyer une charge utile de ligne complète stockée après validation de la clé, de la génération du fence et de la charge utile.
 
 Consultez la [référence technique du chemin de lecture](TECHNICAL.md#read-path-and-safe-fallback).
 
@@ -30,7 +30,7 @@ Non. Le cache de pages de PostgreSQL stocke des pages, pas les résultats finaux
 | Hit d’un `MGET` RESP admissible | Protocole, conversion de la clé, synchronisation du cache, contrôles d’admissibilité et renvoi de la charge utile |
 | Miss ou contournement RESP | Vérifications du cache et lecture de la table source ; les lignes admissibles peuvent remplir le cache |
 
-Un hit évite de répéter l’exécution sur la table source et la sérialisation de la ligne complète. Il utilise toujours un worker PostgreSQL et la synchronisation du cache. RESP ne partage pas la transaction SQL ni le snapshot de l’appelant.
+Un hit évite de répéter l’exécution sur la table source et la sérialisation de la ligne complète. Il utilise toujours un worker PostgreSQL et la synchronisation du cache. Les requêtes RESP s’exécutent indépendamment de la transaction SQL de l’appelant.
 
 ## Coûts à inclure {#costs-to-include}
 

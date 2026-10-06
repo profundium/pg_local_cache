@@ -161,7 +161,7 @@ SELECT local_cache.health();
 
 ## 6. 升级 {#recover-a-failed-binary-install}
 
-从 2.x 升级到 3.0 时，请先遵循[升级指南](UPGRADING.md)。将应用从 SQL
+从 3.0.0 升级到 3.1.0 时，请遵循[升级指南](UPGRADING.md)。从 2.x 升级时，先按指南完成经由 3.0.0 的连续升级，再升级到 3.1.0。将应用从 SQL
 `mget` 迁移到 RESP `MGET`，安装对应的 3.1.0 软件包，重启 PostgreSQL，
 然后在每个安装了该扩展的数据库中更新扩展：
 

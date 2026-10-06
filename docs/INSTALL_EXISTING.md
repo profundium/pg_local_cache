@@ -181,10 +181,11 @@ SELECT local_cache.health();
 
 ## 6. Upgrade {#recover-a-failed-binary-install}
 
-For a 2.x to 3.0 upgrade, follow the [upgrade guide](UPGRADING.md) first. In
-short, migrate applications from SQL `mget` to RESP `MGET`, install the new
-package, restart PostgreSQL through the correct service or operator, verify the
-loaded library version, then update the extension in every database that has it:
+Follow the [upgrade guide](UPGRADING.md) for 3.0.0 to 3.1.0. For 2.x, follow its
+chained path through 3.0.0 before upgrading to 3.1.0. Migrate applications from
+SQL `mget` to RESP `MGET`, install the 3.1.0 package, restart PostgreSQL through
+the correct service or operator, verify the loaded library version, then update
+the extension in every database that has it:
 
 ```sql
 ALTER EXTENSION pg_local_cache UPDATE;

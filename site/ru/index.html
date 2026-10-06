@@ -62,7 +62,7 @@ MGET CRUD:pglc_demo.public.items:{"id":42} CRUD:pglc_demo.public.items:{"id":7}<
     <div class="proof-item"><strong>RESP MGET</strong><p>Требует аутентификации и ограничен 1 024 ключами за запрос. Для отсутствующих строк возвращается null.</p></div>
     <div class="proof-item"><strong>Обычные записи</strong><p>INSERT, UPDATE и DELETE инвалидируют затронутые записи.</p></div>
     <div class="proof-item"><strong>Фиксированная ёмкость</strong><p>Выделяйте кэш строк в общей памяти при запуске PostgreSQL.</p></div>
-    <div class="proof-item"><strong>Проверки снимка</strong><p>Недопустимые чтения используют исходную таблицу с учётом правил видимости PostgreSQL.</p></div>
+    <div class="proof-item"><strong>Проверка поколения fence и полезной нагрузки</strong><p>Недопустимые чтения используют исходную таблицу с учётом правил видимости PostgreSQL.</p></div>
   </section>
 
   <section id="benchmarks" class="band" aria-labelledby="benchmark-title">
