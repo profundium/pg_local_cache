@@ -3742,6 +3742,7 @@ def main() -> None:
             test_mget_mapping_reload_cleanup(table)
             test_ddl_lock_does_not_stall_other_relations(table, scoped_table)
             test_pipeline_budget_is_a_fairness_yield()
+            test_interleaved_client_pipelines_preserve_order()
             if not TLS_CA_FILE:
                 test_deferred_pipeline_backpressure_and_half_close(table)
                 test_half_close_drains_final_pipeline(table)

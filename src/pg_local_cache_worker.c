@@ -117,6 +117,7 @@ typedef struct PgLocalCacheClient
 	bool		authenticated;
 	bool		close_after_flush;
 	bool		input_ready;
+	bool		read_activity_pending;
 	bool		output_ready;
 	bool		output_backpressure_reported;
 	bool		input_eof;
@@ -206,6 +207,8 @@ static void record_client_output_backpressure(PgLocalCacheClient *client);
 static bool flush_client_output(PgLocalCacheClient *client);
 static void flush_ready_client_outputs(PgLocalCacheClient *clients,
 									  int client_slots);
+static void refresh_client_read_activity(PgLocalCacheClient *clients,
+									 int client_slots);
 static bool queue_response(PgLocalCacheClient *client,
 						   const char *response, Size response_length,
 						   bool close_after);
@@ -1075,6 +1078,7 @@ run_server(int listener)
 		if (ready_clients_processed == 0)
 			next_ready_client =
 				(next_ready_client + 1) % client_slots;
+		refresh_client_read_activity(clients, client_slots);
 		flush_ready_client_outputs(clients, client_slots);
 
 		poll_fds[0].fd = listener;
@@ -1312,6 +1316,7 @@ run_server(int listener)
 				clients[slot].output_sent = 0;
 				clients[slot].close_after_flush = false;
 				clients[slot].input_ready = false;
+				clients[slot].read_activity_pending = false;
 				clients[slot].output_ready = false;
 				clients[slot].output_backpressure_reported = false;
 				clients[slot].input_eof = false;
@@ -1499,6 +1504,7 @@ run_server(int listener)
 			if (poll_fds[i].revents & POLLHUP)
 				clients[client_index].peer_hung_up = true;
 		}
+		refresh_client_read_activity(clients, client_slots);
 		flush_ready_client_outputs(clients, client_slots);
 	}
 
@@ -1763,6 +1769,7 @@ close_client(PgLocalCacheClient *client)
 	client->retrying_deferred_miss = false;
 	client->close_after_flush = false;
 	client->input_ready = false;
+	client->read_activity_pending = false;
 	client->output_ready = false;
 	client->output_backpressure_reported = false;
 	client->input_eof = false;
@@ -1878,6 +1885,35 @@ flush_client_output(PgLocalCacheClient *client)
 		client->output_backpressure_reported = false;
 	}
 	return true;
+}
+
+static void
+refresh_client_read_activity(PgLocalCacheClient *clients, int client_slots)
+{
+	int			i;
+	bool		have_pending_read = false;
+	TimestampTz activity_timestamp;
+
+	for (i = 0; i < client_slots; i++)
+	{
+		if (clients[i].fd >= 0 && clients[i].read_activity_pending)
+		{
+			have_pending_read = true;
+			break;
+		}
+	}
+	if (!have_pending_read)
+		return;
+
+	activity_timestamp = GetCurrentTimestamp();
+	for (i = 0; i < client_slots; i++)
+	{
+		if (!clients[i].read_activity_pending)
+			continue;
+		if (clients[i].fd >= 0)
+			clients[i].last_activity = activity_timestamp;
+		clients[i].read_activity_pending = false;
+	}
 }
 
 static void
@@ -2035,7 +2071,7 @@ process_client(PgLocalCacheClient *client, bool retry_tls_read)
 		if (received > 0)
 		{
 			client->used += (Size) received;
-			client->last_activity = worker_turn_timestamp;
+			client->read_activity_pending = true;
 			return finish_client_turn(client);
 		}
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -2279,7 +2315,7 @@ process_client(PgLocalCacheClient *client, bool retry_tls_read)
 			if (received > 0)
 			{
 				client->used += (Size) received;
-				client->last_activity = worker_turn_timestamp;
+				client->read_activity_pending = true;
 #ifdef USE_OPENSSL
 				if (client->ssl != NULL &&
 					client->output_sent < client->output_used)
@@ -3162,6 +3198,7 @@ try_fast_mget_hit(PgLocalCacheClient *client, PgLocalCacheRespArg *args,
 			return false;
 		}
 		client->output_used += response_length;
+		client->output_ready = true;
 		pg_atomic_fetch_add_u64(
 			&pglc_shared->stats_shards[worker_slot].fast_path_hits, 1);
 		if (!client->retrying_deferred_miss)
