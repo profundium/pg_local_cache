@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +18,7 @@ import (
 )
 
 type writeLatency struct {
-	Samples int     `json:"samples"`
+	Samples int64   `json:"samples"`
 	P50MS   float64 `json:"p50_ms"`
 	P99MS   float64 `json:"p99_ms"`
 	MaxMS   float64 `json:"max_ms"`
@@ -37,7 +36,7 @@ type writeResult struct {
 }
 
 type writeWorkerResult struct {
-	latencies []float64
+	histogram latencyHistogram
 	count     int64
 	errors    int64
 	err       error
@@ -162,7 +161,7 @@ func runWrite(reader *bufio.Reader, writer *bufio.Writer, cfg inputConfig, setup
 		workers.Add(1)
 		go func(conn *pgx.Conn, nextKey func() []*int64, cache *respClient, schedule pacingSchedule) {
 			defer workers.Done()
-			local := writeWorkerResult{latencies: make([]float64, 0, 128)}
+			local := writeWorkerResult{}
 			for index := int64(0); time.Now().Before(deadline); index++ {
 				if cfg.Rate > 0 {
 					if err := schedule.wait(ctx, index); err != nil {
@@ -188,14 +187,14 @@ func runWrite(reader *bufio.Reader, writer *bufio.Writer, cfg inputConfig, setup
 				local.count++
 				if cache != nil {
 					if err := cache.del("item:" + strconv.FormatInt(id, 10)); err != nil {
-						local.latencies = append(local.latencies, float64(time.Since(transactionStarted))/float64(time.Millisecond))
+						local.histogram.observe(time.Since(transactionStarted))
 						local.errors++
 						local.err = fmt.Errorf("invalidate item:%d: %w", id, err)
 						cancel()
 						break
 					}
 				}
-				local.latencies = append(local.latencies, float64(time.Since(transactionStarted))/float64(time.Millisecond))
+				local.histogram.observe(time.Since(transactionStarted))
 			}
 			results <- local
 		}(conn, nextKey, cache, schedule)
@@ -203,12 +202,12 @@ func runWrite(reader *bufio.Reader, writer *bufio.Writer, cfg inputConfig, setup
 	workers.Wait()
 	finished := time.Now()
 	close(results)
-	allLatencies := make([]float64, 0)
+	var allLatencies latencyHistogram
 	result := writeResult{Threads: runtime.GOMAXPROCS(0)}
 	for worker := range results {
 		result.Transactions += worker.count
 		result.Errors += worker.errors
-		allLatencies = append(allLatencies, worker.latencies...)
+		allLatencies.merge(&worker.histogram)
 		if result.Error == "" && worker.err != nil {
 			result.Error = worker.err.Error()
 		}
@@ -217,9 +216,13 @@ func runWrite(reader *bufio.Reader, writer *bufio.Writer, cfg inputConfig, setup
 	if result.Seconds > 0 {
 		result.TxS = float64(result.Transactions) / result.Seconds
 	}
-	if len(allLatencies) > 0 {
-		sort.Float64s(allLatencies)
-		result.Latency = writeLatency{Samples: len(allLatencies), P50MS: percentile(allLatencies, .50), P99MS: percentile(allLatencies, .99), MaxMS: allLatencies[len(allLatencies)-1]}
+	if allLatencies.samples > 0 {
+		result.Latency = writeLatency{
+			Samples: int64(allLatencies.samples),
+			P50MS:   allLatencies.percentile(.50),
+			P99MS:   allLatencies.percentile(.99),
+			MaxMS:   float64(allLatencies.max) / float64(time.Millisecond),
+		}
 	}
 	var cpuEnd syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &cpuEnd); err == nil && result.Seconds > 0 {

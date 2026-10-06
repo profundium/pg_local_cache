@@ -40,3 +40,36 @@ func TestPacingScheduleAbsoluteOffsets(t *testing.T) {
 		t.Fatalf("fractional schedule.at(3) = %s, want %s", got, want)
 	}
 }
+
+func TestValidateConfigAllowsTwoHourRun(t *testing.T) {
+	cfg := inputConfig{
+		Clients: 1, Batch: 1, Seconds: 7200, Mode: "postgres-any",
+		AnySQL: "SELECT $1", Port: 5432, KeyDist: "uniform",
+	}
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("7200-second run rejected: %v", err)
+	}
+	cfg.Seconds++
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("7201-second run accepted")
+	}
+}
+
+func TestLatencyHistogramUsesBoundedBuckets(t *testing.T) {
+	var histogram latencyHistogram
+	for i := 1; i <= 100_000; i++ {
+		histogram.observe(time.Duration(i%1000+1) * time.Millisecond)
+	}
+	if histogram.samples != 100_000 || len(histogram.buckets) != latencyHistogramBuckets {
+		t.Fatalf("histogram has %d samples and %d buckets", histogram.samples, len(histogram.buckets))
+	}
+	if got := histogram.percentile(.50); got < 490 || got > 510 {
+		t.Fatalf("p50 = %.3f ms, want about 500 ms", got)
+	}
+	if got := histogram.percentile(.99); got < 980 || got > 1010 {
+		t.Fatalf("p99 = %.3f ms, want about 990 ms", got)
+	}
+	if got := float64(histogram.max) / float64(time.Millisecond); got != 1000 {
+		t.Fatalf("max = %.3f ms, want 1000 ms", got)
+	}
+}

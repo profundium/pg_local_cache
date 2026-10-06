@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/bits"
 	"math/rand/v2"
 	"os"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,16 +34,16 @@ type inputConfig struct {
 	RespPort  int    `json:"resp_port"`
 	RespToken string `json:"resp_token"`
 	// KeySpace > 0 reads random keys from [1, KeySpace]; 0 reads keys 1..batch.
-	KeySpace    int    `json:"key_space"`
+	KeySpace    int     `json:"key_space"`
 	CheckIDs    []int64 `json:"check_ids"`
-	KeyDist     string `json:"key_dist"`
-	Rate        int    `json:"rate"`
-	Op          string `json:"op"`
-	Table       string `json:"table"`
-	SyncCommit  string `json:"synchronous_commit"`
-	ValkeyDel   bool   `json:"valkey_del"`
-	InsertStart int64  `json:"insert_start"`
-	Target      string `json:"target"`
+	KeyDist     string  `json:"key_dist"`
+	Rate        int     `json:"rate"`
+	Op          string  `json:"op"`
+	Table       string  `json:"table"`
+	SyncCommit  string  `json:"synchronous_commit"`
+	ValkeyDel   bool    `json:"valkey_del"`
+	InsertStart int64   `json:"insert_start"`
+	Target      string  `json:"target"`
 }
 
 type readyMessage struct {
@@ -54,14 +54,14 @@ type readyMessage struct {
 }
 
 type latencyResult struct {
-	Samples int     `json:"samples"`
+	Samples int64   `json:"samples"`
 	P50MS   float64 `json:"p50_ms"`
 	P95MS   float64 `json:"p95_ms"`
 	P99MS   float64 `json:"p99_ms"`
 }
 
 type timedResult struct {
-	Requests  int           `json:"requests"`
+	Requests  int64         `json:"requests"`
 	Seconds   float64       `json:"seconds"`
 	RequestsS float64       `json:"requests_s"`
 	Latency   latencyResult `json:"latency"`
@@ -74,7 +74,7 @@ type resultMessage struct {
 }
 
 type workerResult struct {
-	latencies []float64
+	histogram latencyHistogram
 }
 
 func validateConfig(cfg inputConfig) error {
@@ -84,8 +84,8 @@ func validateConfig(cfg inputConfig) error {
 	if cfg.Batch != 1 && cfg.Batch != 16 && cfg.Batch != 64 {
 		return fmt.Errorf("batch must be one of 1, 16, or 64")
 	}
-	if cfg.Seconds < 1 || cfg.Seconds > 120 {
-		return fmt.Errorf("seconds must be between 1 and 120")
+	if cfg.Seconds < 1 || cfg.Seconds > 7200 {
+		return fmt.Errorf("seconds must be between 1 and 7200")
 	}
 	if cfg.KeySpace != 0 && (cfg.KeySpace < cfg.Batch || cfg.KeySpace > 10_000_000) {
 		return fmt.Errorf("key_space must be 0 or between batch and 10000000")
@@ -238,14 +238,22 @@ func queryNamed(ctx context.Context, conn *pgx.Conn, statement string, keys []*i
 	formats := formatNames(rows.FieldDescriptions())
 	defer rows.Close()
 
-	byKey := make(map[string]string, len(keys))
+	wanted := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if key != nil {
+			wanted[strconv.FormatInt(*key, 10)] = struct{}{}
+		}
+	}
+	byKey := make(map[string]string, len(wanted))
 	for rows.Next() {
 		var key string
 		var value string
 		if err := rows.Scan(&key, &value); err != nil {
 			return nil, formats, err
 		}
-		byKey[key] = value
+		if _, ok := wanted[key]; ok {
+			byKey[key] = value
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, formats, err
@@ -368,28 +376,82 @@ func cpuSeconds(usage syscall.Rusage) float64 {
 	return timevalSeconds(usage.Utime) + timevalSeconds(usage.Stime)
 }
 
-func percentile(values []float64, p float64) float64 {
-	index := int(math.Ceil(float64(len(values))*p)) - 1
-	if index < 0 {
-		index = 0
-	}
-	if index >= len(values) {
-		index = len(values) - 1
-	}
-	return values[index]
+const (
+	latencyHistogramSubBuckets       = 32
+	latencyHistogramExactNanos       = 1 << 5
+	latencyHistogramMaxDurationPower = 62
+	latencyHistogramBuckets          = latencyHistogramExactNanos + (latencyHistogramMaxDurationPower-4)*latencyHistogramSubBuckets
+)
+
+type latencyHistogram struct {
+	buckets [latencyHistogramBuckets]uint64
+	samples uint64
+	max     time.Duration
 }
 
-func latency(values []float64) (latencyResult, error) {
-	if len(values) == 0 {
+func (h *latencyHistogram) observe(value time.Duration) {
+	nanos := uint64(value)
+	bucket := 0
+	if nanos < latencyHistogramExactNanos {
+		bucket = int(nanos)
+	} else {
+		power := bits.Len64(nanos) - 1
+		fraction := int((nanos >> uint(power-5)) & (latencyHistogramSubBuckets - 1))
+		bucket = latencyHistogramExactNanos + (power-5)*latencyHistogramSubBuckets + fraction
+	}
+	h.buckets[bucket]++
+	h.samples++
+	if value > h.max {
+		h.max = value
+	}
+}
+
+func (h *latencyHistogram) merge(other *latencyHistogram) {
+	for i, count := range other.buckets {
+		h.buckets[i] += count
+	}
+	h.samples += other.samples
+	if other.max > h.max {
+		h.max = other.max
+	}
+}
+
+func (h *latencyHistogram) percentile(p float64) float64 {
+	if h.samples == 0 {
+		return 0
+	}
+	rank := uint64(math.Ceil(float64(h.samples) * p))
+	if rank == 0 {
+		rank = 1
+	} else if rank > h.samples {
+		rank = h.samples
+	}
+	var seen uint64
+	for i, count := range h.buckets {
+		seen += count
+		if seen >= rank {
+			if i < latencyHistogramExactNanos {
+				return float64(i) / float64(time.Millisecond)
+			}
+			index := i - latencyHistogramExactNanos
+			power := index/latencyHistogramSubBuckets + 5
+			fraction := index % latencyHistogramSubBuckets
+			nanos := math.Ldexp(float64(latencyHistogramSubBuckets+fraction)+0.5, power-5)
+			return nanos / float64(time.Millisecond)
+		}
+	}
+	return float64(h.max) / float64(time.Millisecond)
+}
+
+func latency(histogram *latencyHistogram) (latencyResult, error) {
+	if histogram.samples == 0 {
 		return latencyResult{}, fmt.Errorf("no requests completed")
 	}
-	sorted := append([]float64(nil), values...)
-	sort.Float64s(sorted)
 	return latencyResult{
-		Samples: len(sorted),
-		P50MS:   percentile(sorted, 0.50),
-		P95MS:   percentile(sorted, 0.95),
-		P99MS:   percentile(sorted, 0.99),
+		Samples: int64(histogram.samples),
+		P50MS:   histogram.percentile(0.50),
+		P95MS:   histogram.percentile(0.95),
+		P99MS:   histogram.percentile(0.99),
 	}, nil
 }
 
@@ -419,7 +481,7 @@ func runTimed(cfg inputConfig, requests []func(context.Context) error) (timedRes
 		waitGroup.Add(1)
 		go func(request func(context.Context) error) {
 			defer waitGroup.Done()
-			local := workerResult{latencies: make([]float64, 0, 128)}
+			local := workerResult{}
 			for time.Now().Before(deadline) {
 				requestStarted := time.Now()
 				err := request(ctx)
@@ -432,7 +494,7 @@ func runTimed(cfg inputConfig, requests []func(context.Context) error) (timedRes
 					}
 					return
 				}
-				local.latencies = append(local.latencies, float64(time.Since(requestStarted))/float64(time.Millisecond))
+				local.histogram.observe(time.Since(requestStarted))
 			}
 			results <- local
 		}(request)
@@ -452,11 +514,11 @@ func runTimed(cfg inputConfig, requests []func(context.Context) error) (timedRes
 		return timedResult{}, fmt.Errorf("timed query: %w", err)
 	}
 
-	allLatencies := make([]float64, 0)
+	var allLatencies latencyHistogram
 	for result := range results {
-		allLatencies = append(allLatencies, result.latencies...)
+		allLatencies.merge(&result.histogram)
 	}
-	latencies, err := latency(allLatencies)
+	latencies, err := latency(&allLatencies)
 	if err != nil {
 		return timedResult{}, err
 	}
