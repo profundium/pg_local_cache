@@ -4,7 +4,7 @@ lang: fr
 translation_key: row-cache-vs-shared-buffers
 title: Cache de lignes PostgreSQL et shared_buffers
 seo_title: "Cache de lignes PostgreSQL et shared_buffers | pg_local_cache"
-description: Comparez le cache de pages PostgreSQL au cache de lignes complètes de pg_local_cache : travail source évité, coûts du cache et charges qui doivent conserver le SQL ordinaire.
+description: "Comparez le cache de pages PostgreSQL au cache de lignes complètes de pg_local_cache : travail source évité, coûts du cache et charges qui doivent conserver le SQL ordinaire."
 section: Chemins de lecture
 permalink: /fr/docs/row-cache-vs-shared-buffers.html
 last_modified_at: "2026-10-04"

@@ -3,7 +3,7 @@ layout: doc
 lang: de
 translation_key: resp
 title: RESP-Clients
-description: Redis-kompatible Clients über RESP2 mit pg_local_cache verbinden: MGET, Token-Authentifizierung und natives TLS.
+description: "Redis-kompatible Clients über RESP2 mit pg_local_cache verbinden: MGET, Token-Authentifizierung und natives TLS."
 section: RESP
 permalink: /de/docs/resp.html
 redirect_from:

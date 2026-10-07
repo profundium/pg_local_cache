@@ -75,8 +75,57 @@ def code_blocks(text):
     return re.findall(r'(?ms)^(`{3,})([^\n]*)\n(.*?)^\1[ \t]*$', text)
 
 
+def has_unquoted_colon_space(value):
+    quote = None
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if quote == "\"":
+            if char == "\\":
+                index += 2
+                continue
+            if char == "\"":
+                quote = None
+        elif quote == "'":
+            if char == "'":
+                if index + 1 < len(value) and value[index + 1] == "'":
+                    index += 2
+                    continue
+                quote = None
+        else:
+            if char == "#" and (index == 0 or value[index - 1].isspace()):
+                break
+            if value.startswith(": ", index):
+                return True
+            if char in ("\"", "'"):
+                quote = char
+        index += 1
+    return False
+
+
 class RepositoryContentChecks(unittest.TestCase):
-    def test_local_markdown_links_resolve(self):
+    def test_front_matter_is_strictly_fenced_and_quotes_yaml_colon_space(self):
+        failures = []
+        for area in (ROOT / 'docs', ROOT / 'site'):
+            for path in sorted(area.rglob('*')):
+                if not path.is_file() or path.suffix not in ('.md', '.html', '.xml'):
+                    continue
+                lines = path.read_text(encoding='utf-8').splitlines()
+                if not lines or lines[0].strip() != '---':
+                    continue
+                closing = next((i for i in range(1, len(lines))
+                                if lines[i].strip() in ('---', '...')), None)
+                if closing is None:
+                    failures.append(f'{path.relative_to(ROOT)}: missing closing front-matter fence')
+                    continue
+                for number, line in enumerate(lines[1:closing], 2):
+                    if not line.strip() or line.lstrip().startswith('#'):
+                        continue
+                    mapping = re.match(r'^[ \t]*(?:-\s+)?[A-Za-z_][A-Za-z0-9_-]*\s*:(.*)$', line)
+                    if mapping and has_unquoted_colon_space(mapping.group(1)):
+                        failures.append(f'{path.relative_to(ROOT)}:{number}: quote plain YAML values containing colon-space')
+        self.assertEqual(failures, [])
+
         documents = [ROOT / 'README.md', *sorted((ROOT / 'docs').glob('*.md'))]
         documents.extend(sorted((ROOT / 'site').rglob('*.md')))
         failures = []

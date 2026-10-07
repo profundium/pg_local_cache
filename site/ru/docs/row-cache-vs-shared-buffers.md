@@ -4,7 +4,7 @@ lang: ru
 translation_key: row-cache-vs-shared-buffers
 title: Кэш строк PostgreSQL и shared_buffers
 seo_title: "Кэш строк PostgreSQL и shared_buffers | pg_local_cache"
-description: Сравните кэширование страниц PostgreSQL с кэшированием целых строк в pg_local_cache: какую работу в источнике позволяет избежать этот путь, каковы его затраты и для каких нагрузок подходит обычный SQL.
+description: "Сравните кэширование страниц PostgreSQL с кэшированием целых строк в pg_local_cache: какую работу в источнике позволяет избежать этот путь, каковы его затраты и для каких нагрузок подходит обычный SQL."
 section: Пути чтения
 permalink: /ru/docs/row-cache-vs-shared-buffers.html
 last_modified_at: "2026-10-04"

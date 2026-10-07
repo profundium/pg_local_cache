@@ -4,7 +4,7 @@ lang: de
 translation_key: row-cache-vs-shared-buffers
 title: PostgreSQL-Zeilen-Cache im Vergleich zu shared_buffers
 seo_title: "PostgreSQL-Zeilen-Cache im Vergleich zu shared_buffers | pg_local_cache"
-description: Vergleichen Sie PostgreSQL-Seiten-Caching mit dem Caching vollständiger Zeilen durch pg_local_cache: vermiedene Quellarbeit, Cache-Kosten und Arbeitslasten, die gewöhnliches SQL verwenden sollten.
+description: "Vergleichen Sie PostgreSQL-Seiten-Caching mit dem Caching vollständiger Zeilen durch pg_local_cache: vermiedene Quellarbeit, Cache-Kosten und Arbeitslasten, die gewöhnliches SQL verwenden sollten."
 section: Lesewege
 permalink: /de/docs/row-cache-vs-shared-buffers.html
 last_modified_at: "2026-10-04"

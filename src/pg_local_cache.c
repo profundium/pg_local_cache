@@ -190,6 +190,7 @@ PG_FUNCTION_INFO_V1(pg_local_cache_forget);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_collect_key);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_partition);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_hash_bucket);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_cache_bucket_count);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_relation_incarnation);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_relation_identity_pins);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_recreate_relation_state);
@@ -3301,7 +3302,7 @@ pglc_cache_store(const PgLocalCacheMapping *mapping, const char *canonical_key,
 		entry->relation_slot == mapping->relation_slot &&
 		entry->slot_generation == mapping->relation_slot_generation &&
 		load_id != 0 && entry->loading && entry->load_id == load_id &&
-		entry->global_epoch == token->global_version &&
+		entry->global_epoch == token->global_epoch &&
 		entry->relation_version == token->relation_version &&
 		entry->relation_incarnation == token->relation_incarnation &&
 		entry->version == token->key_version)
@@ -3541,7 +3542,7 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 		goto done;
 	}
 	if (entry->loading &&
-		(entry->global_epoch != token->global_version ||
+		(entry->global_epoch != token->global_epoch ||
 		 entry->relation_version != token->relation_version ||
 		 entry->relation_incarnation !=
 		 token->relation_incarnation ||
@@ -3567,7 +3568,7 @@ pglc_cache_claim_load(const PgLocalCacheMapping *mapping,
 	entry->load_started = now;
 	/* Lease tags replace payload fences; old bytes must become ineligible first. */
 	entry->valid = false;
-	entry->global_epoch = token->global_version;
+	entry->global_epoch = token->global_epoch;
 	entry->relation_version = token->relation_version;
 	entry->relation_incarnation = token->relation_incarnation;
 	entry->load_id++;
@@ -3627,7 +3628,7 @@ pglc_cache_release_load(const PgLocalCacheMapping *mapping,
 		entry->slot_generation == mapping->relation_slot_generation &&
 		entry->version == claim_token->key_version &&
 		entry->loading && entry->load_id == load_id &&
-		entry->global_epoch == claim_token->global_version &&
+		entry->global_epoch == claim_token->global_epoch &&
 		entry->relation_version == claim_token->relation_version &&
 		entry->relation_incarnation == claim_token->relation_incarnation)
 		entry->loading = false;
@@ -4297,6 +4298,19 @@ pg_local_cache_test_hash_bucket(PG_FUNCTION_ARGS)
 	hash = cache_key_hash64(database_oid, nspace, key,
 							(uint16) strnlen(key, PGLC_KEY_MAX));
 	PG_RETURN_INT32((int32) (hash & (bucket_count - 1U)));
+}
+
+Datum
+pg_local_cache_test_cache_bucket_count(PG_FUNCTION_ARGS)
+{
+	Oid			database_oid = PG_GETARG_OID(0);
+	char	   *nspace = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char	   *key = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	uint32		partition;
+
+	pglc_require_preload();
+	partition = cache_partition_for(database_oid, nspace, key);
+	PG_RETURN_INT32((int32) pglc_shared->partitions[partition].index.bucket_count);
 }
 
 Datum

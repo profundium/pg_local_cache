@@ -1037,6 +1037,9 @@ def install_test_hook_functions(table: str, namespace: str) -> bool:
         "CREATE OR REPLACE FUNCTION public.pglc_test_hash_bucket(oid, text, text) "
         "RETURNS integer AS '$libdir/pg_local_cache', "
         "'pg_local_cache_test_hash_bucket' LANGUAGE C STRICT",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_cache_bucket_count(oid, text, text) "
+        "RETURNS integer AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_cache_bucket_count' LANGUAGE C STRICT",
         "CREATE OR REPLACE FUNCTION public.pglc_test_relation_incarnation(regclass, text) "
         "RETURNS bigint AS '$libdir/pg_local_cache', "
         "'pg_local_cache_test_relation_incarnation' LANGUAGE C STRICT",
@@ -1081,6 +1084,7 @@ def drop_test_hook_functions() -> None:
         "DROP FUNCTION IF EXISTS public.pglc_test_collect_key(regclass, text, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_partition(oid, text, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_hash_bucket(oid, text, text)",
+        "DROP FUNCTION IF EXISTS public.pglc_test_cache_bucket_count(oid, text, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_relation_incarnation(regclass, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_relation_identity_pins(regclass, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_recreate_relation_state(regclass, text)",
@@ -1277,23 +1281,26 @@ def test_partition_routing_and_opposite_order_writers(
     assert len({partition for _key, partition in key_routes}) == len(key_routes)
 
     bucket_probe_limit = partition_count * 512
-    minimum_bucket_diversity = int(
+    bucket_diversity_margin = int(
         sql(
-            "SELECT min(bucket_count) FROM ("
-            "SELECT partition_id, count(DISTINCT bucket_id) AS bucket_count "
-            "FROM ("
+            "SELECT min(bucket_diversity - least(24, bucket_count)) FROM ("
+            "SELECT partition_id, count(DISTINCT bucket_id) AS bucket_diversity, "
+            "min(bucket_count) AS bucket_count FROM ("
             "SELECT public.pglc_test_partition("
             f"{database_oid}, {sql_literal(namespace)}, "
             "'bucket-' || candidate::text) AS partition_id, "
             "public.pglc_test_hash_bucket("
             f"{database_oid}, {sql_literal(namespace)}, "
-            "'bucket-' || candidate::text) AS bucket_id "
+            "'bucket-' || candidate::text) AS bucket_id, "
+            "public.pglc_test_cache_bucket_count("
+            f"{database_oid}, {sql_literal(namespace)}, "
+            "'bucket-' || candidate::text) AS bucket_count "
             f"FROM generate_series(1, {bucket_probe_limit}) AS probes(candidate)"
             ") AS routed_buckets GROUP BY partition_id"
             ") AS bucket_counts"
         )
     )
-    assert minimum_bucket_diversity >= 24, minimum_bucket_diversity
+    assert bucket_diversity_margin >= 0, bucket_diversity_margin
 
     first: subprocess.Popen[str] | None = None
     second: subprocess.Popen[str] | None = None
@@ -2949,6 +2956,31 @@ def test_unrelated_key_fill_survives_keyed_write(
 def test_same_key_relation_and_global_fences(
     table: str, namespace: str, barrier_table: str
 ) -> None:
+    # Each global fence advances the sequence and epoch on different steps.
+    # Keep them divergent while exercising fills and lease transitions below.
+    for _ in range(3):
+        sql("SELECT public.pglc_test_collect_global()")
+
+    warm_row_id = allocate_test_row_ids(table)[0]
+    warm_value = "global-fences-warm"
+    sql(
+        f"INSERT INTO public.{sql_identifier(table)} (id, value) "
+        f"VALUES ({warm_row_id}, '{warm_value}')"
+    )
+    warm_client = RespConnection(socket_timeout=45)
+    try:
+        warm_key = crud_key(table, warm_row_id)
+        before_fill = read_cache_stats()
+        assert mget_one(warm_client, warm_key) == row_bytes(warm_row_id, warm_value)
+        after_fill = read_cache_stats()
+        assert after_fill["database_reads"] >= before_fill["database_reads"] + 1
+        assert mget_one(warm_client, warm_key) == row_bytes(warm_row_id, warm_value)
+        after_hit = read_cache_stats()
+        assert after_hit["database_reads"] == after_fill["database_reads"]
+        assert after_hit["cache_hits"] >= after_fill["cache_hits"] + 1
+    finally:
+        warm_client.close()
+
     cases: list[
         tuple[str, Callable[[int], Callable[[], None]] | None, str, str, int]
     ] = [
