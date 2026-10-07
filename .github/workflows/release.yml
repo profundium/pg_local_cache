@@ -57,6 +57,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install PostgreSQL server headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends postgresql-server-dev-17
+
       - name: Build and test source archive
         shell: bash
         run: |
