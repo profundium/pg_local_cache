@@ -895,11 +895,7 @@ _TEST_PAUSE_RECORDS: list[dict[str, object]] = []
 def set_test_pause(point: str | None, barrier_table: str | None = None) -> None:
     global _TEST_PAUSE_STARTED_AT, _TEST_PAUSE_POINTS, _TEST_PAUSE_BEFORE_STATS
     if point is None:
-        sql_commands(
-            "ALTER SYSTEM RESET pg_local_cache.test_pause_point",
-            "ALTER SYSTEM RESET pg_local_cache.test_barrier_relation",
-            "SELECT pg_reload_conf()",
-        )
+        sql("SELECT public.pglc_test_clear_pause()")
         if _TEST_PAUSE_STARTED_AT is not None:
             duration_seconds = round(
                 time.monotonic() - _TEST_PAUSE_STARTED_AT, 3
@@ -921,16 +917,13 @@ def set_test_pause(point: str | None, barrier_table: str | None = None) -> None:
             _TEST_PAUSE_BEFORE_STATS = None
         return
     assert barrier_table is not None, warm_hit_diagnostics(barrier_table)
-    relation_oid = sql(f"SELECT 'public.{sql_identifier(barrier_table)}'::regclass::oid")
     if _TEST_PAUSE_STARTED_AT is None:
         _TEST_PAUSE_BEFORE_STATS = read_cache_stats()
         _TEST_PAUSE_STARTED_AT = time.monotonic()
     _TEST_PAUSE_POINTS.append(point)
-    sql_commands(
-        f"ALTER SYSTEM SET pg_local_cache.test_pause_point = {sql_literal(point)}",
-        "ALTER SYSTEM SET pg_local_cache.test_barrier_relation = "
-        f"{int(relation_oid)}",
-        "SELECT pg_reload_conf()",
+    sql(
+        f"SELECT public.pglc_test_set_pause({sql_literal(point)}, "
+        f"'public.{sql_identifier(barrier_table)}'::regclass)"
     )
 
 
@@ -964,8 +957,7 @@ def set_test_max_dirty_keys(limit: int | None) -> None:
 
 def reset_test_gucs_if_available() -> None:
     available = sql(
-        "SELECT current_setting('pg_local_cache.test_pause_point', true) "
-        "IS NOT NULL"
+        "SELECT to_regprocedure('public.pglc_test_clear_pause()') IS NOT NULL"
     )
     if available == "t":
         set_test_pause(None)
@@ -1058,6 +1050,12 @@ def install_test_hook_functions(table: str, namespace: str) -> bool:
         "CREATE OR REPLACE FUNCTION public.pglc_test_partition_lock_violations() "
         "RETURNS bigint AS '$libdir/pg_local_cache', "
         "'pg_local_cache_test_partition_lock_violations' LANGUAGE C",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_set_pause(text, regclass) "
+        "RETURNS void AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_set_pause' LANGUAGE C STRICT",
+        "CREATE OR REPLACE FUNCTION public.pglc_test_clear_pause() "
+        "RETURNS void AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_clear_pause' LANGUAGE C",
         "CREATE OR REPLACE FUNCTION public.pglc_test_collect_key(regclass, text, text) "
         "RETURNS void AS '$libdir/pg_local_cache', 'pg_local_cache_test_collect_key' "
         "LANGUAGE C STRICT",
@@ -1111,6 +1109,8 @@ def install_test_hook_functions(table: str, namespace: str) -> bool:
 def drop_test_hook_functions() -> None:
     sql_commands(
         "DROP FUNCTION IF EXISTS public.pglc_test_partition_lock_violations()",
+        "DROP FUNCTION IF EXISTS public.pglc_test_set_pause(text, regclass)",
+        "DROP FUNCTION IF EXISTS public.pglc_test_clear_pause()",
         "DROP FUNCTION IF EXISTS public.pglc_test_collect_key(regclass, text, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_partition(oid, text, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_hash_bucket(oid, text, text)",
@@ -3955,10 +3955,13 @@ def main() -> None:
             test_key_fill_hit_ratio_under_update_load(table)
             test_preprepare_still_rejected(table)
             if hooks_available:
-                if os.environ.get("PGLC_SKIP_PAUSE_HOOK_TESTS") == "1":
+                if (
+                    os.environ.get("PGLC_PAUSE_HOOKS_ONLY") != "1"
+                    or os.environ.get("PGLC_SKIP_PAUSE_HOOK_TESTS") == "1"
+                ):
                     print(
                         "SKIP pause-hook tests "
-                        "(PGLC_SKIP_PAUSE_HOOK_TESTS=1): "
+                        "(dedicated long-timeout pause phase only): "
                         + ", ".join(PAUSE_HOOK_TEST_NAMES)
                     )
                 else:

@@ -272,7 +272,7 @@ echo "==> tls_integration"
 PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
     python3 "$repo/tests/tls_integration.py"
 echo "==> pipeline_integration over TLS"
-PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
+PGLC_SKIP_PAUSE_HOOK_TESTS=1 PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
     python3 "$repo/tests/pipeline_integration.py"
 echo "==> stress_integration over TLS"
 PG_LOCAL_CACHE_TLS_CA="$tls_dir/ca.crt" PG_LOCAL_CACHE_RESP_PORT=6391 \
