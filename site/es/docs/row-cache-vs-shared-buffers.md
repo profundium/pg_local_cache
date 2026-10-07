@@ -4,7 +4,7 @@ lang: es
 translation_key: row-cache-vs-shared-buffers
 title: Caché de filas de PostgreSQL frente a shared_buffers
 seo_title: "Caché de filas de PostgreSQL frente a shared_buffers | pg_local_cache"
-description: Compare la caché de páginas de PostgreSQL con la caché de filas completas de pg_local_cache: trabajo de origen evitado, costes de caché y cargas de trabajo que deberían seguir usando SQL ordinario.
+description: "Compare la caché de páginas de PostgreSQL con la caché de filas completas de pg_local_cache: trabajo de origen evitado, costes de caché y cargas de trabajo que deberían seguir usando SQL ordinario."
 section: Rutas de lectura
 permalink: /es/docs/row-cache-vs-shared-buffers.html
 last_modified_at: "2026-10-04"
