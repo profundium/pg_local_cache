@@ -79,7 +79,7 @@ npm --prefix examples/node-postgres run demo
 - [Go](resp.md#go): используйте RESP для чтения из кэша и `pgx` для SQL-записи.
 - [RESP](resp.md): подключайтесь клиентом Redis.
 
-Далее [сравните одинаковую нагрузку подготовленного SQL и RESP](BENCHMARKS.md#run-the-same-comparison-on-every-client). Для сообщения о результатах или проблемах настройки создайте [отчёт о нагрузке](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml), приложив окружение, JSON бенчмарка или журнал ошибок.
+Далее [сравните одинаковую нагрузку подготовленного SQL и RESP](BENCHMARKS.md#повторный-запуск-через-bench). Для сообщения о результатах или проблемах настройки создайте [отчёт о нагрузке](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml), приложив окружение, JSON бенчмарка или журнал ошибок.
 
 ## Удалите демонстрацию {#remove-the-demo}
 

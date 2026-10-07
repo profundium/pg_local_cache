@@ -8,6 +8,7 @@ import re
 import statistics
 import tempfile
 import unittest
+import unicodedata
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +74,107 @@ def locale_dictionary_entries(path):
 
 def code_blocks(text):
     return re.findall(r'(?ms)^(`{3,})([^\n]*)\n(.*?)^\1[ \t]*$', text)
+
+
+def markdown_without_fenced_code(text):
+    front_matter = re.match(r'\A---\s*\n.*?\n---(?:\n|$)', text, re.S)
+    if front_matter:
+        text = text[front_matter.end():]
+    lines, fence = [], None
+    for line in text.splitlines():
+        marker = re.match(r'^[ ]{0,3}(`{3,}|~{3,})', line)
+        if fence:
+            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= fence[1] and not line[marker.end():].strip():
+                fence = None
+            lines.append('')
+        elif marker:
+            fence = (marker.group(1)[0], len(marker.group(1)))
+            lines.append('')
+        else:
+            lines.append(line)
+    return '\n'.join(lines)
+
+
+def markdown_heading_anchors(text):
+    lines = markdown_without_fenced_code(text).splitlines()
+    anchors, counts = set(), {}
+
+    def add_heading(raw, explicit_id=''):
+        explicit = re.search(r'\s+\{#([^}\s]+)\}\s*$', raw)
+        if explicit:
+            anchors.add(explicit.group(1))
+            return
+        if explicit_id:
+            anchors.add(explicit_id)
+            return
+        raw = re.sub(r'(?<!\\)!?\[([^]]*)\]\((?:<[^>]*>|[^)]*)\)', r'\1', raw)
+        raw = re.sub(r'(?<!\\)\[([^]]+)\](?:\[[^]]*\])?', r'\1', raw)
+        raw = re.sub(r'<[^>]+>', '', raw)
+        raw = re.sub(r'(?<!`)`+([^`]+)`+', r'\1', raw)
+        raw = re.sub(r'(?<!\\)(\*{1,2}|_{1,2}|~~)(?=\S)(.*?)(?<=\S)\1', r'\2', raw)
+        raw = re.sub(r'\\([\\`*_{}\[\]()#+\-.!<>|])', r'\1', raw)
+        raw = raw.lower()
+        raw = ''.join(char for char in raw if char in '- \t' or char == '_' or
+                      unicodedata.category(char)[0] in 'LMN')
+        anchor = raw.replace(' ', '-').replace('\t', '-')
+        count = counts.get(anchor, 0)
+        counts[anchor] = count + 1
+        anchors.add(f'{anchor}-{count}' if count else anchor)
+
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        atx = re.match(r'^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*$', line)
+        if atx:
+            heading = re.sub(r'[ \t]+#+[ \t]*$', '', atx.group(2))
+            add_heading(heading)
+        else:
+            setext = re.match(r'^ {0,3}(=+|-+)[ \t]*(?:\{#([^}\s]+)\})?[ \t]*$', line)
+            previous_is_atx = index > 0 and re.match(r'^ {0,3}#{1,6}[ \t]+', lines[index - 1])
+            if setext and index > 0 and lines[index - 1].strip() and not previous_is_atx:
+                add_heading(lines[index - 1].strip(), setext.group(2) or '')
+        index += 1
+    return anchors
+
+
+def markdown_link_destinations(text):
+    text = markdown_without_fenced_code(text)
+    text = re.sub(r'(?<!`)`+[^`\n]*`+', '', text)
+    destinations = []
+    destination = r'(?:<([^>\n]+)>|([^\s)]+))'
+    for match in re.finditer(r'\]\(\s*' + destination, text):
+        destinations.append(match.group(1) or match.group(2))
+    for match in re.finditer(r'(?m)^[ \t]{0,3}\[[^]]+\]:[ \t]*' + destination, text):
+        destinations.append(match.group(1) or match.group(2))
+    return destinations
+
+
+def markdown_fragment_errors(root):
+    root = root.resolve()
+    pages = sorted(path for area in (root / 'docs', root / 'site') if area.exists()
+                   for path in area.rglob('*.md'))
+    anchors = {path.resolve(): markdown_heading_anchors(path.read_text(encoding='utf-8'))
+               for path in pages}
+    errors = []
+    for source in pages:
+        for target in markdown_link_destinations(source.read_text(encoding='utf-8')):
+            parsed = urlsplit(target)
+            if parsed.scheme or parsed.netloc or not parsed.path.lower().endswith('.md') or not parsed.fragment:
+                continue
+            path = Path(unquote(parsed.path))
+            candidate = (root / path.as_posix().lstrip('/') if path.is_absolute()
+                         else source.parent / path).resolve()
+            if not candidate.exists():
+                try:
+                    candidate = (root / 'docs' / candidate.relative_to(root / 'site/docs')).resolve()
+                except ValueError:
+                    pass
+            relative = candidate.relative_to(root).as_posix() if candidate.is_relative_to(root) else str(candidate)
+            if candidate not in anchors:
+                errors.append(f'{source.relative_to(root)}: missing local Markdown target: {target}')
+            elif unquote(parsed.fragment) not in anchors[candidate]:
+                errors.append(f'{source.relative_to(root)}: missing Markdown fragment: {target} ({relative})')
+    return errors
 
 
 def has_unquoted_colon_space(value):
@@ -156,6 +258,31 @@ class RepositoryContentChecks(unittest.TestCase):
                         relative = relative[:-3] + '.html'
                     failures.append(f'{document.relative_to(ROOT)} -> {target}')
         self.assertEqual(failures, [])
+
+    def test_local_markdown_links_have_existing_heading_anchors(self):
+        self.assertEqual(markdown_fragment_errors(ROOT), [])
+
+    def test_markdown_fragment_check_uses_kramdown_gfm_heading_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'docs').mkdir()
+            (root / 'site').mkdir()
+            (root / 'docs/source.md').write_text(
+                '[English](target.md#reproduce-with-bench) '
+                '[Russian](target.md#повторный-запуск-через-bench) '
+                '[Chinese](target.md#使用-bench-重现) '
+                '[Explicit](target.md#custom_anchor) '
+                '[Setext](target.md#repeat-1) '
+                '[Missing](target.md#missing)', encoding='utf-8')
+            (root / 'docs/target.md').write_text(
+                '## Reproduce with bench/\n'
+                '## Повторный запуск через bench/\n'
+                '## 使用 bench/ 重现\n'
+                '## Explicit identifier {#custom_anchor}\n'
+                'Repeat\n------\n'
+                'Repeat\n------\n', encoding='utf-8')
+            self.assertEqual(markdown_fragment_errors(root), [
+                'docs/source.md: missing Markdown fragment: target.md#missing (docs/target.md)'])
 
     def test_complete_translations_preserve_code_blocks_and_section_anchors(self):
         failures = []
