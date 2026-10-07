@@ -77,7 +77,7 @@ npm --prefix examples/node-postgres run demo
 - [Go](resp.md#go)：使用 RESP 读取缓存，使用 `pgx` 执行 SQL 写入。
 - [RESP](resp.md)：使用 Redis 客户端连接。
 
-接下来，[比较相同的预备 SQL 与 RESP 工作负载](BENCHMARKS.md#run-the-same-comparison-on-every-client)。若要报告结果或配置问题，请提交[工作负载报告](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml)，附上环境信息、基准测试 JSON 或错误日志。
+接下来，[比较相同的预备 SQL 与 RESP 工作负载](BENCHMARKS.md#使用-bench-重现)。若要报告结果或配置问题，请提交[工作负载报告](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml)，附上环境信息、基准测试 JSON 或错误日志。
 
 ## 清理演示 {#remove-the-demo}
 

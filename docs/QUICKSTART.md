@@ -96,7 +96,7 @@ See the [cache invalidation guide](cache-invalidation.md) or the
 - [Go](resp.md#go): use RESP for cached reads and `pgx` for SQL writes.
 - [RESP](resp.md): connect with a Redis client.
 
-Next, [compare the same SQL and RESP workload](BENCHMARKS.md#run-the-same-comparison-on-every-client).
+Next, [compare the same SQL and RESP workload](BENCHMARKS.md#reproduce-with-bench).
 For results or setup issues, open a
 [workload report](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml)
 with your environment and benchmark JSON or error log.

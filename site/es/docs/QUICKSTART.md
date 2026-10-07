@@ -77,7 +77,7 @@ Consulta la [guía de invalidación de caché](cache-invalidation.md) o la [expl
 - [Go](resp.md#go): usa RESP para lecturas en caché y `pgx` para escrituras SQL.
 - [RESP](resp.md): conecta con un cliente Redis.
 
-A continuación, [compara la misma carga de SQL preparado y RESP](BENCHMARKS.md#run-the-same-comparison-on-every-client). Para informar de resultados o problemas de configuración, abre un [informe de carga](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml) con el entorno, el JSON del benchmark o el registro de errores.
+A continuación, [compara la misma carga de SQL preparado y RESP](BENCHMARKS.md#reproducir-con-bench). Para informar de resultados o problemas de configuración, abre un [informe de carga](https://github.com/profundium/pg_local_cache/issues/new?template=workload.yml) con el entorno, el JSON del benchmark o el registro de errores.
 
 ## Elimina la demo {#remove-the-demo}
 
