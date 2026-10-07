@@ -25,16 +25,16 @@ permalink: /fr/
       <p class="hero-note">API RESP authentifiée · PostgreSQL 14–18 · Open source</p>
       <p class="hero-note">La version 3.1.0 utilise une capacité en octets pouvant contenir des millions de petites clés si le budget le permet. Elle ajoute des verrous partitionnés, des hits mono-clé sans allocation, un suivi des écritures moins coûteux et le report des misses pendant les verrous de relation. <a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">Guide de mise à niveau</a>.</p>
     </div>
-    <figure class="hero-benchmark" aria-label="Benchmark local à clé unique : RESP comparé au SQL">
-      <p class="benchmark-label">Mesuré localement · 15 sept. 2026</p>
-      <p class="benchmark-number"><strong>839,678</strong><span>requêtes/s · RESP MGET</span></p>
-      <p class="benchmark-gain"><strong>3.31×</strong> le débit SQL préparé<br>dans cette comparaison à clé unique</p>
+    <figure class="hero-benchmark" aria-label="Comparaison 3.1.0 sur un cœur épinglé : RESP, Valkey et SQL préparé">
+      <p class="benchmark-label">3.1.0 · build final c431bcc</p>
+      <p class="benchmark-number"><strong>210k</strong><span>requêtes/s · RESP MGET</span></p>
+      <p class="benchmark-gain">Par cœur physique du serveur épinglé<br>clés chaudes · 256 clients · Go/pgx</p>
       <dl class="benchmark-baselines">
-        <div><dt>SQL préparé</dt><dd>253,790 <span>req/s</span></dd></div>
-        <div><dt>SQL mget de 2.x (supprimé en 3.0.0)</dt><dd>186,296 <span>req/s</span></dd></div>
+        <div><dt>Valkey · io-threads=2N</dt><dd>91.5k <span>req/s</span></dd></div>
+        <div><dt>SQL préparé</dt><dd>23.2k <span>req/s</span></dd></div>
       </dl>
-      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 connexions.<br>Cette mesure historique de SQL mget en 2.x a été supprimée en 3.0.0 ; les résultats par lots diffèrent.</figcaption>
-      <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">Résultats, données brutes et conditions <span aria-hidden="true">→</span></a>
+      <figcaption>VM privées en 10 GbE · Xeon Gold 6354 · épinglé à un cœur physique.<br>Sur un cœur, Valkey io-threads=1 a atteint 180k req/s avec le moins de CPU serveur par requête.</figcaption>
+      <a href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Résultats, données brutes et conditions <span aria-hidden="true">→</span></a>
     </figure>
   </section>
 

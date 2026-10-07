@@ -26,16 +26,16 @@ permalink: /zh/
       <p class="hero-note">经过身份验证的 RESP API · PostgreSQL 14–18 · 开源</p>
       <p class="hero-note">3.1.0 按字节管理 arena 容量；预算允许时可容纳数百万个小键。新增分区锁、单键命中零分配路径、更低开销的写入跟踪，以及关系锁阻塞时的延迟未命中处理。<a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">升级指南</a>。</p>
     </div>
-    <figure class="hero-benchmark" aria-label="本地单键基准测试：RESP 与 SQL 比较">
-      <p class="benchmark-label">本地测量 · 2026 年 9 月 15 日</p>
-      <p class="benchmark-number"><strong>839,678</strong><span>请求/秒 · RESP MGET</span></p>
-      <p class="benchmark-gain"><strong>3.31×</strong> 预备 SQL 的吞吐量<br>仅针对本次单键比较</p>
+    <figure class="hero-benchmark" aria-label="3.1.0 单核心固定测试：RESP、Valkey 与预备 SQL 比较">
+      <p class="benchmark-label">3.1.0 · 最终构建 c431bcc</p>
+      <p class="benchmark-number"><strong>210k</strong><span>请求/秒 · RESP MGET</span></p>
+      <p class="benchmark-gain">每个固定的服务器物理核心<br>热键 · 256 个客户端 · Go/pgx</p>
       <dl class="benchmark-baselines">
-        <div><dt>预备 SQL</dt><dd>253,790 <span>请求/秒</span></dd></div>
-        <div><dt>2.x SQL mget（已在 3.0.0 移除）</dt><dd>186,296 <span>请求/秒</span></dd></div>
+        <div><dt>Valkey · io-threads=2N</dt><dd>91.5k <span>请求/秒</span></dd></div>
+        <div><dt>预备 SQL</dt><dd>23.2k <span>请求/秒</span></dd></div>
       </dl>
-      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 个连接。<br>这组历史 2.x SQL mget 数据对应的功能已在 3.0.0 移除；批量结果有所不同。</figcaption>
-      <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">结果、原始数据与条件 <span aria-hidden="true">→</span></a>
+      <figcaption>私有 10 GbE 虚拟机 · Xeon Gold 6354 · 固定到一个物理核心。<br>单核心时 Valkey io-threads=1 达到 180k 请求/秒，每请求服务器 CPU 最低。</figcaption>
+      <a href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">结果、原始数据与条件 <span aria-hidden="true">→</span></a>
     </figure>
   </section>
 

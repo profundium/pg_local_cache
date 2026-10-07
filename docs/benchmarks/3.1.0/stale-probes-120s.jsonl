@@ -1,0 +1,4 @@
+{"stack": "pglc", "dist": "uniform", "seconds": 120, "reads_s": 82565, "read_p99_ms": 1.687552, "hits": null, "misses": null, "writes_s": 108580, "stale": 0, "cached": 60000, "examples": [], "errors": []}
+{"stack": "pglc", "dist": "zipf", "seconds": 120, "reads_s": 0, "read_p99_ms": null, "hits": null, "misses": null, "writes_s": 101797, "stale": 0, "cached": 60000, "examples": [], "errors": ["go-pgx benchmark: RESP/SQL result mismatch\n"]}
+{"stack": "valkey", "dist": "uniform", "seconds": 120, "reads_s": 30210, "read_p99_ms": 8.781824, "hits": 1644354, "misses": 1981030, "writes_s": 36508, "stale": 2, "cached": 4882, "examples": [41167, 55116], "errors": []}
+{"stack": "valkey", "dist": "zipf", "seconds": 120, "reads_s": 28568, "read_p99_ms": 8.781824, "hits": 1377207, "misses": 2051099, "writes_s": 35789, "stale": 1, "cached": 20583, "examples": [53718], "errors": []}
