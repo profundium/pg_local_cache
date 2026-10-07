@@ -3055,6 +3055,11 @@ try_fast_mget_hit(PgLocalCacheClient *client, PgLocalCacheRespArg *args,
 	bool		database_prefix_matches;
 	int			i;
 
+#ifdef PGLC_TEST_HOOKS
+	/* Pause-hook race tests need the general lookup path and its hook points. */
+	if (pglc_test_pause_configured())
+		return false;
+#endif
 	if (argc <= 0 || !pglc_resp_arg_equals(&args[0], "MGET"))
 		return false;
 	if (argc != 2)

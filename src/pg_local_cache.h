@@ -10,6 +10,7 @@
 #include "fmgr.h"
 #include "port/atomics.h"
 #include "storage/lwlock.h"
+#include "storage/spin.h"
 #include "utils/hsearch.h"
 
 #include "cache_arena.h"
@@ -171,6 +172,37 @@ typedef struct PgLocalCacheWorkerStats
 	pg_atomic_uint64 singleflight_timeouts;
 } PgLocalCacheWorkerStats;
 
+#ifdef PGLC_TEST_HOOKS
+typedef enum PgLocalCacheTestPausePoint
+{
+	PGLC_TEST_PAUSE_NONE = 0,
+	PGLC_TEST_PAUSE_BEFORE_PARTITION_ACQUIRE,
+	PGLC_TEST_PAUSE_BEFORE_LOOKUP_LOCK,
+	PGLC_TEST_PAUSE_AFTER_LOOKUP_UNLOCK,
+	PGLC_TEST_PAUSE_AFTER_TOKEN,
+	PGLC_TEST_PAUSE_BEFORE_STORE,
+	PGLC_TEST_PAUSE_BEFORE_STORE_LOCK,
+	PGLC_TEST_PAUSE_AFTER_STORE_UNLOCK,
+	PGLC_TEST_PAUSE_BEFORE_CLAIM,
+	PGLC_TEST_PAUSE_BEFORE_CLAIM_LOCK,
+	PGLC_TEST_PAUSE_AFTER_CLAIM_UNLOCK,
+	PGLC_TEST_PAUSE_AFTER_RELATION_BEGIN,
+	PGLC_TEST_PAUSE_AFTER_GLOBAL_BEGIN,
+	PGLC_TEST_PAUSE_AFTER_PUBLISH,
+	PGLC_TEST_PAUSE_AFTER_PUBLISH_ABORT,
+	PGLC_TEST_PAUSE_AFTER_GLOBAL_FINISH,
+	PGLC_TEST_PAUSE_AFTER_RELATION_FINISH
+} PgLocalCacheTestPausePoint;
+
+typedef struct PgLocalCacheTestPauseState
+{
+	slock_t		lock;
+	PgLocalCacheTestPausePoint point;
+	Oid			barrier_relation;
+	uint64		generation;
+} PgLocalCacheTestPauseState;
+#endif
+
 typedef struct PgLocalCacheSharedState
 {
 	LWLock	   *registry_lock;
@@ -233,8 +265,13 @@ typedef struct PgLocalCacheSharedState
 	PgLocalCacheWorkerStats stats_shards[PGLC_MAX_STATS_SHARDS];
 #ifdef PGLC_TEST_HOOKS
 	pg_atomic_uint64 test_partition_lock_violations;
+	PgLocalCacheTestPauseState test_pause;
 #endif
 } PgLocalCacheSharedState;
+
+#ifdef PGLC_TEST_HOOKS
+extern bool pglc_test_pause_configured(void);
+#endif
 
 typedef struct PgLocalCacheReadToken
 {

@@ -342,7 +342,7 @@ def main() -> None:
     try:
         corrupt_hook = admin_sql(
             "SELECT pg_catalog.current_setting("
-            "'pg_local_cache.test_pause_point', true) IS NOT NULL"
+            "'pg_local_cache.test_dirty_marker_limit', true) IS NOT NULL"
         ) == "t"
         if corrupt_hook:
             admin_sql(

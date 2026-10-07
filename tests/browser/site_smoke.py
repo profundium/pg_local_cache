@@ -3,12 +3,14 @@
 import argparse
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from html.parser import HTMLParser
 import json
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from threading import Thread
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from playwright.sync_api import sync_playwright, expect
 
@@ -16,6 +18,22 @@ from playwright.sync_api import sync_playwright, expect
 class QuietHandler(SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+
+class RedirectMetadata(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.refresh = None
+        self.canonical = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'meta' and attrs.get('http-equiv', '').lower() == 'refresh':
+            match = re.search(r'\burl\s*=\s*(.+)$', attrs.get('content', ''), re.I)
+            if match:
+                self.refresh = match.group(1).strip().strip('"\'')
+        elif tag == 'link' and 'canonical' in attrs.get('rel', '').lower().split():
+            self.canonical = attrs.get('href')
 
 
 def exercise(browser, name, paths, base, canonical_base, out, width, height, dark=False, js=True, motion='reduce'):
@@ -189,6 +207,30 @@ def main():
     paths = sorted(path.relative_to(root).as_posix() for path in root.rglob('*.html'))
     assert 'index.html' in paths, 'Build the documentation site first'
     canonical_base = args.base_url.rstrip('/') + '/'
+    built_paths = set(paths)
+    page_paths, redirect_stubs = [], []
+    for path in paths:
+        html = (root / path).read_text(encoding='utf-8')
+        if '<meta http-equiv="refresh"' in html:
+            redirect_stubs.append((path, html))
+        else:
+            page_paths.append(path)
+    site = urlsplit(canonical_base)
+    for path, html in redirect_stubs:
+        metadata = RedirectMetadata()
+        metadata.feed(html)
+        metadata.close()
+        relative = path[:-10] if path.endswith('index.html') else path
+        stub_url = urljoin(canonical_base, relative)
+        for kind, target in [('refresh', metadata.refresh), ('canonical', metadata.canonical)]:
+            assert target, f'{path}: missing redirect {kind} target'
+            parsed = urlsplit(urljoin(stub_url, target))
+            assert (parsed.scheme, parsed.netloc) == (site.scheme, site.netloc), f'{path}: {kind} target outside built site'
+            assert parsed.path.startswith(site.path), f'{path}: {kind} target outside built site'
+            target_path = unquote(parsed.path[len(site.path):])
+            if not target_path or target_path.endswith('/'):
+                target_path += 'index.html'
+            assert target_path in built_paths, f'{path}: {kind} target missing from build: {target_path}'
     args.output.mkdir(parents=True, exist_ok=True)
     results = []
     server = None
@@ -210,7 +252,7 @@ def main():
                         ('nojs', 390, 844, False, False, 'reduce'),
                     ]:
                         name = f'{engine}-{label}'
-                        result = exercise(browser, name, paths, base, canonical_base, args.output, width, height, dark, js, motion)
+                        result = exercise(browser, name, page_paths, base, canonical_base, args.output, width, height, dark, js, motion)
                         results.append(result)
                         print(f'PASS {name}: {len(result["pages"])} pages and user interactions', flush=True)
                 finally:

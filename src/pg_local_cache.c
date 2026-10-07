@@ -82,8 +82,6 @@ static int pglc_worker_slot = -1;
 static char *pglc_binary_version = NULL;
 static char *pglc_binary_build_id = NULL;
 #ifdef PGLC_TEST_HOOKS
-static char *pglc_test_pause_point = NULL;
-static int pglc_test_barrier_relation_oid = 0;
 static int pglc_test_dirty_marker_limit = 0;
 static int pglc_test_max_dirty_keys = 0;
 static int pglc_test_occupied_entry_free_head = 0;
@@ -198,6 +196,8 @@ PG_FUNCTION_INFO_V1(pg_local_cache_test_collect_global);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_abort_after_reservation);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_corrupt_value_len);
 PG_FUNCTION_INFO_V1(pg_local_cache_test_partition_lock_violations);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_set_pause);
+PG_FUNCTION_INFO_V1(pg_local_cache_test_clear_pause);
 #endif
 
 static void pglc_shmem_request(void);
@@ -632,30 +632,6 @@ pglc_define_gucs(void)
 							 NULL);
 
 #ifdef PGLC_TEST_HOOKS
-	DefineCustomStringVariable("pg_local_cache.test_pause_point",
-							   "Test-only RESP worker relation-lock barrier point.",
-							   NULL,
-							   &pglc_test_pause_point,
-							   "",
-							   PGC_SIGHUP,
-							   GUC_SUPERUSER_ONLY,
-							   NULL,
-							   NULL,
-							   NULL);
-
-	DefineCustomIntVariable("pg_local_cache.test_barrier_relation",
-							"Test-only relation OID used by RESP worker barriers.",
-							NULL,
-							&pglc_test_barrier_relation_oid,
-							0,
-							0,
-							INT_MAX,
-							PGC_SIGHUP,
-							GUC_SUPERUSER_ONLY,
-							NULL,
-							 NULL,
-							 NULL);
-
 	DefineCustomIntVariable("pg_local_cache.test_dirty_marker_limit",
 							"Test-only dirty-marker admission cap; zero disables it.",
 							NULL,
@@ -717,10 +693,83 @@ pglc_define_gucs(void)
 }
 
 #ifdef PGLC_TEST_HOOKS
+static PgLocalCacheTestPausePoint
+pglc_test_pause_point_from_name(const char *name)
+{
+	static const struct
+	{
+		const char *name;
+		PgLocalCacheTestPausePoint point;
+	} points[] =
+	{
+		{"before_partition_acquire", PGLC_TEST_PAUSE_BEFORE_PARTITION_ACQUIRE},
+		{"before_lookup_lock", PGLC_TEST_PAUSE_BEFORE_LOOKUP_LOCK},
+		{"after_lookup_unlock", PGLC_TEST_PAUSE_AFTER_LOOKUP_UNLOCK},
+		{"after_token", PGLC_TEST_PAUSE_AFTER_TOKEN},
+		{"before_store", PGLC_TEST_PAUSE_BEFORE_STORE},
+		{"before_store_lock", PGLC_TEST_PAUSE_BEFORE_STORE_LOCK},
+		{"after_store_unlock", PGLC_TEST_PAUSE_AFTER_STORE_UNLOCK},
+		{"before_claim", PGLC_TEST_PAUSE_BEFORE_CLAIM},
+		{"before_claim_lock", PGLC_TEST_PAUSE_BEFORE_CLAIM_LOCK},
+		{"after_claim_unlock", PGLC_TEST_PAUSE_AFTER_CLAIM_UNLOCK},
+		{"after_relation_begin", PGLC_TEST_PAUSE_AFTER_RELATION_BEGIN},
+		{"after_global_begin", PGLC_TEST_PAUSE_AFTER_GLOBAL_BEGIN},
+		{"after_publish", PGLC_TEST_PAUSE_AFTER_PUBLISH},
+		{"after_publish_abort", PGLC_TEST_PAUSE_AFTER_PUBLISH_ABORT},
+		{"after_global_finish", PGLC_TEST_PAUSE_AFTER_GLOBAL_FINISH},
+		{"after_relation_finish", PGLC_TEST_PAUSE_AFTER_RELATION_FINISH}
+	};
+	Size		index;
+
+	for (index = 0; index < lengthof(points); index++)
+		if (strcmp(name, points[index].name) == 0)
+			return points[index].point;
+	return PGLC_TEST_PAUSE_NONE;
+}
+
+static void
+pglc_test_pause_snapshot(PgLocalCacheTestPausePoint *point,
+						 Oid *barrier_relation, uint64 *generation)
+{
+	Assert(pglc_shared != NULL);
+	SpinLockAcquire(&pglc_shared->test_pause.lock);
+	*point = pglc_shared->test_pause.point;
+	*barrier_relation = pglc_shared->test_pause.barrier_relation;
+	*generation = pglc_shared->test_pause.generation;
+	SpinLockRelease(&pglc_shared->test_pause.lock);
+}
+
+static bool
+pglc_test_pause_is_point(PgLocalCacheTestPausePoint expected)
+{
+	PgLocalCacheTestPausePoint point;
+	Oid			barrier_relation;
+	uint64		generation;
+
+	pglc_test_pause_snapshot(&point, &barrier_relation, &generation);
+	return point == expected && OidIsValid(barrier_relation) && generation != 0;
+}
+
+bool
+pglc_test_pause_configured(void)
+{
+	PgLocalCacheTestPausePoint point;
+	Oid			barrier_relation;
+	uint64		generation;
+
+	pglc_test_pause_snapshot(&point, &barrier_relation, &generation);
+	return point != PGLC_TEST_PAUSE_NONE && OidIsValid(barrier_relation) &&
+		generation != 0;
+}
+
 static bool
 pglc_test_pause_at(const char *point)
 {
 	LOCKTAG		tag;
+	PgLocalCacheTestPausePoint point_id;
+	PgLocalCacheTestPausePoint configured_point;
+	Oid			barrier_relation;
+	uint64		generation;
 	uint32		partition;
 
 	Assert(pglc_shared != NULL);
@@ -729,16 +778,31 @@ pglc_test_pause_at(const char *point)
 		 partition++)
 		Assert(!LWLockHeldByMe(pglc_shared->partitions[partition].lock));
 
-	if (pglc_test_pause_point == NULL ||
-		strcmp(pglc_test_pause_point, point) != 0 ||
-		pglc_test_barrier_relation_oid <= 0)
+	point_id = pglc_test_pause_point_from_name(point);
+	if (point_id == PGLC_TEST_PAUSE_NONE)
+		return false;
+	pglc_test_pause_snapshot(&configured_point, &barrier_relation, &generation);
+	if (configured_point != point_id || !OidIsValid(barrier_relation) ||
+		generation == 0)
 		return false;
 
-	SET_LOCKTAG_RELATION(tag, MyDatabaseId,
-						 (Oid) pglc_test_barrier_relation_oid);
+	SET_LOCKTAG_RELATION(tag, MyDatabaseId, barrier_relation);
 	(void) LockAcquire(&tag, AccessShareLock, true, false);
 	LockRelease(&tag, AccessShareLock, true);
 	return true;
+}
+
+static void
+pglc_test_set_pause_state(PgLocalCacheTestPausePoint point,
+						  Oid barrier_relation)
+{
+	SpinLockAcquire(&pglc_shared->test_pause.lock);
+	pglc_shared->test_pause.point = point;
+	pglc_shared->test_pause.barrier_relation = barrier_relation;
+	pglc_shared->test_pause.generation++;
+	if (pglc_shared->test_pause.generation == 0)
+		pglc_shared->test_pause.generation = 1;
+	SpinLockRelease(&pglc_shared->test_pause.lock);
 }
 #endif
 
@@ -1355,6 +1419,10 @@ pglc_shmem_startup(void)
 		pg_atomic_init_u64(&pglc_shared->sql_sets, 0);
 		pg_atomic_init_u64(&pglc_shared->sql_dels, 0);
 #ifdef PGLC_TEST_HOOKS
+		SpinLockInit(&pglc_shared->test_pause.lock);
+		pglc_shared->test_pause.point = PGLC_TEST_PAUSE_NONE;
+		pglc_shared->test_pause.barrier_relation = InvalidOid;
+		pglc_shared->test_pause.generation = 0;
 		pg_atomic_init_u64(&pglc_shared->test_partition_lock_violations, 0);
 #endif
 		for (worker_index = 0; worker_index < PGLC_MAX_STATS_SHARDS;
@@ -4272,6 +4340,43 @@ pg_local_cache_test_partition_lock_violations(PG_FUNCTION_ARGS)
 }
 
 Datum
+pg_local_cache_test_set_pause(PG_FUNCTION_ARGS)
+{
+	char	   *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	Oid			barrier_relation = PG_GETARG_OID(1);
+	PgLocalCacheTestPausePoint point;
+
+	pglc_require_preload();
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to set pg_local_cache test pause")));
+	point = pglc_test_pause_point_from_name(name);
+	if (point == PGLC_TEST_PAUSE_NONE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unknown pg_local_cache test pause point: %s", name)));
+	if (!OidIsValid(barrier_relation) || get_rel_name(barrier_relation) == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid pg_local_cache test pause barrier relation")));
+	pglc_test_set_pause_state(point, barrier_relation);
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_local_cache_test_clear_pause(PG_FUNCTION_ARGS)
+{
+	pglc_require_preload();
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to clear pg_local_cache test pause")));
+	pglc_test_set_pause_state(PGLC_TEST_PAUSE_NONE, InvalidOid);
+	PG_RETURN_VOID();
+}
+
+Datum
 pg_local_cache_test_partition(PG_FUNCTION_ARGS)
 {
 	Oid			database_oid = PG_GETARG_OID(0);
@@ -4971,8 +5076,7 @@ pglc_publish_dirty(void)
 						 table_invalidated);
 #ifdef PGLC_TEST_HOOKS
 	pglc_test_pause_at("after_publish");
-	if (pglc_test_pause_point != NULL &&
-		strcmp(pglc_test_pause_point, "after_publish_abort") == 0)
+	if (pglc_test_pause_is_point(PGLC_TEST_PAUSE_AFTER_PUBLISH_ABORT))
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("test abort after dirty publication")));
