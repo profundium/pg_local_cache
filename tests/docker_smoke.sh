@@ -1186,6 +1186,7 @@ PG_LOCAL_CACHE_TEST_ROLE="$worker_role" \
 PG_LOCAL_CACHE_TEST_WRITER_ROLE="$app_role" \
 PG_LOCAL_CACHE_TEST_WRITER_PASSWORD="$app_password" \
 PG_LOCAL_CACHE_TEST_WRITER_HOST="127.0.0.1" \
+PGLC_SKIP_PAUSE_HOOK_TESTS=1 \
     python3 -B "${repository_directory}/tests/pipeline_integration.py"
 
 PG_LOCAL_CACHE_PSQL="$psql_wrapper" \

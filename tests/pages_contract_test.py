@@ -3,6 +3,8 @@
 import copy
 import importlib.util
 import json
+from html.parser import HTMLParser
+import posixpath
 from pathlib import Path
 import re
 import statistics
@@ -177,6 +179,99 @@ def markdown_fragment_errors(root):
     return errors
 
 
+class HTMLHrefParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hrefs = []
+
+    def handle_starttag(self, _tag, attrs):
+        self.hrefs.extend(value for name, value in attrs if name == 'href' and value)
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+
+def redirect_stub_link_errors(root):
+    root = root.resolve()
+    source_areas = [area for area in (root / 'docs', root / 'site') if area.exists()]
+    documents = sorted(path for area in source_areas for path in area.rglob('*.md'))
+    aliases = set()
+    for document in documents:
+        match = re.match(r'\A---\s*\n(.*?)\n---(?:\n|$)',
+                         document.read_text(encoding='utf-8'), re.S)
+        if match is None:
+            continue
+        in_redirects = False
+        for line in match.group(1).splitlines():
+            if re.fullmatch(r'redirect_from:\s*', line):
+                in_redirects = True
+            elif in_redirects:
+                if not line.strip():
+                    continue
+                item = re.fullmatch(r'\s+-\s*[\"\']?([^\s\"\']+)[\"\']?\s*', line)
+                if item:
+                    aliases.add(item.group(1))
+                elif not line.startswith((' ', '\t')):
+                    in_redirects = False
+    content_routes = {
+        urlsplit(fields['permalink']).path
+        for document in documents
+        if (fields := front_matter(document)).get('permalink')
+    }
+    aliases.difference_update(content_routes)
+
+    base_url = urlsplit(site.BASE)
+    base_path = base_url.path.rstrip('/')
+    errors = []
+    page_files = sorted(
+        path for area in source_areas for path in area.rglob('*')
+        if path.is_file() and path.suffix.lower() in ('.html', '.md')
+    )
+    for page in page_files:
+        text = page.read_text(encoding='utf-8')
+        body = markdown_without_fenced_code(text) if page.suffix.lower() == '.md' else text
+        parser = HTMLHrefParser()
+        parser.feed(body)
+        destinations = parser.hrefs
+        if page.suffix.lower() == '.md':
+            destinations.extend(markdown_link_destinations(body))
+        for destination in destinations:
+            candidates = [destination]
+            candidates.extend(re.findall(r'[\"\'](/[^\"\']+)[\"\']', destination))
+            for candidate in candidates:
+                parsed = urlsplit(candidate)
+                if parsed.scheme and parsed.scheme not in ('http', 'https'):
+                    continue
+                if parsed.netloc and parsed.netloc != base_url.netloc:
+                    continue
+                path = unquote(parsed.path)
+                if base_path and (path == base_path or path.startswith(base_path + '/')):
+                    path = path[len(base_path):] or '/'
+                resolved = {path}
+                if path and not path.startswith('/'):
+                    if page.is_relative_to(root / 'site'):
+                        page_dir = page.relative_to(root / 'site').parent.as_posix()
+                    elif page.is_relative_to(root / 'docs'):
+                        page_dir = (Path('docs') / page.relative_to(root / 'docs').parent).as_posix()
+                    else:
+                        page_dir = ''
+                    resolved.add('/' + posixpath.normpath(posixpath.join(page_dir, path)))
+                if 'locale.prefix' in destination:
+                    resolved.update(
+                        entry['prefix'].rstrip('/') + path
+                        if path.startswith('/') else
+                        '/' + posixpath.normpath(posixpath.join(entry['prefix'].lstrip('/'), path))
+                        for entry in locale_entries().values()
+                    )
+                matching_aliases = sorted(aliases.intersection(resolved))
+                for alias in matching_aliases:
+                    errors.append(
+                        f'{page.relative_to(root)}: {destination} resolves to '
+                        f'redirect_from stub {alias}'
+                    )
+    return errors
+
+
 def has_unquoted_colon_space(value):
     quote = None
     index = 0
@@ -261,6 +356,27 @@ class RepositoryContentChecks(unittest.TestCase):
 
     def test_local_markdown_links_have_existing_heading_anchors(self):
         self.assertEqual(markdown_fragment_errors(ROOT), [])
+
+    def test_pages_do_not_link_to_redirect_from_stubs(self):
+        self.assertEqual(redirect_stub_link_errors(ROOT), [])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'docs').mkdir()
+            (root / 'site/ru').mkdir(parents=True)
+            (root / 'docs/resp.md').write_text(
+                '---\nredirect_from:\n  - /ru/docs/go.html\n---\n',
+                encoding='utf-8',
+            )
+            (root / 'site/ru/index.html').write_text(
+                '<a href="{{ \'/docs/go.html\' | prepend: locale.prefix | relative_url }}">Go</a>'
+                '<a href="https://profundium.github.io/pg_local_cache/ru/docs/go.html">Go</a>',
+                encoding='utf-8',
+            )
+            errors = redirect_stub_link_errors(root)
+            self.assertEqual(len(errors), 2)
+            self.assertTrue(all('redirect_from stub /ru/docs/go.html' in error
+                                for error in errors))
 
     def test_markdown_fragment_check_uses_kramdown_gfm_heading_ids(self):
         with tempfile.TemporaryDirectory() as directory:
