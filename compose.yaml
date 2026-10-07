@@ -10,7 +10,7 @@ services:
         POSTGRES_VARIANT: ${POSTGRES_VARIANT:-bookworm}
         PGLC_BUILD_ID: ${PGLC_BUILD_ID:-local-compose}
         PGLC_TEST_HOOKS: ${PGLC_TEST_HOOKS:-0}
-    image: pg_local_cache:3.1.0
+    image: pg_local_cache:3.2.0
     restart: unless-stopped
     stop_grace_period: 60s
     shm_size: 1gb

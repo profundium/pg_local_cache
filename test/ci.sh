@@ -124,7 +124,11 @@ CONF
 pg_ctlcluster "$PG" ci restart
 runuser -u postgres -- env PGPORT=5433 PGHOST=127.0.0.1 PGUSER=postgres \
     "$psql" -X -v ON_ERROR_STOP=1 -d postgres -c \
-    'CREATE EXTENSION IF NOT EXISTS pg_local_cache; GRANT USAGE ON SCHEMA local_cache TO local_cache_worker; GRANT SELECT ON local_cache.mapping TO local_cache_worker;'
+    'CREATE EXTENSION IF NOT EXISTS pg_local_cache;
+     GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
+     GRANT SELECT ON local_cache.mapping TO local_cache_worker;
+     GRANT EXECUTE ON FUNCTION local_cache._effective_write_mode(regclass, text)
+         TO local_cache_worker;'
 
 export PG_LOCAL_CACHE_PSQL="$psql" PGHOST=127.0.0.1 PGPORT=5433
 export PGDATABASE=postgres PGUSER=postgres
@@ -144,6 +148,9 @@ for integration in whole_row_integration pipeline_integration \
         python3 "$repo/tests/$integration.py"
     fi
 done
+
+echo "==> pipeline refresh integration"
+PGLC_REFRESH_ONLY=1 python3 "$repo/tests/pipeline_integration.py"
 
 # Verify compact-entry capacity with a sized arena and a full 200k-row pass.
 sed -i 's/pg_local_cache.cache_entries = 512/pg_local_cache.cache_entries = 262144/' \

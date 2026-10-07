@@ -17,7 +17,7 @@
 #include "cache_index.h"
 #include "resp_limits.h"
 
-#define PGLC_VERSION "3.1.0"
+#define PGLC_VERSION "3.2.0"
 #define PGLC_VERSION_LENGTH "5"
 #ifndef PGLC_BUILD_ID
 #error "PGLC_BUILD_ID must be supplied by the build"
@@ -40,6 +40,34 @@
 #define PGLC_EVICTION_BATCH 8
 #define PGLC_DEFERRED_MISSES_DEFAULT 8
 #define PGLC_DEFERRED_MISSES_MAX 64
+#define PGLC_REFRESH_MAX_KEYS 4096
+#define PGLC_REFRESH_MAX_BYTES (4U * 1024U * 1024U)
+#define PGLC_REFRESH_MAX_RAW_BYTES (64U * 1024U)
+#define PGLC_REFRESH_SCRATCH_BYTES (128U * 1024U)
+#define PGLC_REFRESH_PAYLOAD_MAX PGLC_VALUE_MAX
+
+typedef enum PgLocalCacheRefreshSkipReason
+{
+	PGLC_REFRESH_SKIP_SUBTRANSACTION_ABORT = 0,
+	PGLC_REFRESH_SKIP_BROAD_INVALIDATION,
+	PGLC_REFRESH_SKIP_DESCRIPTOR_CHANGE,
+	PGLC_REFRESH_SKIP_PREPARE,
+	PGLC_REFRESH_SKIP_PARALLEL_WORKER,
+	PGLC_REFRESH_SKIP_NO_XID,
+	PGLC_REFRESH_SKIP_REPEATED_KEY,
+	PGLC_REFRESH_SKIP_CAPTURE_LIMIT,
+	PGLC_REFRESH_SKIP_CAPTURE_STORAGE,
+	PGLC_REFRESH_SKIP_PUBLICATION_FALLBACK,
+	PGLC_REFRESH_SKIP_OWNER_MISMATCH,
+	PGLC_REFRESH_SKIP_STALE_PUBLICATION,
+	PGLC_REFRESH_SKIP_FENCE_MISMATCH,
+	PGLC_REFRESH_SKIP_DIRTY_COMPETITOR,
+	PGLC_REFRESH_SKIP_ADMISSION,
+	PGLC_REFRESH_SKIP_IDENTITY_MISMATCH,
+	PGLC_REFRESH_SKIP_CRC,
+	PGLC_REFRESH_SKIP_FULL_XID_BOUNDARY,
+	PGLC_REFRESH_SKIP_REASON_COUNT
+} PgLocalCacheRefreshSkipReason;
 
 typedef struct PgLocalCacheCacheKey
 {
@@ -56,6 +84,7 @@ typedef struct PgLocalCacheCacheEntry
 	uint64		relation_version;
 	uint64		relation_incarnation;
 	uint64		version;
+	uint64		lifetime_generation;
 	uint64		load_id;
 	TimestampTz load_started;
 	pg_atomic_uint64 last_access;
@@ -83,6 +112,7 @@ typedef struct PgLocalCacheDirtyMarker
 	uint64		relation_slot_generation;
 	uint64		relation_incarnation;
 	uint64		generation;
+	uint64		latest_publication_sequence;
 	uint32		relation_slot;
 	uint32		writer_count;
 	uint32		key_slot;
@@ -102,7 +132,6 @@ typedef struct PgLocalCacheRelationState
 {
 	PgLocalCacheRelationKey key;
 	Oid			relation_oid;
-	uint64		identity_pins;
 	uint32		slot;
 	uint64		slot_generation;
 	bool		pending_forget;
@@ -114,6 +143,8 @@ typedef struct PgLocalCacheRelationSlot
 	pg_atomic_uint64 incarnation;
 	pg_atomic_uint64 version;
 	pg_atomic_uint64 dirty_writers;
+	pg_atomic_uint64 identity_pins;
+	pg_atomic_uint32 pending_forget;
 	bool		in_use;
 } PgLocalCacheRelationSlot;
 
@@ -128,6 +159,7 @@ typedef struct PgLocalCachePartition
 	char	   *marker_key_arena;
 	uint32	  *marker_key_free_next;
 	uint64		entry_generation;
+	uint64		entry_lifetime_generation;
 	uint64		marker_generation;
 	uint32		eviction_bucket_cursor;
 	uint32		entry_count;
@@ -191,7 +223,10 @@ typedef enum PgLocalCacheTestPausePoint
 	PGLC_TEST_PAUSE_AFTER_PUBLISH,
 	PGLC_TEST_PAUSE_AFTER_PUBLISH_ABORT,
 	PGLC_TEST_PAUSE_AFTER_GLOBAL_FINISH,
-	PGLC_TEST_PAUSE_AFTER_RELATION_FINISH
+	PGLC_TEST_PAUSE_AFTER_RELATION_FINISH,
+	PGLC_TEST_PAUSE_BEFORE_REFRESH_POSTCOPY_VALIDATION,
+	PGLC_TEST_PAUSE_BEFORE_REFRESH_FINISH,
+	PGLC_TEST_PAUSE_BEFORE_REFRESH_INSTALL_LOCK
 } PgLocalCacheTestPausePoint;
 
 typedef struct PgLocalCacheTestPauseState
@@ -262,6 +297,15 @@ typedef struct PgLocalCacheSharedState
 	pg_atomic_uint64 pass_to_main;
 	pg_atomic_uint64 sql_sets;
 	pg_atomic_uint64 sql_dels;
+	pg_atomic_uint64 refresh_captures_total;
+	pg_atomic_uint64 refresh_installs_total;
+	pg_atomic_uint64 refresh_skips_total;
+	pg_atomic_uint64 refresh_reservations_outstanding;
+	pg_atomic_uint64 refresh_capture_bytes_current;
+	pg_atomic_uint64 refresh_capture_bytes_highwater;
+	pg_atomic_uint64 refresh_skip_reasons[PGLC_REFRESH_SKIP_REASON_COUNT];
+	pg_atomic_uint64 backend_generation_counter;
+	pg_atomic_uint32 cache_bypass;
 	PgLocalCacheWorkerStats stats_shards[PGLC_MAX_STATS_SHARDS];
 #ifdef PGLC_TEST_HOOKS
 	pg_atomic_uint64 test_partition_lock_violations;
@@ -316,6 +360,7 @@ typedef struct PgLocalCacheMapping
 	uint64		relation_slot_generation;
 	uint32		relation_slot;
 	bool		writable;
+	bool		refresh_mode;
 	FmgrInfo	key_inputs[PGLC_MAX_KEY_COLUMNS];
 	FmgrInfo	key_outputs[PGLC_MAX_KEY_COLUMNS];
 	TupleDesc	row_desc;

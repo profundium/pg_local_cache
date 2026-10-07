@@ -70,6 +70,7 @@ _WARM_HIT_ITERATION: contextvars.ContextVar[
 tuple[str, str, str] | None
 ] = contextvars.ContextVar("warm_hit_iteration", default=None)
 _PSQL_PROCESS_OUTPUT: dict[int, bytearray] = {}
+_PGLC_TEST_HOOKS_AVAILABLE = False
 
 
 def warm_hit_diagnostics(actual: object) -> str:
@@ -928,6 +929,7 @@ def set_test_pause(point: str | None, barrier_table: str | None = None) -> None:
 
 
 def set_test_dirty_marker_limit(limit: int | None) -> None:
+    guc_number("pg_local_cache.test_dirty_marker_limit")
     if limit is None:
         sql_commands(
             "ALTER SYSTEM RESET pg_local_cache.test_dirty_marker_limit",
@@ -939,9 +941,11 @@ def set_test_dirty_marker_limit(limit: int | None) -> None:
             f"{limit}",
             "SELECT pg_reload_conf()",
         )
+        assert guc_number("pg_local_cache.test_dirty_marker_limit") == limit
 
 
 def set_test_max_dirty_keys(limit: int | None) -> None:
+    guc_number("pg_local_cache.test_max_dirty_keys")
     if limit is None:
         sql_commands(
             "ALTER SYSTEM RESET pg_local_cache.test_max_dirty_keys",
@@ -953,6 +957,7 @@ def set_test_max_dirty_keys(limit: int | None) -> None:
             f"{limit}",
             "SELECT pg_reload_conf()",
         )
+        assert guc_number("pg_local_cache.test_max_dirty_keys") == limit
 
 
 def reset_test_gucs_if_available() -> None:
@@ -1045,6 +1050,8 @@ def test_key_scanner_differential() -> None:
 
 
 def install_test_hook_functions(table: str, namespace: str) -> bool:
+    global _PGLC_TEST_HOOKS_AVAILABLE
+
     relation = f"public.{sql_identifier(table)}"
     definitions = (
         "CREATE OR REPLACE FUNCTION public.pglc_test_partition_lock_violations() "
@@ -1058,7 +1065,10 @@ def install_test_hook_functions(table: str, namespace: str) -> bool:
         "'pg_local_cache_test_clear_pause' LANGUAGE C",
         "CREATE OR REPLACE FUNCTION public.pglc_test_collect_key(regclass, text, text) "
         "RETURNS void AS '$libdir/pg_local_cache', 'pg_local_cache_test_collect_key' "
-        "LANGUAGE C STRICT",
+        "LANGUAGE C STRICT PARALLEL SAFE",
+        "CREATE OR REPLACE FUNCTION local_cache._test_collect_key(oid, text, text) "
+        "RETURNS void AS '$libdir/pg_local_cache', 'pg_local_cache_test_collect_key' "
+        "LANGUAGE C STRICT PARALLEL SAFE",
         "CREATE OR REPLACE FUNCTION public.pglc_test_partition(oid, text, text) "
         "RETURNS integer AS '$libdir/pg_local_cache', "
         "'pg_local_cache_test_partition' LANGUAGE C STRICT",
@@ -1086,6 +1096,21 @@ def install_test_hook_functions(table: str, namespace: str) -> bool:
         "CREATE OR REPLACE FUNCTION public.pglc_test_key_scan_matches(bytea, text, regtype, integer) "
         "RETURNS boolean AS '$libdir/pg_local_cache', "
         "'pg_local_cache_test_key_scan_matches' LANGUAGE C STRICT",
+        "CREATE OR REPLACE FUNCTION local_cache._test_duplicate_refresh_finish() "
+        "RETURNS void AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_duplicate_refresh_finish' LANGUAGE C",
+        "CREATE OR REPLACE FUNCTION local_cache._test_refresh_capture_fail() "
+        "RETURNS void AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_refresh_capture_fail' LANGUAGE C",
+        "CREATE OR REPLACE FUNCTION local_cache._test_remove_reserved_entry(oid, text, text) "
+        "RETURNS void AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_remove_reserved_entry' LANGUAGE C",
+        "CREATE OR REPLACE FUNCTION local_cache._test_corrupt_refresh_crc(oid, text, text) "
+        "RETURNS void AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_corrupt_refresh_crc' LANGUAGE C",
+        "CREATE OR REPLACE FUNCTION local_cache._test_refresh_xid_boundary(oid, text, text) "
+        "RETURNS void AS '$libdir/pg_local_cache', "
+        "'pg_local_cache_test_refresh_xid_boundary' LANGUAGE C",
     )
     try:
         sql_commands(*definitions)
@@ -1102,7 +1127,9 @@ def install_test_hook_functions(table: str, namespace: str) -> bool:
             raise AssertionError(
                 "CI requires PGLC_TEST_HOOKS, but one or more test C functions are absent"
             ) from error
+        _PGLC_TEST_HOOKS_AVAILABLE = False
         return False
+    _PGLC_TEST_HOOKS_AVAILABLE = True
     return True
 
 
@@ -1112,6 +1139,7 @@ def drop_test_hook_functions() -> None:
         "DROP FUNCTION IF EXISTS public.pglc_test_set_pause(text, regclass)",
         "DROP FUNCTION IF EXISTS public.pglc_test_clear_pause()",
         "DROP FUNCTION IF EXISTS public.pglc_test_collect_key(regclass, text, text)",
+        "DROP FUNCTION IF EXISTS local_cache._test_collect_key(oid, text, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_partition(oid, text, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_hash_bucket(oid, text, text)",
         "DROP FUNCTION IF EXISTS public.pglc_test_cache_bucket_count(oid, text, text)",
@@ -1121,6 +1149,11 @@ def drop_test_hook_functions() -> None:
         "DROP FUNCTION IF EXISTS public.pglc_test_collect_global()",
         "DROP FUNCTION IF EXISTS public.pglc_test_abort_after_reservation()",
         "DROP FUNCTION IF EXISTS public.pglc_test_key_scan_matches(bytea, text, regtype, integer)",
+        "DROP FUNCTION IF EXISTS local_cache._test_duplicate_refresh_finish()",
+        "DROP FUNCTION IF EXISTS local_cache._test_refresh_capture_fail()",
+        "DROP FUNCTION IF EXISTS local_cache._test_remove_reserved_entry(oid, text, text)",
+        "DROP FUNCTION IF EXISTS local_cache._test_corrupt_refresh_crc(oid, text, text)",
+        "DROP FUNCTION IF EXISTS local_cache._test_refresh_xid_boundary(oid, text, text)",
     )
 
 
@@ -1242,6 +1275,28 @@ def _psql_process_output_so_far(process: subprocess.Popen[str]) -> str:
                 break
             captured.extend(chunk)
     return captured.decode(errors="replace")
+
+
+def wait_for_psql_output(
+    process: subprocess.Popen[str], marker: str, *, timeout: float = 10
+) -> str:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        output = _psql_process_output_so_far(process)
+        if marker in output:
+            return output
+        if process.poll() is not None:
+            break
+        time.sleep(0.01)
+    raise AssertionError(
+        warm_hit_diagnostics(
+            {
+                "psql_marker": marker,
+                "psql_returncode": process.poll(),
+                "psql_output": _psql_process_output_so_far(process),
+            }
+        )
+    )
 
 
 def _finish_tracked_psql(process: subprocess.Popen[str]) -> str:
@@ -3074,35 +3129,76 @@ def test_same_key_relation_and_global_fences(
         else:
             mutation = mutation_for(row_id)
 
-        client, response, _before, _after = run_fill_paused_before_store(
+        client, response, before_fence, after_fence = run_fill_paused_before_store(
             table,
             barrier_table,
             crud_key(table, row_id),
             mutation,
             pause_point=pause_point,
         )
-        try:
-            assert response == [row_bytes(row_id, old_value)], (name, response)
-            before_refill = read_cache_stats()
-            expected_value = updated_value if name == "same-key" else old_value
-            assert mget_one(client, crud_key(table, row_id)) == row_bytes(
-                row_id, expected_value
+        snapshots = {
+            "before_fence": before_fence,
+            "after_fence": after_fence,
+        }
+
+        def failure_context() -> dict[str, object]:
+            fields = (
+                "global_dirty_writers",
+                "dirty_marker_entries",
+                "dirty_marker_fallbacks_total",
+                "dirty_key_limit_fallbacks",
+                "relation_state_admission_rejections",
+                "cache_bypass",
+                "refresh_reservations_outstanding",
             )
+            return {
+                "case": name,
+                **{
+                    label: {
+                        "database_reads": stats.get("database_reads"),
+                        "cache_hits": stats.get("cache_hits"),
+                        **{field: stats.get(field) for field in fields},
+                        **{
+                            field: value
+                            for field, value in stats.items()
+                            if field.startswith("refresh_skips_")
+                        },
+                    }
+                    for label, stats in snapshots.items()
+                },
+            }
+
+        try:
+            assert response == [row_bytes(row_id, old_value)], failure_context()
+            before_refill = read_cache_stats()
+            snapshots["before_refill"] = before_refill
+            expected_value = updated_value if name == "same-key" else old_value
+            refill_result = mget_one(client, crud_key(table, row_id))
             after_refill = read_cache_stats()
+            snapshots["after_refill"] = after_refill
+            assert refill_result == row_bytes(
+                row_id, expected_value
+            ), failure_context()
             if expected_extra_read:
                 assert after_refill["database_reads"] >= (
                     before_refill["database_reads"] + expected_extra_read
-                ), name
+                ), failure_context()
             else:
                 assert after_refill["database_reads"] == (
                     before_refill["database_reads"]
-                ), name
-            assert mget_one(client, crud_key(table, row_id)) == row_bytes(
-                row_id, expected_value
-            )
+                ), failure_context()
+            hit_result = mget_one(client, crud_key(table, row_id))
             after_hit = read_cache_stats()
-            assert after_hit["database_reads"] == after_refill["database_reads"]
-            assert after_hit["cache_hits"] >= after_refill["cache_hits"] + 1
+            snapshots["after_hit"] = after_hit
+            assert hit_result == row_bytes(
+                row_id, expected_value
+            ), failure_context()
+            assert after_hit["database_reads"] == after_refill["database_reads"], (
+                failure_context()
+            )
+            assert after_hit["cache_hits"] >= after_refill["cache_hits"] + 1, (
+                failure_context()
+            )
         finally:
             client.close()
 
@@ -3699,6 +3795,8 @@ PAUSE_HOOK_TEST_NAMES = (
     "test_abort_after_dirty_publication",
     "test_relation_incarnation_forget_recreate",
     "test_reload_claim_keeps_truncated_payload_invalid",
+    "test_refresh_two_writer_orders",
+    "test_refresh_fallbacks_and_slots",
 )
 
 
@@ -3730,8 +3828,11 @@ def run_pause_hook_tests(
     table: str,
     namespace: str,
     scoped_table: str,
+    truncate_table: str,
     incarnation_table: str,
     incarnation_namespace: str,
+    refresh_table: str,
+    refresh_namespace: str,
     barrier_table: str,
     second_barrier_table: str,
 ) -> None:
@@ -3802,9 +3903,1401 @@ def run_pause_hook_tests(
                 incarnation_table, incarnation_namespace, barrier_table
             ),
         ),
+        (
+            "test_reload_claim_keeps_truncated_payload_invalid",
+            lambda: test_reload_claim_keeps_truncated_payload_invalid(
+                truncate_table, barrier_table
+            ),
+        ),
+        (
+            "test_refresh_two_writer_orders",
+            lambda: test_refresh_two_writer_orders(
+                refresh_table, refresh_namespace, barrier_table,
+                second_barrier_table,
+            ),
+        ),
+        (
+            "test_refresh_fallbacks_and_slots",
+            lambda: test_refresh_fallbacks_and_slots(
+                refresh_table, refresh_namespace, barrier_table
+            ),
+        ),
     )
     for name, callback in cases:
         run_pause_hook_test(name, callback)
+
+def refresh_row(
+    row_id: int, value: str, *, flag: bool = False, small: int = 1, **extra: object
+) -> dict[str, object]:
+    return {
+        "id": row_id,
+        "flag": flag,
+        "small": small,
+        "value": value,
+        "extra": None,
+        **extra,
+    }
+
+
+def insert_refresh_rows(table: str, rows: list[tuple[int, bool, int, str]]) -> None:
+    values = ", ".join(
+        f"({row_id}, {'true' if flag else 'false'}, {small}, {sql_literal(value)})"
+        for row_id, flag, small, value in rows
+    )
+    sql(
+        f"INSERT INTO public.{sql_identifier(table)} (id, flag, small, value) "
+        f"VALUES {values}"
+    )
+
+
+def refresh_lookup(
+    client: RespConnection,
+    key: str,
+    expected: dict[str, object] | None,
+    *,
+    expected_cache_path: str | None = None,
+) -> None:
+    before = json.loads(client.command("STAT"))
+    response = mget_one(client, key)
+    if expected is None:
+        assert response is None, (key, response)
+    else:
+        assert isinstance(response, bytes), (key, response)
+        actual = json.loads(response)
+        assert actual == expected, (key, actual, expected)
+    after = json.loads(client.command("STAT"))
+    if expected_cache_path == "hit":
+        assert after["cache_hits"] - before["cache_hits"] == 1, (before, after)
+        assert after["cache_misses"] == before["cache_misses"], (before, after)
+        assert after["database_reads"] == before["database_reads"], (before, after)
+    elif expected_cache_path == "miss":
+        assert after["cache_misses"] - before["cache_misses"] == 1, (before, after)
+        assert after["database_reads"] - before["database_reads"] == 1, (before, after)
+    elif expected_cache_path == "negative-hit":
+        assert after["negative_hits"] - before["negative_hits"] == 1, (before, after)
+        assert after["database_reads"] == before["database_reads"], (before, after)
+
+
+def set_refresh_write_mode(table: str, mode: str = "refresh") -> dict[str, object]:
+    result = json.loads(
+        sql(
+            "SELECT local_cache.set_write_mode("
+            f"'public.{sql_identifier(table)}'::regclass, {sql_literal(mode)})::text"
+        )
+    )
+    assert result["write_mode_requested"] == mode, result
+    return result
+
+
+def wait_for_application_pid(application_name: str, *, timeout: float = 10) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pid = sql(
+            "SELECT pid FROM pg_catalog.pg_stat_activity "
+            f"WHERE application_name = {sql_literal(application_name)} "
+            "AND state = 'idle in transaction' LIMIT 1"
+        )
+        if pid:
+            return int(pid)
+        time.sleep(0.01)
+    raise AssertionError(f"writer did not become idle in transaction: {application_name}")
+
+
+def start_writer_commit(process: subprocess.Popen[str]) -> None:
+    write_psql_input(process, "COMMIT;\n")
+    close_psql_input(process)
+
+
+def finish_started_writer(process: subprocess.Popen[str]) -> str:
+    output = _finish_tracked_psql(process)
+    assert process.returncode == 0, warm_hit_diagnostics(
+        {"returncode": process.returncode, "output": output}
+    )
+    return output
+
+
+def test_refresh_basic_semantics(table: str, namespace: str) -> None:
+    mode = set_refresh_write_mode(table)
+    assert mode["write_mode_effective"] == "refresh", mode
+    client = RespConnection()
+    (
+        row_id,
+        miss_id,
+        rollback_id,
+        nested_id,
+        recursive_id,
+        deferred_id,
+        repeated_id,
+        subabort_second_id,
+        insert_delete_id,
+    ) = allocate_test_row_ids(table, 9)
+    recursive_function = f"pglc_refresh_recursive_{os.getpid()}"
+    deferred_function = f"pglc_refresh_deferred_{os.getpid()}"
+    recursive_trigger = f"a_refresh_recursive_t_{os.getpid()}"
+    deferred_trigger = f"pglc_refresh_deferred_t_{os.getpid()}"
+    try:
+        insert_refresh_rows(
+            table,
+            [
+                (row_id, False, 1, "before-hit"),
+                (miss_id, False, 2, "before-miss"),
+                (rollback_id, False, 3, "rollback-base"),
+                (nested_id, False, 4, "nested-base"),
+                (recursive_id, False, 5, "recursive-base"),
+                (deferred_id, False, 6, "deferred-base"),
+                (repeated_id, False, 7, "repeated-base"),
+                (subabort_second_id, False, 8, "second-key-base"),
+            ],
+        )
+        # Start the write-allocation check with exactly the row we warm below
+        # resident; refresh-mode INSERT may itself install captured rows.
+        sql(f"SELECT local_cache.invalidate({sql_literal(namespace)})")
+        hit_key = crud_key(table, row_id)
+        miss_key = crud_key(table, miss_id)
+        assert isinstance(mget_one(client, hit_key), bytes)
+        sql(
+            f"UPDATE public.{sql_identifier(table)} "
+            f"SET flag = true, small = 9, value = 'after-hit' WHERE id = {row_id}"
+        )
+        refresh_lookup(
+            client,
+            hit_key,
+            refresh_row(row_id, "after-hit", flag=True, small=9),
+            expected_cache_path="hit",
+        )
+
+        # Refresh write-allocates a cold key from its captured committed tuple.
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = 'after-miss' "
+            f"WHERE id = {miss_id}"
+        )
+        refresh_lookup(
+            client,
+            miss_key,
+            refresh_row(miss_id, "after-miss", small=2),
+            expected_cache_path="hit",
+        )
+
+        insert_delete_key = crud_key(table, insert_delete_id)
+        sql(f"SELECT local_cache.invalidate({sql_literal(namespace)})")
+        insert_refresh_rows(
+            table, [(insert_delete_id, False, 13, "insert-refresh")]
+        )
+        refresh_lookup(
+            client,
+            insert_delete_key,
+            refresh_row(insert_delete_id, "insert-refresh", small=13),
+            expected_cache_path="hit",
+        )
+        sql(
+            f"DELETE FROM public.{sql_identifier(table)} "
+            f"WHERE id = {insert_delete_id}"
+        )
+        refresh_lookup(
+            client,
+            insert_delete_key,
+            None,
+            expected_cache_path="negative-hit",
+        )
+
+        rollback_key = crud_key(table, rollback_id)
+        assert isinstance(mget_one(client, rollback_key), bytes)
+        rollback_writer = start_idle_writer(
+            table,
+            "rolled-back-refresh",
+            application_name=f"pglc_refresh_abort_{os.getpid()}",
+            row_id=rollback_id,
+        )
+        finish_writer(rollback_writer, commit=False)
+        refresh_lookup(
+            client,
+            rollback_key,
+            refresh_row(rollback_id, "rollback-base", small=3),
+            expected_cache_path="hit",
+        )
+
+        duplicate_key = crud_key(table, rollback_id)
+        sql(
+            "BEGIN; SELECT local_cache._test_duplicate_refresh_finish(); "
+            f"UPDATE public.{sql_identifier(table)} SET value = 'duplicate-finish' "
+            f"WHERE id = {rollback_id}; COMMIT"
+        )
+        refresh_lookup(
+            client,
+            duplicate_key,
+            refresh_row(rollback_id, "duplicate-finish", small=3),
+            expected_cache_path="hit",
+        )
+
+        # Rolled-back subtransactions discard their capture; RELEASE preserves
+        # the surviving child capture through top-level commit.
+        nested_key = crud_key(table, nested_id)
+        subabort_second_key = crud_key(table, subabort_second_id)
+        assert isinstance(mget_one(client, nested_key), bytes)
+        assert isinstance(mget_one(client, subabort_second_key), bytes)
+        sql(
+            f"BEGIN; SAVEPOINT refresh_abort; "
+            f"UPDATE public.{sql_identifier(table)} SET value = 'subabort' "
+            f"WHERE id = {nested_id}; ROLLBACK TO refresh_abort; "
+            "RELEASE refresh_abort; "
+            f"UPDATE public.{sql_identifier(table)} "
+            f"SET value = 'second-key-final' WHERE id = {subabort_second_id}; COMMIT"
+        )
+        refresh_lookup(
+            client,
+            nested_key,
+            refresh_row(nested_id, "nested-base", small=4),
+            expected_cache_path="miss",
+        )
+        refresh_lookup(
+            client,
+            subabort_second_key,
+            refresh_row(subabort_second_id, "second-key-final", small=8),
+            expected_cache_path="miss",
+        )
+        sql(
+            f"BEGIN; SAVEPOINT refresh_release; "
+            f"UPDATE public.{sql_identifier(table)} SET value = 'released-final' "
+            f"WHERE id = {nested_id}; RELEASE refresh_release; COMMIT"
+        )
+        refresh_lookup(
+            client,
+            nested_key,
+            refresh_row(nested_id, "released-final", small=4),
+            expected_cache_path="hit",
+        )
+
+        recursive_key = crud_key(table, recursive_id)
+        assert isinstance(mget_one(client, recursive_key), bytes)
+        sql(
+            f"CREATE FUNCTION public.{sql_identifier(recursive_function)}() "
+            "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+            f"IF NEW.id = {recursive_id} AND NEW.value = 'recursive-outer' THEN "
+            f"UPDATE public.{sql_identifier(table)} SET value = 'recursive-inner' "
+            f"WHERE id = {recursive_id}; END IF; RETURN NEW; END $$; "
+            f"CREATE TRIGGER {sql_identifier(recursive_trigger)} AFTER UPDATE OF value "
+            f"ON public.{sql_identifier(table)} FOR EACH ROW EXECUTE FUNCTION "
+            f"public.{sql_identifier(recursive_function)}()"
+        )
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = 'recursive-outer' "
+            f"WHERE id = {recursive_id}"
+        )
+        refresh_lookup(
+            client,
+            recursive_key,
+            refresh_row(recursive_id, "recursive-inner", small=5),
+            expected_cache_path="miss",
+        )
+
+        deferred_key = crud_key(table, deferred_id)
+        assert isinstance(mget_one(client, deferred_key), bytes)
+        sql(
+            f"CREATE FUNCTION public.{sql_identifier(deferred_function)}() "
+            "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+            f"IF NEW.id = {deferred_id} AND NEW.value = 'deferred-requested' THEN "
+            f"UPDATE public.{sql_identifier(table)} SET value = 'deferred-final' "
+            f"WHERE id = {deferred_id}; END IF; RETURN NULL; END $$; "
+            f"CREATE CONSTRAINT TRIGGER {sql_identifier(deferred_trigger)} "
+            f"AFTER UPDATE ON public.{sql_identifier(table)} "
+            "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION "
+            f"public.{sql_identifier(deferred_function)}()"
+        )
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = 'deferred-requested' "
+            f"WHERE id = {deferred_id}"
+        )
+        refresh_lookup(
+            client,
+            deferred_key,
+            refresh_row(deferred_id, "deferred-final", small=7),
+            expected_cache_path="miss",
+        )
+
+        repeated_key = crud_key(table, repeated_id)
+        assert isinstance(mget_one(client, repeated_key), bytes)
+        sql(
+            f"BEGIN; UPDATE public.{sql_identifier(table)} SET value = 'repeat-v1' "
+            f"WHERE id = {repeated_id}; UPDATE public.{sql_identifier(table)} "
+            f"SET value = 'repeat-v2' WHERE id = {repeated_id}; COMMIT"
+        )
+        refresh_lookup(
+            client,
+            repeated_key,
+            refresh_row(repeated_id, "repeat-v2", small=7),
+            expected_cache_path="miss",
+        )
+
+        # Cross hash-recreate threshold with retained payloads. Under ASan,
+        # reset must free payloads before removing/destroying their HTAB entries.
+        wide_ids = allocate_test_row_ids(table, 257)
+        before_wide = read_cache_stats()
+        insert_refresh_rows(
+            table,
+            [
+                (wide_id, False, 13, f"wide-refresh-{index}")
+                for index, wide_id in enumerate(wide_ids)
+            ],
+        )
+        after_wide = read_cache_stats()
+        assert after_wide["refresh_installs_total"] >= (
+            before_wide["refresh_installs_total"] + len(wide_ids)
+        ), (before_wide, after_wide)
+        assert after_wide["refresh_reservations_outstanding"] == 0, after_wide
+        for offset in range(0, len(wide_ids), 32):
+            batch_ids = wide_ids[offset : offset + 32]
+            responses = client.command(
+                "MGET", *(crud_key(table, wide_id) for wide_id in batch_ids)
+            )
+            assert len(responses) == len(batch_ids)
+            for wide_id, response in zip(batch_ids, responses, strict=True):
+                assert isinstance(response, bytes)
+                assert json.loads(response)["id"] == wide_id
+                assert json.loads(response)["value"] == (
+                    f"wide-refresh-{wide_ids.index(wide_id)}"
+                )
+
+        # Small TOAST succeeds; payload and aggregate raw-row bounds invalidate.
+        (
+            toast_id,
+            payload_oversize_id,
+            raw_below_id,
+            raw_above_id,
+            aggregate_id,
+        ) = allocate_test_row_ids(table, 5)
+        small_toast = "".join(chr(33 + (index * 37) % 90) for index in range(7000))
+        payload_oversize = "".join(
+            chr(33 + (index * 37) % 90) for index in range(9000)
+        )
+        # id/flag/small plus the text varlena header consume 15 bytes, so
+        # these rows land one byte below and one byte above the 64 KiB raw
+        # whole-row boundary before any JSON rendering.
+        raw_below = "l" * 65_520
+        raw_above = "r" * 65_522
+        insert_refresh_rows(
+            table,
+            [
+                (toast_id, False, 8, "toast-base"),
+                (payload_oversize_id, False, 9, "payload-base"),
+                (raw_below_id, False, 10, "raw-below-base"),
+                (raw_above_id, False, 11, "raw-above-base"),
+                (aggregate_id, False, 12, "aggregate-base"),
+            ],
+        )
+        toast_key = crud_key(table, toast_id)
+        payload_oversize_key = crud_key(table, payload_oversize_id)
+        raw_below_key = crud_key(table, raw_below_id)
+        raw_above_key = crud_key(table, raw_above_id)
+        aggregate_key = crud_key(table, aggregate_id)
+        assert isinstance(mget_one(client, toast_key), bytes)
+        assert isinstance(mget_one(client, payload_oversize_key), bytes)
+        assert isinstance(mget_one(client, raw_below_key), bytes)
+        assert isinstance(mget_one(client, raw_above_key), bytes)
+        assert isinstance(mget_one(client, aggregate_key), bytes)
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = {sql_literal(small_toast)} "
+            f"WHERE id = {toast_id}"
+        )
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = "
+            f"{sql_literal(payload_oversize)} WHERE id = {payload_oversize_id}"
+        )
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = "
+            f"{sql_literal(raw_below)} WHERE id = {raw_below_id}"
+        )
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = "
+            f"{sql_literal(raw_above)} WHERE id = {raw_above_id}"
+        )
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = repeat('a', 40000), "
+            f"extra = repeat('b', 30000) WHERE id = {aggregate_id}"
+        )
+        refresh_lookup(
+            client,
+            toast_key,
+            refresh_row(toast_id, small_toast, small=8),
+            expected_cache_path="hit",
+        )
+        refresh_lookup(
+            client,
+            payload_oversize_key,
+            refresh_row(payload_oversize_id, payload_oversize, small=9),
+            expected_cache_path="miss",
+        )
+        refresh_lookup(
+            client,
+            raw_below_key,
+            refresh_row(raw_below_id, raw_below, small=10),
+            expected_cache_path="miss",
+        )
+        refresh_lookup(
+            client,
+            raw_above_key,
+            refresh_row(raw_above_id, raw_above, small=11),
+            expected_cache_path="miss",
+        )
+        refresh_lookup(
+            client,
+            aggregate_key,
+            refresh_row(
+                aggregate_id,
+                "a" * 40_000,
+                small=12,
+                extra="b" * 30_000,
+            ),
+            expected_cache_path="miss",
+        )
+
+        # Many individually refreshable rows exhaust the transaction's 4 MiB
+        # capture budget. Later rows stay invalidated, and retained bytes drain.
+        capture_ids = allocate_test_row_ids(table, 600)
+        insert_refresh_rows(
+            table,
+            [
+                (row_id, False, 12, f"capture-base-{index}")
+                for index, row_id in enumerate(capture_ids)
+            ],
+        )
+        capture_value = "".join(
+            chr(33 + (index * 37) % 90) for index in range(7000)
+        )
+        before_capture_limit = read_cache_stats()
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = "
+            f"{sql_literal(capture_value)} WHERE id BETWEEN "
+            f"{capture_ids[0]} AND {capture_ids[-1]}"
+        )
+        after_capture_limit = read_cache_stats()
+        assert (
+            after_capture_limit["refresh_skips_capture_limit_total"]
+            > before_capture_limit["refresh_skips_capture_limit_total"]
+        ), (before_capture_limit, after_capture_limit)
+        assert after_capture_limit["refresh_capture_bytes_current"] == 0, (
+            after_capture_limit
+        )
+        assert after_capture_limit["refresh_capture_bytes_highwater"] <= 4 * 1024 * 1024, (
+            after_capture_limit
+        )
+        capture_keys = [crud_key(table, row_id) for row_id in capture_ids]
+        for offset in range(0, len(capture_keys), 32):
+            batch_keys = capture_keys[offset:offset + 32]
+            batch_values = client.command("MGET", *batch_keys)
+            assert len(batch_values) == len(batch_keys)
+            for response in batch_values:
+                assert isinstance(response, bytes)
+                assert json.loads(response)["value"] == capture_value
+
+        stats = read_cache_stats()
+        assert int(stats["refresh_capture_bytes_current"]) == 0, stats
+        assert int(stats["refresh_capture_bytes_highwater"]) > 0, stats
+    finally:
+        client.close()
+        sql(
+            f"DROP TRIGGER IF EXISTS {sql_identifier(recursive_trigger)} "
+            f"ON public.{sql_identifier(table)}; "
+            f"DROP TRIGGER IF EXISTS {sql_identifier(deferred_trigger)} "
+            f"ON public.{sql_identifier(table)}; "
+            f"DROP FUNCTION IF EXISTS public.{sql_identifier(recursive_function)}(); "
+            f"DROP FUNCTION IF EXISTS public.{sql_identifier(deferred_function)}()"
+        )
+
+
+def test_refresh_two_writer_orders(
+    table: str,
+    namespace: str,
+    barrier_table: str,
+    second_barrier_table: str,
+) -> None:
+    """Choose both callback orders for two publications of one cache key."""
+    relation = f"public.{sql_identifier(table)}"
+    for iteration, (order, warm_initial) in enumerate(
+        ((("A", "B"), True), (("B", "A"), False)), start=1
+    ):
+        row_id = allocate_test_row_ids(table)[0]
+        insert_refresh_rows(
+            table,
+            [(row_id, False, 20 + iteration, f"order-{iteration}-a0")],
+        )
+        sql(f"SELECT local_cache.invalidate({sql_literal(namespace)})")
+        client = RespConnection(socket_timeout=45)
+        key = crud_key(table, row_id)
+        locker_a: subprocess.Popen[str] | None = None
+        locker_b: subprocess.Popen[str] | None = None
+        writer_a: subprocess.Popen[str] | None = None
+        writer_b: subprocess.Popen[str] | None = None
+        try:
+            if warm_initial:
+                assert isinstance(mget_one(client, key), bytes)
+            before_finishes = read_cache_stats()
+
+            locker_a = start_table_locker(
+                barrier_table,
+                application_name=f"pglc_refresh_barrier_a_{os.getpid()}_{iteration}",
+            )
+            locker_b = start_table_locker(
+                second_barrier_table,
+                application_name=f"pglc_refresh_barrier_b_{os.getpid()}_{iteration}",
+            )
+            name_a = f"pglc_refresh_writer_a_{os.getpid()}_{iteration}"
+            writer_a = start_idle_writer(
+                table,
+                f"order-{iteration}-a1",
+                application_name=name_a,
+                row_id=row_id,
+            )
+            pid_a = wait_for_application_pid(name_a)
+            set_test_pause(
+                "before_refresh_finish", barrier_table, pause_pid=pid_a
+            )
+            start_writer_commit(writer_a)
+            wait_for_blocked_relation_pid(
+                barrier_table,
+                application_name=name_a,
+                psql_process=writer_a,
+                timeout=10,
+            )
+            refresh_lookup(
+                client,
+                key,
+                refresh_row(row_id, f"order-{iteration}-a1", small=20 + iteration),
+                expected_cache_path="miss",
+            )
+
+            name_b = f"pglc_refresh_writer_b_{os.getpid()}_{iteration}"
+            writer_b = start_idle_writer(
+                table,
+                f"order-{iteration}-b1",
+                application_name=name_b,
+                row_id=row_id,
+            )
+            pid_b = wait_for_application_pid(name_b)
+            set_test_pause(
+                "before_refresh_finish", second_barrier_table, pause_pid=pid_b
+            )
+            start_writer_commit(writer_b)
+            wait_for_blocked_relation_pid(
+                second_barrier_table,
+                application_name=name_b,
+                psql_process=writer_b,
+                timeout=10,
+            )
+            refresh_lookup(
+                client,
+                key,
+                refresh_row(row_id, f"order-{iteration}-b1", small=20 + iteration),
+                expected_cache_path="miss",
+            )
+
+            # Both sessions have published the same key. The active R for each
+            # writer keeps the key unservable until both callbacks finish.
+            set_test_pause(None)
+            writers = {"A": writer_a, "B": writer_b}
+            lockers = {"A": locker_a, "B": locker_b}
+            for label in order:
+                locker = lockers[label]
+                assert locker is not None
+                finish_writer(locker, commit=True)
+                lockers[label] = None
+                writer = writers[label]
+                assert writer is not None
+                finish_started_writer(writer)
+                writers[label] = None
+                if label == order[0]:
+                    refresh_lookup(
+                        client,
+                        key,
+                        refresh_row(
+                            row_id, f"order-{iteration}-b1", small=20 + iteration
+                        ),
+                        expected_cache_path="miss",
+                    )
+            locker_a = locker_b = writer_a = writer_b = None
+            after_finishes = read_cache_stats()
+            expected_installs = 1 if order == ("A", "B") else 0
+            assert after_finishes["refresh_installs_total"] == (
+                before_finishes["refresh_installs_total"] + expected_installs
+            ), (before_finishes, after_finishes, order)
+            assert after_finishes["refresh_reservations_outstanding"] == 0, (
+                after_finishes
+            )
+            assert int(
+                sql(
+                    "SELECT public.pglc_test_relation_identity_pins("
+                    f"'{relation}'::regclass, {sql_literal(namespace)})"
+                )
+            ) == 0
+            refresh_lookup(
+                client,
+                key,
+                refresh_row(row_id, f"order-{iteration}-b1", small=20 + iteration),
+                expected_cache_path="hit" if expected_installs else "miss",
+            )
+        finally:
+            set_test_pause(None)
+            for process in (locker_a, locker_b):
+                if process is not None:
+                    finish_writer(process, commit=True)
+            for process in (writer_a, writer_b):
+                terminate_writer(process)
+            client.close()
+
+    # A later same-key transaction that aborts never publishes a newer S.
+    row_id = allocate_test_row_ids(table)[0]
+    insert_refresh_rows(table, [(row_id, False, 39, "abort-order-base")])
+    sql(f"SELECT local_cache.invalidate({sql_literal(namespace)})")
+    client = RespConnection(socket_timeout=45)
+    key = crud_key(table, row_id)
+    locker: subprocess.Popen[str] | None = start_table_locker(
+        barrier_table,
+        application_name=f"pglc_refresh_abort_barrier_{os.getpid()}",
+    )
+    writer_a: subprocess.Popen[str] | None = None
+    writer_b: subprocess.Popen[str] | None = None
+    try:
+        assert isinstance(mget_one(client, key), bytes)
+        writer_a = start_idle_writer(
+            table,
+            "abort-order-a",
+            application_name=f"pglc_refresh_abort_a_{os.getpid()}",
+            row_id=row_id,
+        )
+        pid_a = wait_for_application_pid(f"pglc_refresh_abort_a_{os.getpid()}")
+        set_test_pause("before_refresh_finish", barrier_table, pause_pid=pid_a)
+        start_writer_commit(writer_a)
+        wait_for_blocked_relation_pid(
+            barrier_table,
+            application_name=f"pglc_refresh_abort_a_{os.getpid()}",
+            psql_process=writer_a,
+            timeout=10,
+        )
+        before_aborted_successor = read_cache_stats()
+        set_test_pause("after_publish_abort", barrier_table)
+        successor_command = (
+            "BEGIN; SELECT local_cache._test_collect_key("
+            f"'{relation}'::regclass::oid, {sql_literal(namespace)}, "
+            f"{sql_literal(canonical_int8_key(row_id))}); COMMIT"
+        )
+        successor_result = run_psql(
+            psql_base_args() + ["-c", successor_command],
+            statement=successor_command,
+            timeout=20,
+        )
+        assert successor_result.returncode != 0, successor_result.stdout
+        assert "test abort after dirty publication" in successor_result.stderr
+        refresh_lookup(
+            client,
+            key,
+            refresh_row(row_id, "abort-order-a", small=39),
+            expected_cache_path="miss",
+        )
+        set_test_pause(None)
+        finish_writer(locker, commit=True)
+        locker = None
+        finish_started_writer(writer_a)
+        writer_a = None
+        after_aborted_successor = read_cache_stats()
+        assert after_aborted_successor["refresh_skips_stale_publication_total"] >= (
+            before_aborted_successor["refresh_skips_stale_publication_total"] + 1
+        ), (before_aborted_successor, after_aborted_successor)
+        refresh_lookup(
+            client,
+            key,
+            refresh_row(row_id, "abort-order-a", small=39),
+            expected_cache_path="miss",
+        )
+        drained = read_cache_stats()
+        assert drained["refresh_reservations_outstanding"] == 0, drained
+        assert int(
+            sql(
+                "SELECT public.pglc_test_relation_identity_pins("
+                f"'{relation}'::regclass, {sql_literal(namespace)})"
+            )
+        ) == 0
+    finally:
+        set_test_pause(None)
+        if locker is not None:
+            finish_writer(locker, commit=True)
+        terminate_writer(writer_a)
+        terminate_writer(writer_b)
+        client.close()
+
+
+def test_refresh_fallbacks_and_slots(
+    table: str,
+    namespace: str,
+    barrier_table: str,
+) -> None:
+    relation = f"public.{sql_identifier(table)}"
+    client = RespConnection(socket_timeout=45)
+    try:
+        test_abort_after_dirty_publication(table, namespace, barrier_table)
+
+        # Capture allocation failure and admission exhaustion both degrade to
+        # invalidation. Verify first post-commit observation is a database read.
+        capture_id, admission_id, crc_id, boundary_id, removed_id = (
+            allocate_test_row_ids(table, 5)
+        )
+        insert_refresh_rows(
+            table,
+            [
+                (capture_id, False, 41, "capture-base"),
+                (admission_id, False, 42, "admission-base"),
+                (crc_id, False, 43, "crc-base"),
+                (boundary_id, False, 44, "boundary-base"),
+                (removed_id, False, 45, "removed-base"),
+            ],
+        )
+        ids = (capture_id, admission_id, crc_id, boundary_id, removed_id)
+        for row_id in ids:
+            assert isinstance(mget_one(client, crud_key(table, row_id)), bytes)
+
+        sql(
+            "BEGIN; SELECT local_cache._test_refresh_capture_fail(); "
+            f"UPDATE {relation} SET value = 'capture-failed' WHERE id = {capture_id}; "
+            "COMMIT"
+        )
+        refresh_lookup(
+            client,
+            crud_key(table, capture_id),
+            refresh_row(capture_id, "capture-failed", small=41),
+            expected_cache_path="miss",
+        )
+
+        admission_guc = "pg_local_cache.test_refresh_admission_fail"
+        previous_admission_fail = guc_number(admission_guc)
+        sql(
+            f"BEGIN; SET LOCAL {admission_guc} = 1; "
+            f"UPDATE {relation} SET value = 'admission-failed' "
+            f"WHERE id = {admission_id}; COMMIT"
+        )
+        assert guc_number(admission_guc) == previous_admission_fail
+        refresh_lookup(
+            client,
+            crud_key(table, admission_id),
+            refresh_row(admission_id, "admission-failed", small=42),
+            expected_cache_path="miss",
+        )
+
+        for row_id, label, hook in (
+            (crc_id, "crc-corrupt", "_test_corrupt_refresh_crc"),
+            (boundary_id, "xid-boundary", "_test_refresh_xid_boundary"),
+        ):
+            before_boundary = read_cache_stats() if row_id == boundary_id else None
+            sql(
+                f"BEGIN; UPDATE {relation} SET value = {sql_literal(label)} "
+                f"WHERE id = {row_id}; SELECT local_cache.{hook}("
+                f"'{relation}'::regclass::oid, {sql_literal(namespace)}, "
+                f"{sql_literal(canonical_int8_key(row_id))}); COMMIT"
+            )
+            refresh_lookup(
+                client,
+                crud_key(table, row_id),
+                refresh_row(row_id, label, small=43 if row_id == crc_id else 44),
+                expected_cache_path="miss",
+            )
+            if row_id == boundary_id:
+                after_boundary = read_cache_stats()
+                assert (
+                    after_boundary["refresh_skips_full_xid_boundary_total"]
+                    >= before_boundary["refresh_skips_full_xid_boundary_total"] + 1
+                ), (before_boundary, after_boundary)
+
+        # A no-XID transaction after a real writer may invalidate the key but
+        # must never reuse the previous writer's commit horizon as a candidate.
+        no_xid_id = allocate_test_row_ids(table)[0]
+        insert_refresh_rows(table, [(no_xid_id, False, 46, "no-xid-base")])
+        no_xid_key = crud_key(table, no_xid_id)
+        assert isinstance(mget_one(client, no_xid_key), bytes)
+        no_xid_session = subprocess.Popen(
+            psql_base_args(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={**os.environ, "PGAPPNAME": f"pglc_refresh_no_xid_{os.getpid()}"},
+        )
+        _PSQL_PROCESS_OUTPUT[no_xid_session.pid] = bytearray()
+        write_psql_input(
+            no_xid_session,
+            "SELECT 'writer=' || pg_backend_pid();\n"
+            f"UPDATE {relation} SET value = 'no-xid-writer-final' "
+            f"WHERE id = {no_xid_id};\nSELECT 'writer_committed';\n",
+        )
+        no_xid_prefix = wait_for_psql_output(
+            no_xid_session, "writer_committed"
+        )
+        writer_pid = next(
+            line.removeprefix("writer=")
+            for line in no_xid_prefix.splitlines()
+            if line.startswith("writer=")
+        )
+        refresh_lookup(
+            client,
+            no_xid_key,
+            refresh_row(no_xid_id, "no-xid-writer-final", small=46),
+            expected_cache_path="hit",
+        )
+        write_psql_input(
+            no_xid_session,
+            "BEGIN;\n"
+            "SELECT local_cache._test_collect_key("
+            f"'{relation}'::regclass::oid, {sql_literal(namespace)}, "
+            f"{sql_literal(canonical_int8_key(no_xid_id))});\n"
+            "SELECT 'no_xid=' || pg_backend_pid() || ':' || "
+            "CASE WHEN txid_current_if_assigned() IS NULL "
+            "THEN 'absent' ELSE 'assigned' END;\n"
+            "COMMIT;\n",
+        )
+        close_psql_input(no_xid_session)
+        no_xid_output = _finish_tracked_psql(no_xid_session)
+        assert no_xid_session.returncode == 0, no_xid_output
+        no_xid_row = next(
+            line.removeprefix("no_xid=")
+            for line in no_xid_output.splitlines()
+            if line.startswith("no_xid=")
+        )
+        assert no_xid_row == f"{writer_pid}:absent", no_xid_output
+        refresh_lookup(
+            client,
+            no_xid_key,
+            refresh_row(no_xid_id, "no-xid-writer-final", small=46),
+            expected_cache_path="miss",
+        )
+
+        # Marker overflow broadens publication; neither uncached candidate may
+        # be installed from an incomplete per-key reservation set.
+        partial_one, partial_two = allocate_test_row_ids(table, 2)
+        insert_refresh_rows(
+            table,
+            [
+                (partial_one, False, 47, "partial-one-base"),
+                (partial_two, False, 48, "partial-two-base"),
+            ],
+        )
+        # Keep the two marker reservations cold so partial publication cannot
+        # accidentally pass because INSERT had already write-allocated them.
+        sql(f"SELECT local_cache.invalidate({sql_literal(namespace)})")
+        before_partial = read_cache_stats()
+        set_test_dirty_marker_limit(1)
+        try:
+            sql(
+                f"BEGIN; UPDATE {relation} SET value = 'partial-one-final' "
+                f"WHERE id = {partial_one}; UPDATE {relation} "
+                f"SET value = 'partial-two-final' WHERE id = {partial_two}; COMMIT"
+            )
+        finally:
+            set_test_dirty_marker_limit(None)
+        after_partial = read_cache_stats()
+        assert (
+            after_partial["refresh_installs_total"]
+            == before_partial["refresh_installs_total"]
+        ), (before_partial, after_partial)
+        assert (
+            after_partial["refresh_skips_total"]
+            >= before_partial["refresh_skips_total"] + 2
+        ), (before_partial, after_partial)
+        refresh_lookup(
+            client,
+            crud_key(table, partial_one),
+            refresh_row(partial_one, "partial-one-final", small=47),
+            expected_cache_path="miss",
+        )
+        refresh_lookup(
+            client,
+            crud_key(table, partial_two),
+            refresh_row(partial_two, "partial-two-final", small=48),
+            expected_cache_path="miss",
+        )
+
+        # Invalidate after candidate copy, before final fence validation. Cover
+        # both overwrite of a resident entry and marker-to-entry conversion.
+        fence_id = allocate_test_row_ids(table)[0]
+        insert_refresh_rows(table, [(fence_id, False, 49, "fence-base")])
+        fence_key = crud_key(table, fence_id)
+        assert isinstance(mget_one(client, fence_key), bytes)
+        set_refresh_write_mode(table, "invalidate")
+        marker_id = allocate_test_row_ids(table)[0]
+        try:
+            insert_refresh_rows(
+                table, [(marker_id, False, 50, "marker-fence-base")]
+            )
+            marker_mode = set_refresh_write_mode(table, "refresh")
+            assert marker_mode["write_mode_effective"] == "refresh", marker_mode
+        finally:
+            set_refresh_write_mode(table, "refresh")
+
+        for row_id, label, small, case_name in (
+            (fence_id, "fence-final", 49, "resident"),
+            (marker_id, "marker-fence-final", 50, "marker"),
+        ):
+            writer_name = f"pglc_refresh_postcopy_{case_name}_{os.getpid()}"
+            fence_writer: subprocess.Popen[str] | None = start_idle_writer(
+                table, label, application_name=writer_name, row_id=row_id
+            )
+            locker: subprocess.Popen[str] | None = start_table_locker(
+                barrier_table,
+                application_name=f"pglc_refresh_postcopy_barrier_{case_name}_{os.getpid()}",
+            )
+            try:
+                fence_pid = wait_for_application_pid(writer_name)
+                before_postcopy_fence = read_cache_stats()
+                set_test_pause(
+                    "before_refresh_postcopy_validation",
+                    barrier_table,
+                    pause_pid=fence_pid,
+                )
+                start_writer_commit(fence_writer)
+                wait_for_blocked_relation_pid(
+                    barrier_table,
+                    application_name=writer_name,
+                    psql_process=fence_writer,
+                    timeout=10,
+                )
+                set_test_pause(None)
+                sql(f"SELECT local_cache.invalidate({sql_literal(namespace)})")
+                finish_writer(locker, commit=True)
+                locker = None
+                finish_started_writer(fence_writer)
+                fence_writer = None
+            finally:
+                set_test_pause(None)
+                if locker is not None:
+                    finish_writer(locker, commit=True)
+                terminate_writer(fence_writer)
+            after_postcopy_fence = read_cache_stats()
+            assert after_postcopy_fence["refresh_skips_fence_mismatch_total"] >= (
+                before_postcopy_fence["refresh_skips_fence_mismatch_total"] + 1
+            ), (case_name, before_postcopy_fence, after_postcopy_fence)
+            assert after_postcopy_fence["refresh_reservations_outstanding"] == 0, (
+                case_name,
+                after_postcopy_fence,
+            )
+            assert int(
+                sql(
+                    "SELECT public.pglc_test_relation_identity_pins("
+                    f"'{relation}'::regclass, {sql_literal(namespace)})"
+                )
+            ) == 0
+            refresh_lookup(
+                client,
+                crud_key(table, row_id),
+                refresh_row(row_id, label, small=small),
+                expected_cache_path="miss",
+            )
+
+        # Ordinary admission pressure may evict unrelated entries but must
+        # preserve the dirty reservation until post-commit installation.
+        eviction_count = int(read_cache_stats()["cache_capacity"]) + 64
+        pressure_ids = allocate_test_row_ids(table, eviction_count + 1)
+        eviction_id = pressure_ids[0]
+        pressure_ids = pressure_ids[1:]
+        insert_refresh_rows(
+            table,
+            [
+                (row_id, False, 55, f"pressure-{index}")
+                for index, row_id in enumerate(pressure_ids)
+            ]
+            + [(eviction_id, False, 54, "eviction-base")],
+        )
+        eviction_key = crud_key(table, eviction_id)
+        assert isinstance(mget_one(client, eviction_key), bytes)
+        eviction_locker: subprocess.Popen[str] | None = start_table_locker(
+            barrier_table,
+            application_name=f"pglc_refresh_eviction_barrier_{os.getpid()}",
+        )
+        eviction_writer: subprocess.Popen[str] | None = start_idle_writer(
+            table,
+            "eviction-final",
+            application_name=f"pglc_refresh_eviction_{os.getpid()}",
+            row_id=eviction_id,
+        )
+        try:
+            eviction_pid = wait_for_application_pid(
+                f"pglc_refresh_eviction_{os.getpid()}"
+            )
+            set_test_pause(
+                "before_refresh_install_lock", barrier_table,
+                pause_pid=eviction_pid,
+            )
+            start_writer_commit(eviction_writer)
+            wait_for_blocked_relation_pid(
+                barrier_table,
+                application_name=f"pglc_refresh_eviction_{os.getpid()}",
+                psql_process=eviction_writer,
+                timeout=10,
+            )
+            set_test_pause(None)
+            before_pressure = read_cache_stats()
+            pressure_keys = [crud_key(table, row_id) for row_id in pressure_ids]
+            pressure_values = client.command("MGET", *pressure_keys)
+            assert len(pressure_values) == len(pressure_ids)
+            assert all(isinstance(value, bytes) for value in pressure_values)
+            after_pressure = read_cache_stats()
+            assert after_pressure["evictions"] > before_pressure["evictions"], (
+                before_pressure,
+                after_pressure,
+            )
+            finish_writer(eviction_locker, commit=True)
+            eviction_locker = None
+            finish_started_writer(eviction_writer)
+            eviction_writer = None
+        finally:
+            set_test_pause(None)
+            if eviction_locker is not None:
+                finish_writer(eviction_locker, commit=True)
+            terminate_writer(eviction_writer)
+        refresh_lookup(
+            client,
+            eviction_key,
+            refresh_row(eviction_id, "eviction-final", small=54),
+            expected_cache_path="hit",
+        )
+
+        # Removing the reserved entry while refresh waits at install must not
+        # permit a stale token/slot to be reused for the captured row.
+        remove_locker: subprocess.Popen[str] | None = None
+        remove_writer: subprocess.Popen[str] | None = None
+        remove_id = removed_id
+        remove_key = crud_key(table, remove_id)
+        remove_locker = start_table_locker(
+            barrier_table,
+            application_name=f"pglc_refresh_remove_barrier_{os.getpid()}",
+        )
+        remove_writer = start_idle_writer(
+            table,
+            "reserved-removed-final",
+            application_name=f"pglc_refresh_remove_{os.getpid()}",
+            row_id=remove_id,
+        )
+        remove_pid = wait_for_application_pid(f"pglc_refresh_remove_{os.getpid()}")
+        database_oid = int(
+            sql(
+                "SELECT oid FROM pg_catalog.pg_database "
+                "WHERE datname = current_database()"
+            )
+        )
+        removed_partition = int(
+            sql(
+                "SELECT public.pglc_test_partition("
+                f"{database_oid}, {sql_literal(namespace)}, "
+                f"{sql_literal(canonical_int8_key(remove_id))})"
+            )
+        )
+        reuse_candidates = allocate_test_row_ids(table, 1024)
+        reuse_id = int(
+            sql(
+                "SELECT candidate FROM generate_series("
+                f"{reuse_candidates[0]}, {reuse_candidates[-1]}) AS candidates(candidate) "
+                "WHERE public.pglc_test_partition("
+                f"{database_oid}, {sql_literal(namespace)}, "
+                "length(candidate::text)::text || ':' || candidate::text || ';'"
+                f") = {removed_partition} LIMIT 1"
+            )
+        )
+        insert_refresh_rows(table, [(reuse_id, True, 50, "replacement-slot")])
+        reuse_key = crud_key(table, reuse_id)
+        try:
+            set_test_pause(
+                "before_refresh_install_lock", barrier_table, pause_pid=remove_pid
+            )
+            start_writer_commit(remove_writer)
+            wait_for_blocked_relation_pid(
+                barrier_table,
+                application_name=f"pglc_refresh_remove_{os.getpid()}",
+                psql_process=remove_writer,
+                timeout=10,
+            )
+            set_test_pause(None)
+            sql(
+                "SELECT local_cache._test_remove_reserved_entry("
+                f"'{relation}'::regclass::oid, {sql_literal(namespace)}, "
+                f"{sql_literal(canonical_int8_key(remove_id))})"
+            )
+            # Same-partition miss reuses the just-freed cache slot while the
+            # old refresh candidate is still pending installation.
+            refresh_lookup(
+                client,
+                reuse_key,
+                refresh_row(reuse_id, "replacement-slot", flag=True, small=50),
+                expected_cache_path="miss",
+            )
+            refresh_lookup(
+                client,
+                reuse_key,
+                refresh_row(reuse_id, "replacement-slot", flag=True, small=50),
+                expected_cache_path="hit",
+            )
+            finish_writer(remove_locker, commit=True)
+            remove_locker = None
+            finish_started_writer(remove_writer)
+            remove_writer = None
+        finally:
+            set_test_pause(None)
+            if remove_locker is not None:
+                finish_writer(remove_locker, commit=True)
+            terminate_writer(remove_writer)
+        refresh_lookup(
+            client,
+            remove_key,
+            refresh_row(remove_id, "reserved-removed-final", small=45),
+            expected_cache_path="miss",
+        )
+        refresh_lookup(
+            client,
+            reuse_key,
+            refresh_row(reuse_id, "replacement-slot", flag=True, small=50),
+            expected_cache_path="miss",
+        )
+        final_stats = read_cache_stats()
+        assert final_stats["cache_bypass"] == 1, final_stats
+        assert final_stats["refresh_reservations_outstanding"] == 0, final_stats
+        assert int(
+            sql(
+                "SELECT public.pglc_test_relation_identity_pins("
+                f"'{relation}'::regclass, {sql_literal(namespace)})"
+            )
+        ) == 0
+    finally:
+        set_test_pause(None)
+        set_test_dirty_marker_limit(None)
+        client.close()
+
+
+def test_refresh_identity_and_ddl(table: str, namespace: str) -> None:
+    client = RespConnection()
+    child_table = f"pglc_refresh_child_{os.getpid()}"
+    (
+        source_id,
+        moved_id,
+        truncate_id,
+        truncate_cascade_id,
+        reuse_source,
+        reuse_moved,
+    ) = allocate_test_row_ids(table, 6)
+    try:
+        insert_refresh_rows(
+            table,
+            [
+                (source_id, False, 51, "pk-source"),
+                (truncate_id, False, 52, "truncate-source"),
+                (truncate_cascade_id, False, 53, "truncate-cascade-source"),
+                (reuse_source, False, 54, "reuse-source"),
+            ],
+        )
+        old_key = crud_key(table, source_id)
+        moved_key = crud_key(table, moved_id)
+        assert isinstance(mget_one(client, old_key), bytes)
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET id = {moved_id}, "
+            f"value = 'pk-moved' WHERE id = {source_id}"
+        )
+        refresh_lookup(client, old_key, None, expected_cache_path="negative-hit")
+        refresh_lookup(
+            client,
+            moved_key,
+            refresh_row(moved_id, "pk-moved", small=51),
+            expected_cache_path="hit",
+        )
+        insert_refresh_rows(table, [(source_id, True, 53, "pk-reused")])
+        refresh_lookup(
+            client,
+            old_key,
+            refresh_row(source_id, "pk-reused", flag=True, small=53),
+        )
+
+        # Reusing both keys during a key move poisons both candidates.
+        reuse_source_key = crud_key(table, reuse_source)
+        reuse_moved_key = crud_key(table, reuse_moved)
+        assert isinstance(mget_one(client, reuse_source_key), bytes)
+        sql(
+            f"BEGIN; UPDATE public.{sql_identifier(table)} SET id = {reuse_moved}, "
+            f"value = 'reuse-moved' WHERE id = {reuse_source}; "
+            f"UPDATE public.{sql_identifier(table)} SET id = {reuse_source}, "
+            f"value = 'reuse-final' WHERE id = {reuse_moved}; COMMIT"
+        )
+        refresh_lookup(
+            client,
+            reuse_source_key,
+            refresh_row(reuse_source, "reuse-final", small=54),
+            expected_cache_path="miss",
+        )
+        refresh_lookup(
+            client,
+            reuse_moved_key,
+            None,
+            expected_cache_path="miss",
+        )
+
+        # Detach/forget after a captured update, then remap the relation.
+        assert isinstance(mget_one(client, moved_key), bytes)
+        sql(
+            f"BEGIN; UPDATE public.{sql_identifier(table)} SET value = 'remapped' "
+            f"WHERE id = {moved_id}; "
+            f"SELECT local_cache.detach_table('{table}'::regclass); COMMIT; "
+            f"SELECT local_cache.attach_table('{table}'::regclass, true, "
+            f"{sql_literal(namespace)}); "
+            f"SELECT local_cache.set_write_mode('{table}'::regclass, 'refresh')"
+        )
+        refresh_lookup(
+            client,
+            moved_key,
+            refresh_row(moved_id, "remapped", small=51),
+            expected_cache_path="miss",
+        )
+
+        # A configuration change and restoration cannot resurrect a candidate.
+        assert isinstance(mget_one(client, moved_key), bytes)
+        sql(
+            f"BEGIN; UPDATE public.{sql_identifier(table)} "
+            f"SET value = 'config-final' WHERE id = {moved_id}; "
+            f"SELECT local_cache.set_write_mode('{table}'::regclass, 'invalidate'); "
+            f"SELECT local_cache.set_write_mode('{table}'::regclass, 'refresh'); "
+            "COMMIT"
+        )
+        refresh_lookup(
+            client,
+            moved_key,
+            refresh_row(moved_id, "config-final", small=51),
+            expected_cache_path="miss",
+        )
+
+        # Unsupported descriptor mode reports invalidate; restore it and
+        # confirm a supported write can refresh again.
+        set_refresh_write_mode(table, "invalidate")
+        sql(
+            f"ALTER TABLE public.{sql_identifier(table)} ADD COLUMN payload jsonb"
+        )
+        unsupported = set_refresh_write_mode(table, "refresh")
+        assert unsupported["write_mode_effective"] == "invalidate", unsupported
+        payload_key = crud_key(table, moved_id)
+        response = mget_one(client, payload_key)
+        assert isinstance(response, bytes)
+        payload_row = json.loads(response)
+        assert payload_row["value"] == "config-final" and payload_row["payload"] is None
+        sql(f"ALTER TABLE public.{sql_identifier(table)} DROP COLUMN payload")
+        restored = set_refresh_write_mode(table, "refresh")
+        assert restored["write_mode_effective"] == "refresh", restored
+        sql(
+            f"UPDATE public.{sql_identifier(table)} SET value = 'descriptor-restored' "
+            f"WHERE id = {moved_id}"
+        )
+        refresh_lookup(
+            client,
+            payload_key,
+            refresh_row(moved_id, "descriptor-restored", small=51),
+            expected_cache_path="hit",
+        )
+
+        truncate_key = crud_key(table, truncate_id)
+        assert isinstance(mget_one(client, truncate_key), bytes)
+        sql(
+            f"BEGIN; UPDATE public.{sql_identifier(table)} "
+            f"SET value = 'truncate-updated' WHERE id = {truncate_id}; "
+            f"TRUNCATE public.{sql_identifier(table)}; COMMIT"
+        )
+        refresh_lookup(
+            client,
+            truncate_key,
+            None,
+            expected_cache_path="miss",
+        )
+
+        insert_refresh_rows(
+            table,
+            [(truncate_cascade_id, False, 53, "truncate-cascade-source")],
+        )
+        truncate_cascade_key = crud_key(table, truncate_cascade_id)
+        assert isinstance(mget_one(client, truncate_cascade_key), bytes)
+        sql(
+            f"CREATE TABLE public.{sql_identifier(child_table)} ("
+            f"id bigint PRIMARY KEY, parent_id bigint NOT NULL REFERENCES "
+            f"public.{sql_identifier(table)}(id)); "
+            f"INSERT INTO public.{sql_identifier(child_table)} "
+            f"VALUES (1, {truncate_cascade_id})"
+        )
+        sql(
+            f"BEGIN; UPDATE public.{sql_identifier(table)} "
+            f"SET value = 'truncate-cascade-updated' "
+            f"WHERE id = {truncate_cascade_id}; "
+            f"TRUNCATE public.{sql_identifier(table)} CASCADE; COMMIT"
+        )
+        refresh_lookup(
+            client,
+            truncate_cascade_key,
+            None,
+            expected_cache_path="miss",
+        )
+    finally:
+        client.close()
+        sql(
+            f"DROP TABLE IF EXISTS public.{sql_identifier(child_table)} CASCADE"
+        )
+
+
+def test_refresh_no_xid_parallel_and_prepare(
+    table: str, namespace: str
+) -> None:
+    client = RespConnection()
+    row_id = allocate_test_row_ids(table)[0]
+    relation = f"public.{sql_identifier(table)}"
+    key = crud_key(table, row_id)
+    try:
+        insert_refresh_rows(table, [(row_id, False, 61, "parallel-base")])
+        assert isinstance(mget_one(client, key), bytes)
+        parallel_guc = (
+            "debug_parallel_query"
+            if sql(
+                "SELECT current_setting('debug_parallel_query', true) "
+                "IS NOT NULL"
+            )
+            == "t"
+            else "force_parallel_mode"
+        )
+        command = (
+            f"BEGIN; SET LOCAL {parallel_guc} = on; "
+            "SET LOCAL max_parallel_workers_per_gather = 4; "
+            "SET LOCAL parallel_setup_cost = 0; SET LOCAL parallel_tuple_cost = 0; "
+            "SET LOCAL min_parallel_table_scan_size = 0; "
+            "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) "
+            "SELECT count(*) FROM generate_series(1, 100000) AS g(i) "
+            "WHERE local_cache._test_collect_key("
+            f"'{relation}'::regclass::oid, {sql_literal(namespace)}, "
+            f"{sql_literal(canonical_int8_key(row_id))}) IS NULL; COMMIT"
+        )
+        plan = sql(command)
+        assert "Gather" in plan or "Parallel" in plan, plan
+        refresh_lookup(
+            client,
+            key,
+            refresh_row(row_id, "parallel-base", small=61),
+            expected_cache_path="hit",
+        )
+
+        # Refresh remains incompatible with prepared transactions because the
+        # deferred finish/install contract requires a normal top-level commit.
+        prepare_command = (
+            f"BEGIN; UPDATE {relation} SET value = 'prepared-refresh' "
+            f"WHERE id = {row_id}; PREPARE TRANSACTION "
+            f"{sql_literal(f'pglc_refresh_{os.getpid()}')};"
+        )
+        result = run_psql(
+            psql_base_args() + ["-c", prepare_command],
+            statement=prepare_command,
+            timeout=20,
+        )
+        output = result.stdout + result.stderr
+        assert result.returncode != 0, output
+        assert "PREPARE TRANSACTION is not supported" in output, output
+        refresh_lookup(
+            client,
+            key,
+            refresh_row(row_id, "parallel-base", small=61),
+            expected_cache_path="hit",
+        )
+    finally:
+        client.close()
 
 
 def main() -> None:
@@ -3814,19 +5307,21 @@ def main() -> None:
     scoped_table = f"s{suffix}"
     incarnation_table = f"i{suffix}"
     truncate_table = f"t{suffix}"
+    refresh_table = f"r{suffix}"
     barrier_table = f"b{suffix}"
     second_barrier_table = f"q{suffix}"
     mapping_namespace = f"pipeline{suffix}"
     composite_namespace = f"pipelinec{suffix}"
     scoped_namespace = f"pipelines{suffix}"
     incarnation_namespace = f"pipelinei{suffix}"
+    refresh_namespace = f"pipeliner{suffix}"
     granted_roles = list(dict.fromkeys(filter(None, (WORKER_ROLE, WRITER_ROLE))))
     grant = "".join(
         f"GRANT USAGE ON SCHEMA public TO {sql_identifier(role)};"
         f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
         f"public.{table}, public.{composite_table}, public.{scoped_table}, "
         f"public.{incarnation_table}, "
-        f"public.{truncate_table} "
+        f"public.{truncate_table}, public.{refresh_table} "
         f"TO {sql_identifier(role)};"
         f"GRANT UPDATE ON TABLE public.{barrier_table}, "
         f"public.{second_barrier_table} TO {sql_identifier(role)};"
@@ -3855,6 +5350,9 @@ def main() -> None:
         f"CREATE TABLE public.{truncate_table} "
         "(id bigint PRIMARY KEY, value text NOT NULL);"
         f"INSERT INTO public.{truncate_table} VALUES (1, 'before-truncate');"
+        f"CREATE TABLE public.{refresh_table} ("
+        "id bigint PRIMARY KEY, flag boolean NOT NULL, small smallint NOT NULL, "
+        "value text NOT NULL, extra text);"
         f"CREATE TABLE public.{barrier_table} (id integer PRIMARY KEY);"
         f"CREATE TABLE public.{second_barrier_table} (id integer PRIMARY KEY);"
         f"INSERT INTO public.{barrier_table} VALUES (1);"
@@ -3871,6 +5369,8 @@ def main() -> None:
         f"'public.{incarnation_table}'::regclass, true, '{incarnation_namespace}');"
         f"SELECT local_cache.attach_table("
         f"'public.{truncate_table}'::regclass, true, 'pipelinet{suffix}')"
+        f"; SELECT local_cache.attach_table("
+        f"'public.{refresh_table}'::regclass, true, '{refresh_namespace}')"
     )
     hooks_available = install_test_hook_functions(
         incarnation_table, incarnation_namespace
@@ -3921,6 +5421,25 @@ def main() -> None:
                     "test_reload_claim_keeps_truncated_payload_invalid"
                 )
             print("pipeline multi-worker integration passed")
+        elif os.environ.get("PGLC_REFRESH_ONLY") == "1":
+            if not hooks_available:
+                raise AssertionError("W7 refresh integration requires PGLC_TEST_HOOKS")
+            test_refresh_basic_semantics(refresh_table, refresh_namespace)
+            test_refresh_two_writer_orders(
+                refresh_table,
+                refresh_namespace,
+                barrier_table,
+                second_barrier_table,
+            )
+            test_refresh_no_xid_parallel_and_prepare(
+                refresh_table, refresh_namespace
+            )
+            test_refresh_identity_and_ddl(refresh_table, refresh_namespace)
+            test_refresh_fallbacks_and_slots(
+                refresh_table, refresh_namespace, barrier_table
+            )
+            print("pipeline refresh integration passed: callbacks, subtransactions, "
+                  "fallbacks, capacity, descriptor/remap and identity fences")
         else:
             print(
                 "SKIP multi-worker pipeline cases (requires four workers): "
@@ -4024,11 +5543,15 @@ def main() -> None:
             f"SELECT local_cache.detach_table(to_regclass("
             f"'public.{truncate_table}')) "
             f"WHERE to_regclass('public.{truncate_table}') IS NOT NULL;"
+            f"SELECT local_cache.detach_table(to_regclass("
+            f"'public.{refresh_table}')) "
+            f"WHERE to_regclass('public.{refresh_table}') IS NOT NULL;"
             f"DROP TABLE IF EXISTS public.{table};"
             f"DROP TABLE IF EXISTS public.{composite_table};"
             f"DROP TABLE IF EXISTS public.{scoped_table};"
             f"DROP TABLE IF EXISTS public.{incarnation_table};"
             f"DROP TABLE IF EXISTS public.{truncate_table};"
+            f"DROP TABLE IF EXISTS public.{refresh_table};"
             f"DROP TABLE IF EXISTS public.{barrier_table};"
             f"DROP TABLE IF EXISTS public.{second_barrier_table}"
         )

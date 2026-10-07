@@ -141,6 +141,7 @@ pglc_arena_init(PglcArena *arena, void *memory, PglcArenaPage *pages,
 	arena->pages = pages;
 	arena->page_count = page_count;
 	arena->first_unassigned_page = 0;
+	memset(arena->class_scan_cursor, 0, sizeof(arena->class_scan_cursor));
 	arena->used_bytes = 0;
 	arena->class_slack_bytes = 0;
 	arena->assigned_bytes = 0;
@@ -187,6 +188,46 @@ assign_page(PglcArena *arena, uint32_t page_no, uint8_t class_index)
 		memcpy(arena->memory + ref, &next, sizeof(next));
 	}
 	arena->assigned_bytes += PGLC_ARENA_PAGE_SIZE;
+	return true;
+}
+
+static bool
+arena_allocate_on_page(PglcArena *arena, uint32_t page_no,
+					   uint32_t request_size, uint32_t block_size,
+					   uint32_t *block_ref, uint32_t *class_size)
+{
+	PglcArenaPage *page = &arena->pages[page_no];
+	uint32_t	next;
+	uint32_t	free_page;
+	uint32_t	free_size;
+	uint32_t	block_no;
+
+	if (block_size > arena->assigned_bytes ||
+		arena->used_bytes + arena->class_slack_bytes >
+		arena->assigned_bytes - block_size)
+		return false;
+	*block_ref = page->free_head;
+	if (!block_info(arena, *block_ref, false, &free_page, &free_size, NULL) ||
+		free_page != page_no || free_size != block_size)
+		return false;
+	memcpy(&next, arena->memory + *block_ref, sizeof(next));
+	if (next != PGLC_ARENA_NO_BLOCK &&
+		(!block_info(arena, next, false, &free_page, &free_size, NULL) ||
+		 free_page != page_no || free_size != block_size))
+		return false;
+	block_no = (*block_ref % PGLC_ARENA_PAGE_SIZE) / block_size;
+	{
+		uint8_t		mask = (uint8_t) (1U << (block_no % 8U));
+
+		if ((page->allocated[block_no / 8U] & mask) != 0)
+			return false;
+		page->allocated[block_no / 8U] |= mask;
+	}
+	page->free_head = next;
+	page->live_count++;
+	arena->used_bytes += request_size;
+	arena->class_slack_bytes += block_size - request_size;
+	*class_size = block_size;
 	return true;
 }
 
@@ -240,42 +281,73 @@ pglc_arena_alloc(PglcArena *arena, uint32_t request_size,
 		if (!assign_page(arena, page_no, class_index))
 			return false;
 	}
+	return arena_allocate_on_page(arena, page_no, request_size, block_size,
+								  block_ref, class_size);
+}
+
+bool
+pglc_arena_alloc_limited(PglcArena *arena, uint32_t request_size,
+						 uint32_t *block_ref, uint32_t *class_size,
+						 uint32_t max_pages)
+{
+	uint32_t	block_size = pglc_arena_class_size(request_size);
+	uint32_t	page_count;
+	uint32_t	start;
+	uint32_t	page_offset;
+	uint32_t	class_index = 0;
+	uint32_t	page_no = UINT32_MAX;
+
+	if (!arena_counters_valid(arena) || block_size == 0 ||
+		block_ref == NULL || class_size == NULL || max_pages == 0)
+		return false;
+	while (class_index < PGLC_ARENA_CLASS_COUNT &&
+		   (PGLC_ARENA_MIN_BLOCK << class_index) != block_size)
+		class_index++;
+	if (class_index >= PGLC_ARENA_CLASS_COUNT)
+		return false;
+	page_count = arena->page_count < max_pages ? arena->page_count : max_pages;
+	start = arena->class_scan_cursor[class_index] % arena->page_count;
+	for (page_offset = 0; page_offset < page_count; page_offset++)
 	{
-		PglcArenaPage *page = &arena->pages[page_no];
-		uint32_t	next;
-		uint32_t	free_page;
-		uint32_t	free_size;
-		uint32_t	block_no;
+		uint32_t	candidate = (start + page_offset) % arena->page_count;
+		PglcArenaPage *page = &arena->pages[candidate];
+		uint32_t	page_size;
 
-		if (block_size > arena->assigned_bytes ||
-			arena->used_bytes + arena->class_slack_bytes >
-			arena->assigned_bytes - block_size)
-			return false;
-
-		*block_ref = page->free_head;
-		if (!block_info(arena, *block_ref, false, &free_page, &free_size, NULL) ||
-			free_page != page_no || free_size != block_size)
-			return false;
-		memcpy(&next, arena->memory + *block_ref, sizeof(next));
-		if (next != PGLC_ARENA_NO_BLOCK &&
-			(!block_info(arena, next, false, &free_page, &free_size, NULL) ||
-			 free_page != page_no || free_size != block_size))
-			return false;
-		block_no = (*block_ref % PGLC_ARENA_PAGE_SIZE) / block_size;
+		if (page->class_index == class_index + 1 &&
+			page_shape_valid(page, &page_size) &&
+			free_head_valid(arena, candidate, page, page_size) &&
+			page->free_head != PGLC_ARENA_NO_BLOCK)
 		{
-			uint8_t		mask = (uint8_t) (1U << (block_no % 8U));
-
-			if ((page->allocated[block_no / 8U] & mask) != 0)
-				return false;
-			page->allocated[block_no / 8U] |= mask;
+			page_no = candidate;
+			break;
 		}
-		page->free_head = next;
-		page->live_count++;
 	}
-	arena->used_bytes += request_size;
-	arena->class_slack_bytes += block_size - request_size;
-	*class_size = block_size;
-	return true;
+	if (page_no == UINT32_MAX)
+	{
+		uint32_t	unassigned = arena->first_unassigned_page;
+
+		for (page_offset = 0; page_offset < page_count; page_offset++)
+		{
+			uint32_t	candidate = (unassigned + page_offset) % arena->page_count;
+
+			if (arena->pages[candidate].class_index == 0 &&
+				arena->pages[candidate].block_count == 0 &&
+				arena->pages[candidate].live_count == 0 &&
+				arena->pages[candidate].free_head == PGLC_ARENA_NO_BLOCK)
+			{
+				page_no = candidate;
+				break;
+			}
+		}
+		if (page_no == UINT32_MAX || !assign_page(arena, page_no, class_index))
+			return false;
+		if (page_no == arena->first_unassigned_page)
+			arena->first_unassigned_page = (page_no + 1) % arena->page_count;
+	}
+	arena->class_scan_cursor[class_index] =
+		(page_no + 1) % arena->page_count;
+	return arena_allocate_on_page(arena, page_no, request_size, block_size,
+								  block_ref, class_size);
 }
 
 bool

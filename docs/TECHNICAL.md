@@ -61,6 +61,32 @@ Mapped-table row and statement triggers collect deduplicated dirty keys or a rel
 
 RESP source reads use `pg_local_cache.role` in short transactions independent of the caller's SQL transaction.
 
+### Write modes
+
+Each mapping stores a requested `write_mode`. It defaults to `invalidate`, which keeps the existing behavior. A superuser can change it with `SELECT local_cache.set_write_mode('schema.table', 'refresh')`; the function returns the mapping JSON. It rejects unknown modes and rejects `refresh` for read-only mappings. Attach and reconcile preserve a mapping's selected mode.
+
+`refresh` asks row triggers to capture complete JSON whole-row values for `INSERT` and `UPDATE`, or a negative/tombstone candidate for `DELETE`, then publish only at ordinary commit when the transaction fence and reservation identity still allow it. It is effective only when every non-dropped row column uses `bool`, `int2`, `int4`, `int8`, `text`, or `varchar`. Unsupported row shapes keep the requested mode but use effective `invalidate`. Mapping JSON reports `write_mode_requested` and `write_mode_effective`. The `3.1.0--3.2.0` upgrade script adds the mapping mode and updates existing trigger functions.
+
+Refresh always falls back to invalidation when capture or admission limits are reached, a key is updated more than once, or capture ownership, descriptor, CRC, publication sequence, reservation, or fence validation fails. Subtransaction abort, relation/global invalidation, TRUNCATE, forget/remap, config or descriptor changes, `PREPARE TRANSACTION`, parallel-worker execution, and no-XID paths disable refresh for affected candidates. A primary-key change publishes a negative candidate for the old key and a value for the new key; either candidate is invalidated if that key is reused in the same transaction. Eviction never removes dirty reservations. A slot-identity violation skips installation and sets `cache_bypass` until the cache is reset.
+
+Capture is bounded to 4,096 keys, 8 KiB per complete payload including metadata and CRC, 64 KiB of aggregate raw row input before detoasting, 4 MiB per transaction including keys and record overhead, and 128 KiB of reusable render/detoast scratch. Commit installation does no allocation from PostgreSQL memory contexts, catalog work, rendering, or unbounded search. It examines at most 64 eviction candidates per admission; unavailable capacity leaves the key invalidated.
+
+`local_cache.stats()` exposes refresh activity as flat JSON keys. `refresh_captures_total` and `refresh_installs_total` count captured candidates and installed rows. `refresh_skips_total` counts skip events, including candidate skips and transaction-wide fallbacks. `refresh_reservations_outstanding`, `refresh_capture_bytes_current`, and `refresh_capture_bytes_highwater` report outstanding reservations and transaction capture-memory use; `cache_bypass` reports the fail-closed cache state.
+
+The reason counters are `refresh_skips_subtransaction_abort_total`,
+`refresh_skips_broad_invalidation_total`,
+`refresh_skips_descriptor_change_total`, `refresh_skips_prepare_total`,
+`refresh_skips_parallel_worker_total`, `refresh_skips_no_xid_total`,
+`refresh_skips_repeated_key_total`, `refresh_skips_capture_limit_total`,
+`refresh_skips_capture_storage_total`,
+`refresh_skips_publication_fallback_total`, `refresh_skips_owner_mismatch_total`,
+`refresh_skips_stale_publication_total`, `refresh_skips_fence_mismatch_total`,
+`refresh_skips_dirty_competitor_total`, `refresh_skips_admission_total`,
+`refresh_skips_identity_mismatch_total`, and `refresh_skips_crc_total`.
+The `refresh_skips_full_xid_boundary_total` counter reports unsafe XID horizons.
+Reason counters aggregate causes and need not sum to `refresh_skips_total`.
+
+
 ## Memory sizing and settings {#shared-memory-and-configuration}
 
 The extension preallocates bounded shared cache, mapping, and worker/client state at PostgreSQL startup. `memory_budget_mb` limits the deterministic extension allocation. Admission failures and eviction do not allocate beyond configured capacity; reads fall back to PostgreSQL.
@@ -156,6 +182,9 @@ Metrics include cache hits, misses and negative hits; source reads and writes; i
 
 TLS counters `tls_handshakes_total` and `tls_handshake_failures_total` are
 exposed in `stats()` and `metrics()`.
+
+Write-refresh counters and capture-memory gauges are exposed in the JSON
+returned by `stats()`; the typed `metrics()` row retains its existing columns.
 
 Database reads, invalidations, admission rejection, dirty-key fallback,
 singleflight, worker, and RESP counters remain available. New `stats()` fields

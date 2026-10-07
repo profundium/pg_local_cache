@@ -78,6 +78,7 @@ verify-static:
 source-test:
 	$(MAKE) -C tests/unit check
 	python3 -m unittest -v tests/bump_version_test.py
+	python3 -m unittest -v tests/worker_mapping_contract_test.py
 
 source-sanitize:
 	$(MAKE) -C tests/unit sanitize

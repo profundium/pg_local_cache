@@ -4,6 +4,21 @@ All notable changes to pg_local_cache are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [3.2.0] - 2026-10-07
+
+### Added
+
+- Per-mapping write modes, with `invalidate` as the default and a superuser-only
+  `local_cache.set_write_mode(regclass, text)` API for selecting `refresh`.
+- A `3.1.0--3.2.0` upgrade script that adds the mode and updates installed
+  trigger functions.
+- Safe row refresh for supported whole-row types, with invalidation fallback
+  for unsupported shapes or refresh publication skips.
+- Refresh capture, installation, skip-reason, reservation, and capture-memory
+  fields in `local_cache.stats()` JSON.
+
 ## [3.1.0] - 2026-10-05
 
 ### Added

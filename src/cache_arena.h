@@ -26,6 +26,7 @@ typedef struct PglcArena
 	PglcArenaPage *pages;
 	uint32_t	page_count;
 	uint32_t	first_unassigned_page;
+	uint32_t	class_scan_cursor[PGLC_ARENA_CLASS_COUNT];
 	uint64_t	used_bytes;
 	uint64_t	class_slack_bytes;
 	uint64_t	assigned_bytes;
@@ -36,6 +37,9 @@ bool pglc_arena_init(PglcArena *arena, void *memory, PglcArenaPage *pages,
 					 uint32_t page_count);
 bool pglc_arena_alloc(PglcArena *arena, uint32_t request_size,
 					  uint32_t *block_ref, uint32_t *class_size);
+bool pglc_arena_alloc_limited(PglcArena *arena, uint32_t request_size,
+							  uint32_t *block_ref, uint32_t *class_size,
+							  uint32_t max_pages);
 bool pglc_arena_free(PglcArena *arena, uint32_t block_ref,
 					 uint32_t request_size);
 bool pglc_arena_resize(PglcArena *arena, uint32_t block_ref,
