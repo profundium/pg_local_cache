@@ -138,7 +138,11 @@ export PGLC_TEST_HOOKS_REQUIRED=1
 for integration in whole_row_integration pipeline_integration \
     memory_integration oom_monitoring_integration; do
     echo "==> $integration"
-    python3 "$repo/tests/$integration.py"
+    if [[ "$integration" == pipeline_integration ]]; then
+        PGLC_SKIP_PAUSE_HOOK_TESTS=1 python3 "$repo/tests/$integration.py"
+    else
+        python3 "$repo/tests/$integration.py"
+    fi
 done
 
 # Verify compact-entry capacity with a sized arena and a full 200k-row pass.
@@ -170,6 +174,8 @@ sed -i 's/pg_local_cache.lock_timeout_ms = 3000/pg_local_cache.lock_timeout_ms =
 sed -i 's/pg_local_cache.singleflight_wait_ms = 25/pg_local_cache.singleflight_wait_ms = 1000/' \
     /etc/postgresql/"$PG"/ci/pglc.conf
 pg_ctlcluster "$PG" ci restart
+echo "==> pipeline pause-hook fence/race cases with long MGET deadline"
+PGLC_PAUSE_HOOKS_ONLY=1 python3 "$repo/tests/pipeline_integration.py"
 echo "==> pipeline multi-worker cases with four workers"
 PGLC_MULTI_WORKER_ONLY=1 python3 "$repo/tests/pipeline_integration.py"
 sed -i 's/pg_local_cache.memory_budget_mb = 128/pg_local_cache.memory_budget_mb = 64/' \

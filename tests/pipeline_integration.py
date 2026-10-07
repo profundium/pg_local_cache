@@ -886,16 +886,46 @@ def wait_for_blocked_worker_pid(table: str, *, timeout: float = 6) -> int:
     return wait_for_blocked_relation_pid(table, timeout=timeout)
 
 
+_TEST_PAUSE_STARTED_AT: float | None = None
+_TEST_PAUSE_POINTS: list[str] = []
+_TEST_PAUSE_BEFORE_STATS: dict[str, object] | None = None
+_TEST_PAUSE_RECORDS: list[dict[str, object]] = []
+
+
 def set_test_pause(point: str | None, barrier_table: str | None = None) -> None:
+    global _TEST_PAUSE_STARTED_AT, _TEST_PAUSE_POINTS, _TEST_PAUSE_BEFORE_STATS
     if point is None:
         sql_commands(
             "ALTER SYSTEM RESET pg_local_cache.test_pause_point",
             "ALTER SYSTEM RESET pg_local_cache.test_barrier_relation",
             "SELECT pg_reload_conf()",
         )
+        if _TEST_PAUSE_STARTED_AT is not None:
+            duration_seconds = round(
+                time.monotonic() - _TEST_PAUSE_STARTED_AT, 3
+            )
+            try:
+                after_stats: object = read_cache_stats()
+            except Exception as error:
+                after_stats = f"stats unavailable: {error!r}"
+            _TEST_PAUSE_RECORDS.append(
+                {
+                    "points": list(_TEST_PAUSE_POINTS),
+                    "duration_seconds": duration_seconds,
+                    "before_stats": _TEST_PAUSE_BEFORE_STATS,
+                    "after_stats": after_stats,
+                }
+            )
+            _TEST_PAUSE_STARTED_AT = None
+            _TEST_PAUSE_POINTS = []
+            _TEST_PAUSE_BEFORE_STATS = None
         return
     assert barrier_table is not None, warm_hit_diagnostics(barrier_table)
     relation_oid = sql(f"SELECT 'public.{sql_identifier(barrier_table)}'::regclass::oid")
+    if _TEST_PAUSE_STARTED_AT is None:
+        _TEST_PAUSE_BEFORE_STATS = read_cache_stats()
+        _TEST_PAUSE_STARTED_AT = time.monotonic()
+    _TEST_PAUSE_POINTS.append(point)
     sql_commands(
         f"ALTER SYSTEM SET pg_local_cache.test_pause_point = {sql_literal(point)}",
         "ALTER SYSTEM SET pg_local_cache.test_barrier_relation = "
@@ -3656,6 +3686,127 @@ def test_enabled_kill_switch(table: str) -> None:
         client.close()
 
 
+PAUSE_HOOK_TEST_NAMES = (
+    "test_partition_routing_and_opposite_order_writers",
+    "test_unrelated_key_fill_survives_keyed_write",
+    "test_same_key_relation_and_global_fences",
+    "test_warm_hit_snapshot_and_copy_fences",
+    "test_relation_global_claim_store_fences",
+    "test_marker_exhaustion_falls_back_safely",
+    "test_dirty_key_dedup_and_relation_fallback",
+    "test_namespace_invalidation_preserves_other_scope",
+    "test_overlapping_publishers_on_one_key",
+    "test_abort_after_dirty_publication",
+    "test_relation_incarnation_forget_recreate",
+    "test_reload_claim_keeps_truncated_payload_invalid",
+)
+
+
+def run_pause_hook_test(name: str, callback: Callable[[], None]) -> None:
+    global _TEST_PAUSE_STARTED_AT, _TEST_PAUSE_POINTS, _TEST_PAUSE_BEFORE_STATS
+    _TEST_PAUSE_RECORDS.clear()
+    _TEST_PAUSE_STARTED_AT = None
+    _TEST_PAUSE_POINTS = []
+    _TEST_PAUSE_BEFORE_STATS = None
+    try:
+        callback()
+    except AssertionError as error:
+        try:
+            current_stats: object = read_cache_stats()
+        except Exception as stats_error:
+            current_stats = f"stats unavailable: {stats_error!r}"
+        diagnostics = {
+            "test": name,
+            "pause_intervals": list(_TEST_PAUSE_RECORDS),
+            "current_stats": current_stats,
+        }
+        raise AssertionError(
+            f"{error}\nPause diagnostics: "
+            f"{json.dumps(diagnostics, sort_keys=True)}"
+        ) from error
+
+
+def run_pause_hook_tests(
+    table: str,
+    namespace: str,
+    scoped_table: str,
+    incarnation_table: str,
+    incarnation_namespace: str,
+    barrier_table: str,
+    second_barrier_table: str,
+) -> None:
+    cases: tuple[tuple[str, Callable[[], None]], ...] = (
+        (
+            "test_partition_routing_and_opposite_order_writers",
+            lambda: test_partition_routing_and_opposite_order_writers(
+                table, namespace, barrier_table, second_barrier_table
+            ),
+        ),
+        (
+            "test_unrelated_key_fill_survives_keyed_write",
+            lambda: test_unrelated_key_fill_survives_keyed_write(
+                table, barrier_table
+            ),
+        ),
+        (
+            "test_same_key_relation_and_global_fences",
+            lambda: test_same_key_relation_and_global_fences(
+                table, namespace, barrier_table
+            ),
+        ),
+        (
+            "test_warm_hit_snapshot_and_copy_fences",
+            lambda: test_warm_hit_snapshot_and_copy_fences(
+                table, namespace, barrier_table, second_barrier_table
+            ),
+        ),
+        (
+            "test_relation_global_claim_store_fences",
+            lambda: test_relation_global_claim_store_fences(
+                table, namespace, barrier_table, second_barrier_table
+            ),
+        ),
+        (
+            "test_marker_exhaustion_falls_back_safely",
+            lambda: test_marker_exhaustion_falls_back_safely(
+                table, namespace, barrier_table, second_barrier_table
+            ),
+        ),
+        (
+            "test_dirty_key_dedup_and_relation_fallback",
+            lambda: test_dirty_key_dedup_and_relation_fallback(
+                table, namespace, barrier_table
+            ),
+        ),
+        (
+            "test_namespace_invalidation_preserves_other_scope",
+            lambda: test_namespace_invalidation_preserves_other_scope(
+                table, namespace, scoped_table, barrier_table
+            ),
+        ),
+        (
+            "test_overlapping_publishers_on_one_key",
+            lambda: test_overlapping_publishers_on_one_key(
+                table, namespace, barrier_table, second_barrier_table
+            ),
+        ),
+        (
+            "test_abort_after_dirty_publication",
+            lambda: test_abort_after_dirty_publication(
+                table, namespace, barrier_table
+            ),
+        ),
+        (
+            "test_relation_incarnation_forget_recreate",
+            lambda: test_relation_incarnation_forget_recreate(
+                incarnation_table, incarnation_namespace, barrier_table
+            ),
+        ),
+    )
+    for name, callback in cases:
+        run_pause_hook_test(name, callback)
+
+
 def main() -> None:
     suffix = str(os.getpid())
     table = f"p{suffix}"
@@ -3738,12 +3889,30 @@ def main() -> None:
         finally:
             bootstrap.close()
 
-        if os.environ.get("PGLC_MULTI_WORKER_ONLY") == "1":
+        if os.environ.get("PGLC_PAUSE_HOOKS_ONLY") == "1":
+            if not hooks_available:
+                raise RuntimeError(
+                    "pause-hook-only phase requires PGLC_TEST_HOOKS functions"
+                )
+            run_pause_hook_tests(
+                table,
+                mapping_namespace,
+                scoped_table,
+                incarnation_table,
+                incarnation_namespace,
+                barrier_table,
+                second_barrier_table,
+            )
+            print("pipeline pause-hook fence/race cases passed")
+        elif os.environ.get("PGLC_MULTI_WORKER_ONLY") == "1":
             test_mget_does_not_hold_claim_while_waiting(table, scoped_table)
             test_mget_cancelled_owner_releases_claim(table)
             if hooks_available:
-                test_reload_claim_keeps_truncated_payload_invalid(
-                    truncate_table, barrier_table
+                run_pause_hook_test(
+                    "test_reload_claim_keeps_truncated_payload_invalid",
+                    lambda: test_reload_claim_keeps_truncated_payload_invalid(
+                        truncate_table, barrier_table
+                    ),
                 )
             else:
                 print(
@@ -3786,54 +3955,24 @@ def main() -> None:
             test_key_fill_hit_ratio_under_update_load(table)
             test_preprepare_still_rejected(table)
             if hooks_available:
-                test_partition_routing_and_opposite_order_writers(
-                    table,
-                    mapping_namespace,
-                    barrier_table,
-                    second_barrier_table,
-                )
-                test_unrelated_key_fill_survives_keyed_write(table, barrier_table)
-                test_same_key_relation_and_global_fences(
-                    table, mapping_namespace, barrier_table
-                )
-                test_warm_hit_snapshot_and_copy_fences(
-                    table,
-                    mapping_namespace,
-                    barrier_table,
-                    second_barrier_table,
-                )
-                test_relation_global_claim_store_fences(
-                    table,
-                    mapping_namespace,
-                    barrier_table,
-                    second_barrier_table,
-                )
-                test_marker_exhaustion_falls_back_safely(
-                    table,
-                    mapping_namespace,
-                    barrier_table,
-                    second_barrier_table,
-                )
-                test_dirty_key_dedup_and_relation_fallback(
-                    table, mapping_namespace, barrier_table
-                )
-                test_namespace_invalidation_preserves_other_scope(
-                    table, mapping_namespace, scoped_table, barrier_table
-                )
-                test_overlapping_publishers_on_one_key(
-                    table,
-                    mapping_namespace,
-                    barrier_table,
-                    second_barrier_table,
-                )
-                test_abort_after_dirty_publication(
-                    table, mapping_namespace, barrier_table
-                )
+                if os.environ.get("PGLC_SKIP_PAUSE_HOOK_TESTS") == "1":
+                    print(
+                        "SKIP pause-hook tests "
+                        "(PGLC_SKIP_PAUSE_HOOK_TESTS=1): "
+                        + ", ".join(PAUSE_HOOK_TEST_NAMES)
+                    )
+                else:
+                    run_pause_hook_tests(
+                        table,
+                        mapping_namespace,
+                        scoped_table,
+                        incarnation_table,
+                        incarnation_namespace,
+                        barrier_table,
+                        second_barrier_table,
+                    )
                 test_partial_reservation_abort_releases_identity(
                     table, mapping_namespace
-                )
-                test_relation_incarnation_forget_recreate(
-                    incarnation_table, incarnation_namespace, barrier_table
                 )
             else:
                 print(
