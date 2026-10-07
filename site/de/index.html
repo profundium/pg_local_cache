@@ -25,16 +25,16 @@ permalink: /de/
       <p class="hero-note">Authentifizierte RESP-API · PostgreSQL 14–18 · Open Source</p>
       <p class="hero-note">3.1.0 nutzt Byte-Kapazität für Millionen kleiner Schlüssel, wenn das Speicherbudget reicht. Neu sind partitionierte Sperren, allokationsfreie Einzel-Key-Treffer, günstigere Schreibverfolgung und aufgeschobene Fehltreffer bei Relationssperren. <a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">Upgrade-Leitfaden</a>.</p>
     </div>
-    <figure class="hero-benchmark" aria-label="Lokaler Benchmark mit einem Schlüssel: RESP im Vergleich zu SQL">
-      <p class="benchmark-label">Lokal gemessen · 15. Sep. 2026</p>
-      <p class="benchmark-number"><strong>839,678</strong><span>Anfragen/s · RESP MGET</span></p>
-      <p class="benchmark-gain"><strong>3.31×</strong> der vorbereiteten SQL-Rate<br>in diesem Vergleich mit einem Schlüssel</p>
+    <figure class="hero-benchmark" aria-label="3.1.0-Vergleich mit einem gepinnten Kern: RESP, Valkey und vorbereitetes SQL">
+      <p class="benchmark-label">3.1.0 · finaler Build c431bcc</p>
+      <p class="benchmark-number"><strong>210k</strong><span>Anfragen/s · RESP MGET</span></p>
+      <p class="benchmark-gain">Pro gepinntem physischen Serverkern<br>Hot Keys · 256 Clients · Go/pgx</p>
       <dl class="benchmark-baselines">
-        <div><dt>Vorbereitetes SQL</dt><dd>253,790 <span>Anfragen/s</span></dd></div>
-        <div><dt>2.x SQL mget (in 3.0.0 entfernt)</dt><dd>186,296 <span>Anfragen/s</span></dd></div>
+        <div><dt>Valkey · io-threads=2N</dt><dd>91.5k <span>Anfragen/s</span></dd></div>
+        <div><dt>Vorbereitetes SQL</dt><dd>23.2k <span>Anfragen/s</span></dd></div>
       </dl>
-      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 Verbindungen.<br>Diese historische SQL-mget-Messung aus 2.x wurde in 3.0.0 entfernt; Batch-Ergebnisse unterscheiden sich.</figcaption>
-      <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">Ergebnisse, Rohdaten und Bedingungen <span aria-hidden="true">→</span></a>
+      <figcaption>Private 10-GbE-VMs · Xeon Gold 6354 · auf einen physischen Kern gepinnt.<br>Bei einem Kern erreichte Valkey mit io-threads=1 180k Anfragen/s und benötigte pro Anfrage am wenigsten Server-CPU.</figcaption>
+      <a href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Ergebnisse, Rohdaten und Bedingungen <span aria-hidden="true">→</span></a>
     </figure>
   </section>
 

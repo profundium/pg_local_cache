@@ -1,0 +1,68 @@
+# Stand evidence collected 2026-10-07T01:45Z
+## sel-db
+CPU(s):                                  16
+Model name:                              Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      4
+Socket(s):                               2
+NUMA node(s):                            1
+               total        used        free      shared  buff/cache   available
+Mem:              62           1          42           0          19          60
+6.12.111+deb13-amd64
+Debian GNU/Linux 13 (trixie)
+## sel-load
+CPU(s):                                  16
+Model name:                              Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      4
+Socket(s):                               2
+NUMA node(s):                            1
+               total        used        free      shared  buff/cache   available
+Mem:              62           0          60           0           2          61
+6.12.111+deb13-amd64
+Debian GNU/Linux 13 (trixie)
+## sel-db PostgreSQL and data
+PostgreSQL 16.15 (Debian 16.15-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+max_connections=1000
+pg_local_cache.allow_plaintext_network=on
+pg_local_cache.allow_superuser=off
+pg_local_cache.binary_build_id=final-c431bcc
+pg_local_cache.binary_version=3.1.0
+pg_local_cache.bind_address=192.168.0.2
+pg_local_cache.cache_entries=1048576
+pg_local_cache.database=pglc_demo
+pg_local_cache.dirty_marker_entries=-1
+pg_local_cache.dirty_marker_memory_mb=-1
+pg_local_cache.enabled=on
+pg_local_cache.idle_timeout_ms=300000
+pg_local_cache.lock_partitions=64
+pg_local_cache.lock_timeout_ms=250
+pg_local_cache.max_clients=2048
+pg_local_cache.max_clients_per_worker=256
+pg_local_cache.max_deferred_misses=8
+pg_local_cache.max_dirty_keys=4096
+pg_local_cache.max_pipeline_commands=256
+pg_local_cache.memory_budget_mb=1024
+pg_local_cache.port=6380
+pg_local_cache.relation_states=1024
+pg_local_cache.role=local_cache_worker
+pg_local_cache.singleflight_wait_ms=25
+pg_local_cache.statement_timeout_ms=2000
+pg_local_cache.tls=off
+pg_local_cache.tls_ca_file=
+pg_local_cache.tls_cert_file=
+pg_local_cache.tls_key_file=
+pg_local_cache.tls_min_protocol_version=TLSv1.2
+pg_local_cache.workers=8
+shared_buffers=1048576
+synchronous_commit=on
+items rows=100000 avg_json_bytes=166
+io-threads 8
+appendonly no
+save ""
+Valkey server v=8.1.1 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64 build=ad0f3ed608b40934
+## network (sel-load -> sel-db private address)
+[SUM]   0.00-5.00   sec  6.04 GBytes  10.4 Gbits/sec                  receiver
+rtt min/avg/max/mdev = 0.090/0.143/0.871/0.167 ms
+## Notes
+Valkey io-threads during write-overhead, mixed and stale runs: 8 (set by final4.sh before phase C); io-threads 1/2/4/8 per-core runs as labelled in the JSONL file names.

@@ -25,16 +25,16 @@ permalink: /
       <p class="hero-note">Authenticated RESP API · PostgreSQL 14–18 · Open source</p>
       <p class="hero-note">3.1.0 adds byte-based slab capacity for millions of small keys when the budget fits, partitioned locks, allocation-free single-key hits, cheaper write tracking, and deferred locked misses. <a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">Upgrade guide</a>.</p>
     </div>
-    <figure class="hero-benchmark" aria-label="Local single-key benchmark: RESP compared with SQL">
-      <p class="benchmark-label">Measured locally · 15 Sep 2026</p>
-      <p class="benchmark-number"><strong>839,678</strong><span>requests/s · RESP MGET</span></p>
-      <p class="benchmark-gain"><strong>3.31×</strong> the prepared SQL throughput<br>in this single-key comparison</p>
+    <figure class="hero-benchmark" aria-label="3.1.0 pinned one-core comparison: RESP, Valkey, and prepared SQL">
+      <p class="benchmark-label">3.1.0 · final build c431bcc</p>
+      <p class="benchmark-number"><strong>210k</strong><span>requests/s · RESP MGET</span></p>
+      <p class="benchmark-gain">Per pinned physical server core<br>hot keys · 256 clients · Go/pgx</p>
       <dl class="benchmark-baselines">
-        <div><dt>Prepared SQL</dt><dd>253,790 <span>req/s</span></dd></div>
-        <div><dt>2.x SQL mget (removed in 3.0.0)</dt><dd>186,296 <span>req/s</span></dd></div>
+        <div><dt>Valkey · io-threads=2N</dt><dd>91.5k <span>req/s</span></dd></div>
+        <div><dt>Prepared SQL</dt><dd>23.2k <span>req/s</span></dd></div>
       </dl>
-      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 connections.<br>This historical 2.x SQL mget lane was removed in 3.0.0; batch results differ.</figcaption>
-      <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">Results, raw data &amp; conditions <span aria-hidden="true">→</span></a>
+      <figcaption>Private 10 GbE VMs · Xeon Gold 6354 · pinned to one physical core.<br>At one core, Valkey io-threads=1 reached 180k req/s and used the least server CPU per request.</figcaption>
+      <a href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Results, raw data &amp; conditions <span aria-hidden="true">→</span></a>
     </figure>
   </section>
 

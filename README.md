@@ -8,8 +8,13 @@ Version 3.1.0 replaces fixed-width row slots with compact descriptors and on-dem
 
 ## Benchmarks
 
-<!-- BENCH:README -->
+All figures below use final 3.1.0 build c431bcc.
 
+- **Reads per pinned vCPU pair:** 1 pair: 210k requests/s for pg_local_cache vs 180k for best Valkey (io-threads=1); 2 pairs: 337k vs 266k (io-threads=4); 4 pairs: 361k vs 357k (io-threads=8), with 5.24 vs 7.95 server vCPU. Valkey io-threads=1 used the least CPU per request; prepared SQL was far behind in pinned single-key tests.
+- **Wide MGET:** With all 16 vCPUs available, observed median MGET 16/64 throughput differences with Valkey io-threads=8 ranged from about −2.15% to +1.26%. Observed ranges did not overlap in any of the four 64-key comparisons, so these samples do not establish statistical equivalence; the runs were client/network-bound. With io-threads=1, random-key MGET 16 at 256 clients measured 116,130 vs 97,489 req/s (19.1% higher for pg_local_cache). pg_local_cache had higher p99 for random-key MGET 64 at 256 clients (43.52 vs 40.37 ms).
+- **Writes:** pg_local_cache overhead was 3.6–8.2% for UPDATE and 3.7–5.5% for INSERT. UPDATE plus Valkey DEL was 28.9–63.7% below plain-table UPDATE throughput.
+- **Stale probes:** pg_local_cache had 0 stale entries; Valkey cache-aside retained 2 Uniform and 1 Zipf stale entries after 120 seconds. The pg_local_cache Zipf reader hit a harness startup-equivalence failure, but its stale check still ran and found 0.
+- **One-hour soak:** 252M MGET plus 72M UPDATE; worker RssAnon stayed flat, with maximum growth of 44 kB. [Full results, raw data, and method](docs/BENCHMARKS.md).
 ## Quickstart
 
 ```sh

@@ -221,17 +221,26 @@ class RepositoryContentChecks(unittest.TestCase):
                 self.assertTrue(all(values), f'{name}: {field}')
                 self.assertEqual(len(set(values)), len(locales), f'{name}: {field}')
 
-    def test_homepage_benchmark_hero_matches_recorded_json_medians(self):
-        data = json.loads((ROOT / 'docs/benchmarks/2026-09-15-m3-max-resp.json').read_text(encoding='utf-8'))
-        rows = data['runs']['initial_optimized_vm']['results']
-        modes = {'resp-mget': 'resp', 'postgres-any': 'prepared', 'mget': 'mget'}
+    def test_homepage_benchmark_hero_matches_3_1_0_jsonl_medians(self):
+        rows = [json.loads(line) for line in
+                (ROOT / 'docs/benchmarks/3.1.0/read-per-core.jsonl').read_text(encoding='utf-8').splitlines()]
+        modes = {'pg_local_cache': 'pg_local_cache', 'valkey': 'valkey',
+                 'postgres-any': 'prepared SQL'}
         medians = {}
         for mode, label in modes.items():
             samples = [row['requests_s'] for row in rows
                        if row.get('mode') == mode and row.get('clients') == 256
-                       and row.get('batch') == 1]
-            self.assertEqual(len(samples), 3, mode)
-            medians[label] = int(round(statistics.median(samples)))
+                       and row.get('batch') == 1 and row.get('key_space') == 0
+                       and row.get('server_cpus') == '0-1']
+            self.assertEqual(len(samples), 5, mode)
+            medians[label] = statistics.median(samples)
+
+        def rate_value(value):
+            value = value.strip()
+            if value.endswith('k'):
+                decimals = len(value[:-1].partition('.')[2])
+                return float(value[:-1]) * 1000, 500 / (10 ** decimals)
+            return int(value.replace(',', '')), 0
 
         for homepage in [ROOT / 'site/index.html', *(ROOT / 'site' / lang / 'index.html'
                                                      for lang in LANGUAGES if lang != 'en')]:
@@ -239,16 +248,14 @@ class RepositoryContentChecks(unittest.TestCase):
             figure = re.search(r'<figure class="hero-benchmark".*?</figure>', text, re.S)
             self.assertIsNotNone(figure, homepage)
             markup = figure.group(0)
-            resp = re.search(r'<p class="benchmark-number">\s*<strong>([\d,]+)</strong>', markup)
+            resp = re.search(r'<p class="benchmark-number">\s*<strong>([\d,.]+k?)</strong>', markup)
             baselines = re.search(r'<dl class="benchmark-baselines">(.*?)</dl>', markup, re.S)
-            baseline_values = re.findall(r'<dd>\s*([\d,]+)', baselines.group(1)) if baselines else []
-            gain = re.search(r'<p class="benchmark-gain">\s*<strong>([\d.]+)×</strong>', markup)
-            self.assertTrue(resp and len(baseline_values) == 2 and gain, homepage)
-            displayed = {'resp': int(resp.group(1).replace(',', '')),
-                         'prepared': int(baseline_values[0].replace(',', '')),
-                         'mget': int(baseline_values[1].replace(',', ''))}
-            self.assertEqual(displayed, medians, homepage)
-            self.assertEqual(float(gain.group(1)), round(medians['resp'] / medians['prepared'], 2), homepage)
+            baseline_values = re.findall(r'<dd>\s*([\d,.]+k?)', baselines.group(1)) if baselines else []
+            self.assertTrue(resp and len(baseline_values) == 2, homepage)
+            displayed = [rate_value(resp.group(1)), *(rate_value(value) for value in baseline_values)]
+            expected = [medians['pg_local_cache'], medians['valkey'], medians['prepared SQL']]
+            for (value, tolerance), median in zip(displayed, expected):
+                self.assertLessEqual(abs(value - median), tolerance, homepage)
 
 
 class BuiltSiteChecks(unittest.TestCase):

@@ -25,16 +25,16 @@ permalink: /ru/
       <p class="hero-note">Аутентифицированный RESP API · PostgreSQL 14–18 · Открытый исходный код</p>
       <p class="hero-note">В версии 3.1.0 ёмкость арены измеряется в байтах, что при подходящем бюджете позволяет хранить миллионы небольших ключей. Добавлены секционные блокировки, попадания по одному ключу без аллокаций, дешёвый учёт записей и отложенные промахи при блокировках отношений. <a href="{{ '/docs/UPGRADING.html#upgrade-from-300' | prepend: locale.prefix | relative_url }}">Руководство по обновлению</a>.</p>
     </div>
-    <figure class="hero-benchmark" aria-label="Локальный бенчмарк одного ключа: RESP в сравнении с SQL">
-      <p class="benchmark-label">Измерено локально · 15 сентября 2026</p>
-      <p class="benchmark-number"><strong>839,678</strong><span>запросов/с · RESP MGET</span></p>
-      <p class="benchmark-gain"><strong>3.31×</strong> пропускной способности подготовленного SQL<br>в этом сравнении одного ключа</p>
+    <figure class="hero-benchmark" aria-label="Сравнение 3.1.0 на одном закреплённом ядре: RESP, Valkey и подготовленный SQL">
+      <p class="benchmark-label">3.1.0 · финальная сборка c431bcc</p>
+      <p class="benchmark-number"><strong>210k</strong><span>запросов/с · RESP MGET</span></p>
+      <p class="benchmark-gain">На одно закреплённое физическое ядро<br>горячие ключи · 256 клиентов · Go/pgx</p>
       <dl class="benchmark-baselines">
-        <div><dt>Подготовленный SQL</dt><dd>253,790 <span>запросов/с</span></dd></div>
-        <div><dt>SQL mget из 2.x (удалён в 3.0.0)</dt><dd>186,296 <span>запросов/с</span></dd></div>
+        <div><dt>Valkey · io-threads=2N</dt><dd>91.5k <span>запросов/с</span></dd></div>
+        <div><dt>Подготовленный SQL</dt><dd>23.2k <span>запросов/с</span></dd></div>
       </dl>
-      <figcaption>Apple M3 Max · PostgreSQL 16 · Go · 256 соединений.<br>Эта историческая метрика SQL mget из 2.x удалена в 3.0.0; пакетные результаты отличаются.</figcaption>
-      <a href="{{ '/docs/benchmarks-go.html' | prepend: locale.prefix | relative_url }}">Результаты, исходные данные и условия <span aria-hidden="true">→</span></a>
+      <figcaption>Частная сеть 10 Гбит/с · Xeon Gold 6354 · закрепление за одним физическим ядром.<br>На одном ядре Valkey io-threads=1 достиг 180k запросов/с и расходовал меньше всего CPU сервера на запрос.</figcaption>
+      <a href="{{ '/docs/BENCHMARKS.html' | prepend: locale.prefix | relative_url }}">Результаты, исходные данные и условия <span aria-hidden="true">→</span></a>
     </figure>
   </section>
 
