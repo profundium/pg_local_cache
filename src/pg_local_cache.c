@@ -223,6 +223,7 @@ static bool local_bump_config = false;
 static bool local_attached_table_touched = false;
 static bool local_has_global_dirty_record = false;
 static bool local_refresh_disabled = false;
+static PgLocalCacheRefreshSkipReason local_refresh_disable_reason;
 static uint64 local_refresh_capture_bytes = 0;
 static Size local_dirty_bookkeeping_bytes = 0;
 static uint32 local_refresh_key_count = 0;
@@ -4777,7 +4778,7 @@ collect_dirty(PgLocalCacheDirtyKind kind, Oid database_oid, Oid relation_oid,
 		 local_dirty_bookkeeping_bytes + charge >
 		 PGLC_LOCAL_DIRTY_BOOKKEEPING_MAX_BYTES - charge))
 	{
-		pglc_set_cache_bypass();
+		/* Keep one entry charge available for a global fallback. */
 		pglc_disable_refresh(PGLC_REFRESH_SKIP_CAPTURE_STORAGE);
 		return NULL;
 	}
@@ -4873,6 +4874,8 @@ pglc_collect_key(Oid database_oid, Oid relation_oid,
 	PgLocalCacheLocalDirtyKey dirty_key;
 	bool		key_already_collected;
 	HTAB	   *dirty = get_local_dirty_hash();
+	if (local_global_fallback || local_has_global_dirty_record)
+		return;
 
 	memset(&relation_key, 0, sizeof(relation_key));
 	relation_key.kind = (uint8) PGLC_DIRTY_RELATION;
@@ -5364,6 +5367,8 @@ static void
 pglc_collect_relation(Oid database_oid, Oid relation_oid,
 					 const char *nspace)
 {
+	if (local_global_fallback || local_has_global_dirty_record)
+		return;
 	pglc_disable_refresh(PGLC_REFRESH_SKIP_BROAD_INVALIDATION);
 	if (collect_dirty(PGLC_DIRTY_RELATION, database_oid, relation_oid,
 					  nspace, NULL) == NULL)
@@ -5718,10 +5723,15 @@ record_refresh_reservation(PgLocalCacheLocalDirtyEntry *local,
 	local->reservation_handle_ordinal = handle_ordinal;
 	local->reservation_is_marker = marker;
 	local->reservation_active = true;
-	local->reservation_counted = atomic_increment_no_wrap(
-		&pglc_shared->refresh_reservations_outstanding, NULL);
-	if (!local->reservation_counted)
-		pglc_set_cache_bypass();
+	local->reservation_counted = false;
+	/* Invalidate fences keep publication order without refresh telemetry. */
+	if (local_refresh_key_count > 0)
+	{
+		local->reservation_counted = atomic_increment_no_wrap(
+			&pglc_shared->refresh_reservations_outstanding, NULL);
+		if (!local->reservation_counted)
+			pglc_set_cache_bypass();
+	}
 }
 
 static bool
@@ -5901,8 +5911,13 @@ static void
 pglc_validate_refresh_candidates(void)
 {
 	Size		index;
-	FullTransactionId transaction_full_xid = GetTopFullTransactionIdIfAny();
-	uint64		transaction_id = FullTransactionIdIsValid(transaction_full_xid) ?
+	FullTransactionId transaction_full_xid;
+	uint64		transaction_id;
+
+	if (local_refresh_key_count == 0)
+		return;
+	transaction_full_xid = GetTopFullTransactionIdIfAny();
+	transaction_id = FullTransactionIdIsValid(transaction_full_xid) ?
 		U64FromFullTransactionId(transaction_full_xid) : 0;
 
 	for (index = 0; index < local_dirty_ordered_count; index++)
@@ -6967,66 +6982,89 @@ pglc_finish_shared_fences(bool committed)
 static void
 pglc_finish_dirty_commit(void)
 {
-	Size		index;
+	Size		index = 0;
+	bool		refresh_tracking = local_refresh_key_count > 0;
 
 #ifdef PGLC_TEST_HOOKS
 	pglc_test_pause_at("before_refresh_finish");
 #endif
 	pglc_finish_shared_fences(true);
-	for (index = 0; index < local_dirty_ordered_count; index++)
+	while (index < local_dirty_ordered_count)
 	{
 		PgLocalCacheLocalDirtyEntry *local = local_dirty_ordered[index];
-		uint32		partition;
-		bool		installed = false;
+		uint32		partition = local->partition;
+		Size		end;
+		Size		entry_index;
+		uint64		installed_count = 0;
 
-		if (!local->reservation_active)
-			continue;
-		partition = local->partition;
 		if (partition == UINT32_MAX || partition >=
 			(uint32) pglc_cache_partition_count())
 		{
-			pglc_set_cache_bypass();
-			pglc_refresh_skip(PGLC_REFRESH_SKIP_IDENTITY_MISMATCH);
-			pglc_release_reservation_stats(local);
+			if (local->reservation_active)
+			{
+				pglc_set_cache_bypass();
+				pglc_refresh_skip(PGLC_REFRESH_SKIP_IDENTITY_MISMATCH);
+				pglc_release_reservation_stats(local);
+			}
+			index++;
 			continue;
 		}
+		end = index;
+		while (end < local_dirty_ordered_count &&
+			   local_dirty_partition(local_dirty_ordered[end]) == partition)
+			end++;
 #ifdef PGLC_TEST_HOOKS
-		if (local->refresh_candidate)
-			pglc_test_pause_at("before_refresh_install_lock");
+		if (refresh_tracking)
+			for (entry_index = index; entry_index < end; entry_index++)
+				if (local_dirty_ordered[entry_index]->reservation_active &&
+					local_dirty_ordered[entry_index]->refresh_candidate)
+					pglc_test_pause_at("before_refresh_install_lock");
 #endif
 		pglc_partition_lock_acquire(partition, LW_EXCLUSIVE);
-		if (local->refresh_candidate && !local_refresh_disabled &&
-			local->refresh_precommit_valid)
+		for (entry_index = index; entry_index < end; entry_index++)
 		{
-			installed = refresh_install_candidate_locked(partition, local);
-			if (!installed && local->reservation_active &&
-				local->refresh_precommit_valid &&
+			bool		installed = false;
+
+			local = local_dirty_ordered[entry_index];
+			if (!local->reservation_active)
+				continue;
+			if (refresh_tracking && local->refresh_candidate &&
 				!local_refresh_disabled &&
-				!local->refresh_failure_counted)
+				local->refresh_precommit_valid)
 			{
-				pglc_refresh_skip(PGLC_REFRESH_SKIP_ADMISSION);
-				local->refresh_failure_counted = true;
+				installed = refresh_install_candidate_locked(partition, local);
+				if (!installed && local->reservation_active &&
+					local->refresh_precommit_valid &&
+					!local_refresh_disabled &&
+					!local->refresh_failure_counted)
+				{
+					pglc_refresh_skip(PGLC_REFRESH_SKIP_ADMISSION);
+					local->refresh_failure_counted = true;
+				}
 			}
-		}
-		if (local->reservation_active &&
-			!refresh_release_key_reservation_locked(partition, local))
-			pglc_refresh_skip(PGLC_REFRESH_SKIP_IDENTITY_MISMATCH);
+			if (local->reservation_active &&
+				!refresh_release_key_reservation_locked(partition, local))
+				pglc_refresh_skip(PGLC_REFRESH_SKIP_IDENTITY_MISMATCH);
 #ifdef PGLC_TEST_HOOKS
-		if (pglc_test_duplicate_refresh_finish)
-		{
-			pglc_test_duplicate_refresh_finish = false;
-			(void) refresh_release_key_reservation_locked(partition, local);
-		}
+			if (pglc_test_duplicate_refresh_finish)
+			{
+				pglc_test_duplicate_refresh_finish = false;
+				(void) refresh_release_key_reservation_locked(partition, local);
+			}
 #endif
+			if (installed && !local->reservation_is_marker)
+				installed_count++;
+		}
 		pglc_partition_lock_release(partition);
-		if (installed && !local->reservation_is_marker)
-			pg_atomic_fetch_add_u64(&pglc_shared->refresh_installs_total, 1);
+		if (installed_count > 0)
+			pg_atomic_fetch_add_u64(&pglc_shared->refresh_installs_total,
+									installed_count);
+		index = end;
 	}
 	for (index = 0; index < local_dirty_ordered_count; index++)
 		(void) refresh_release_relation_pin(local_dirty_ordered[index], true);
 	reset_local_dirty();
 }
-
 static void
 pglc_finish_dirty_abort(void)
 {
@@ -7095,7 +7133,7 @@ pglc_xact_callback(XactEvent event, void *arg)
 		event == XACT_EVENT_PARALLEL_COMMIT ||
 		event == XACT_EVENT_PARALLEL_ABORT)
 	{
-		if (local_attached_table_touched || local_dirty_count > 0)
+		if (local_refresh_key_count > 0)
 			pglc_refresh_skip(PGLC_REFRESH_SKIP_PARALLEL_WORKER);
 #ifdef PGLC_TEST_HOOKS
 		pglc_test_in_xact_callback = false;
@@ -7350,6 +7388,9 @@ pglc_disable_refresh(PgLocalCacheRefreshSkipReason reason)
 		Size		index;
 
 		local_refresh_disabled = true;
+		local_refresh_disable_reason = reason;
+		if (local_refresh_key_count == 0)
+			return;
 		for (index = 0; index < local_dirty_ordered_count; index++)
 		{
 			PgLocalCacheLocalDirtyEntry *local = local_dirty_ordered[index];
@@ -7485,6 +7526,8 @@ refresh_row_json(HeapTuple tuple, TupleDesc descriptor,
 
 		if (attribute->attisdropped)
 			continue;
+		if (attribute->attgenerated == 'v')
+			return false;
 		if (attribute->atttypid != BOOLOID && attribute->atttypid != INT2OID &&
 			attribute->atttypid != INT4OID && attribute->atttypid != INT8OID &&
 			attribute->atttypid != TEXTOID && attribute->atttypid != VARCHAROID)
@@ -7810,21 +7853,39 @@ capture_refresh_candidate(TriggerData *trigger_data, HeapTuple tuple,
 }
 
 static void
-record_refresh_row_event(Oid relation_oid, const char *nspace, const char *key,
-						 bool refresh_mode)
+record_refresh_latch_skip(PgLocalCacheLocalDirtyEntry *local)
+{
+	if (!local->refresh_failure_counted)
+	{
+		pglc_refresh_skip(local_refresh_disable_reason);
+		local->refresh_failure_counted = true;
+	}
+}
+
+static void
+record_refresh_row_event(Oid relation_oid, const char *nspace, const char *key)
 {
 	PgLocalCacheLocalDirtyEntry *local =
 		find_local_dirty_key(relation_oid, nspace, key);
 
 	if (local == NULL || local->refresh_poisoned)
 		return;
-	if (refresh_mode && !pglc_refresh_track_key(local))
+	if (local_refresh_disabled)
+	{
+		record_refresh_latch_skip(local);
 		return;
+	}
+	if (!pglc_refresh_track_key(local))
+	{
+		if (local_refresh_disabled)
+			record_refresh_latch_skip(local);
+		return;
+	}
 	if (local->refresh_row_events < UINT8_MAX)
 		local->refresh_row_events++;
 	if (local->refresh_row_events <= 1)
 		return;
-	if ((refresh_mode || local->refresh_candidate) &&
+	if (local->refresh_candidate &&
 		!local->refresh_failure_counted)
 	{
 		pglc_refresh_skip(PGLC_REFRESH_SKIP_REPEATED_KEY);
@@ -8024,14 +8085,14 @@ pg_local_cache_row_invalidate(PG_FUNCTION_ARGS)
 		if (has_old)
 		{
 			pglc_collect_key(MyDatabaseId, relation_oid, nspace, old_key);
-			record_refresh_row_event(relation_oid, nspace, old_key,
-								 strcmp(write_mode, "refresh") == 0);
+			if (strcmp(write_mode, "refresh") == 0)
+				record_refresh_row_event(relation_oid, nspace, old_key);
 		}
 		if (has_new && !same_key)
 		{
 			pglc_collect_key(MyDatabaseId, relation_oid, nspace, new_key);
-			record_refresh_row_event(relation_oid, nspace, new_key,
-								 strcmp(write_mode, "refresh") == 0);
+			if (strcmp(write_mode, "refresh") == 0)
+				record_refresh_row_event(relation_oid, nspace, new_key);
 		}
 		if (strcmp(write_mode, "refresh") == 0)
 		{

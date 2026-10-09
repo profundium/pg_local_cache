@@ -524,14 +524,14 @@ SELECT CASE
           WHERE a.attrelid = p_relation
             AND a.attnum > 0
             AND NOT a.attisdropped
-            AND a.atttypid NOT IN (
-                'pg_catalog.bool'::pg_catalog.regtype,
-                'pg_catalog.int2'::pg_catalog.regtype,
-                'pg_catalog.int4'::pg_catalog.regtype,
-                'pg_catalog.int8'::pg_catalog.regtype,
-                'pg_catalog.text'::pg_catalog.regtype,
-                'pg_catalog.varchar'::pg_catalog.regtype
-            )
+            AND (a.attgenerated = 'v' OR a.atttypid NOT IN (
+                    'pg_catalog.bool'::pg_catalog.regtype,
+                    'pg_catalog.int2'::pg_catalog.regtype,
+                    'pg_catalog.int4'::pg_catalog.regtype,
+                    'pg_catalog.int8'::pg_catalog.regtype,
+                    'pg_catalog.text'::pg_catalog.regtype,
+                    'pg_catalog.varchar'::pg_catalog.regtype
+                ))
      ) THEN 'refresh'
     ELSE 'invalidate'
 END;

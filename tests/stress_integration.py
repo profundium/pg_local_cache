@@ -13,7 +13,12 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from pipeline_integration import RespConnection, crud_key, wait_for_mapping
+from pipeline_integration import (
+    RespConnection,
+    crud_key,
+    sql_literal,
+    wait_for_mapping,
+)
 
 
 PSQL = os.environ.get("PG_LOCAL_CACHE_PSQL", "psql")
@@ -26,6 +31,7 @@ STRESS_KEYS = int(os.environ.get("PGLC_STRESS_KEYS", "2048"))
 STRESS_WRITERS = int(os.environ.get("PGLC_STRESS_WRITERS", "4"))
 STRESS_READERS = int(os.environ.get("PGLC_STRESS_READERS", "4"))
 STRESS_SECONDS = float(os.environ.get("PGLC_STRESS_SECONDS", "30"))
+STRESS_WRITE_MODE = os.environ.get("PGLC_STRESS_WRITE_MODE", "invalidate")
 PAD_BYTES = int(os.environ.get("PGLC_STRESS_PAD_BYTES", "32"))
 ROLLBACK_MARKER = 1_000_000_000
 PSQL_TIMEOUT = 8
@@ -41,6 +47,8 @@ if STRESS_KEYS < 2 or STRESS_WRITERS < 1 or STRESS_READERS < 1:
     raise ValueError("stress keys, writers, and readers must be positive")
 if STRESS_SECONDS <= 0 or PAD_BYTES < 1 or PAD_BYTES > 1024:
     raise ValueError("stress duration and pad size are out of range")
+if STRESS_WRITE_MODE not in {"invalidate", "refresh"}:
+    raise ValueError("PGLC_STRESS_WRITE_MODE must be invalidate or refresh")
 
 
 class PsqlSession:
@@ -217,6 +225,10 @@ def metrics(timeout: float = PSQL_TIMEOUT) -> dict[str, int]:
         timeout=timeout,
     )
     return json.loads(payload)
+
+
+def cache_stats(timeout: float = PSQL_TIMEOUT) -> dict[str, object]:
+    return json.loads(sql("SELECT local_cache.stats()::text", timeout=timeout))
 
 
 def health(timeout: float = PSQL_TIMEOUT) -> dict[str, object]:
@@ -521,15 +533,49 @@ def toggle_kill_switch(
 
 def main() -> None:
     pad = "x" * PAD_BYTES
+    worker_table_privileges = (
+        "SELECT, INSERT, UPDATE, DELETE"
+        if STRESS_WRITE_MODE == "refresh"
+        else "SELECT"
+    )
     sql(
         "DROP TABLE IF EXISTS public.stress_items CASCADE; "
         "CREATE TABLE public.stress_items ("
         "id bigint PRIMARY KEY, version bigint NOT NULL, pad text NOT NULL); "
         f"INSERT INTO public.stress_items SELECT i, 0, '{pad}' "
         f"FROM generate_series(1, {STRESS_KEYS}) AS i; "
-        "GRANT SELECT ON public.stress_items TO local_cache_worker; "
-        "SELECT local_cache.attach_table('public.stress_items'::regclass)"
+        f"GRANT {worker_table_privileges} ON TABLE public.stress_items "
+        "TO local_cache_worker"
     )
+    if STRESS_WRITE_MODE == "refresh":
+        attached = json.loads(
+            sql(
+                "SELECT local_cache.attach_table("
+                "'public.stress_items'::regclass, p_writable => true)::text"
+            )
+        )
+    else:
+        attached = json.loads(
+            sql("SELECT local_cache.attach_table('public.stress_items'::regclass)::text")
+        )
+    if STRESS_WRITE_MODE == "refresh":
+        attached = json.loads(
+            sql(
+                "SELECT local_cache.set_write_mode("
+                "'public.stress_items'::regclass, 'refresh')::text"
+            )
+        )
+    if attached.get("write_mode_effective") != STRESS_WRITE_MODE:
+        raise AssertionError(
+            f"stress write mode not effective: requested={STRESS_WRITE_MODE}, "
+            f"mapping={attached}"
+        )
+    if STRESS_WRITE_MODE == "refresh":
+        sql(
+            "CREATE OR REPLACE FUNCTION public.pglc_stress_relation_identity_pins("
+            "regclass, text) RETURNS bigint AS '$libdir/pg_local_cache', "
+            "'pg_local_cache_test_relation_identity_pins' LANGUAGE C STRICT"
+        )
     namespace = sql(
         "SELECT namespace FROM local_cache.mapping "
         "WHERE relation = 'public.stress_items'::regclass"
@@ -573,6 +619,7 @@ def main() -> None:
         assert decoded_initial == {"id": 1, "version": 0, "pad": pad}
         wait_for_health_ready()
         baseline = metrics()
+        baseline_cache_stats = cache_stats()
 
         # Deterministic hot-set phase: show cache hits before adding concurrency.
         hot_keys = list(range(1, 17))
@@ -915,6 +962,7 @@ def main() -> None:
 
     final_metrics = metrics()
     final_health = health()
+    final_cache_stats = cache_stats()
     with violation_lock:
         recorded_violations = list(violations)
 
@@ -939,12 +987,41 @@ def main() -> None:
         )
     if final_health.get("ready") is not True:
         raise AssertionError(f"health() is not ready: {final_health}")
+    if STRESS_WRITE_MODE == "refresh":
+        if int(final_cache_stats["cache_bypass"]):
+            raise AssertionError(f"refresh stress left cache bypassed: {final_cache_stats}")
+        if int(final_cache_stats["refresh_installs_total"]) <= int(
+            baseline_cache_stats["refresh_installs_total"]
+        ):
+            raise AssertionError(
+                "refresh stress installed no entries: "
+                f"before={baseline_cache_stats} after={final_cache_stats}"
+            )
+        if int(final_cache_stats["refresh_reservations_outstanding"]) != 0:
+            raise AssertionError(f"refresh reservations leaked: {final_cache_stats}")
+        if int(final_cache_stats["refresh_capture_bytes_current"]) != 0:
+            raise AssertionError(f"refresh capture storage leaked: {final_cache_stats}")
+        if int(final_cache_stats["pending_forget"]) != 0:
+            raise AssertionError(f"pending forgets remain: {final_cache_stats}")
+        identity_pins = int(
+            sql(
+                "SELECT public.pglc_stress_relation_identity_pins("
+                "'public.stress_items'::regclass, "
+                f"{sql_literal(namespace)})"
+            )
+        )
+        if identity_pins != 0:
+            raise AssertionError(f"refresh relation identity pins leaked: {identity_pins}")
+        sql(
+            "DROP FUNCTION public.pglc_stress_relation_identity_pins(regclass, text)"
+        )
     if recorded_violations:
         raise AssertionError(f"stale-read stress found {len(recorded_violations)} violation(s)")
 
     print(
         "stress ok: "
-        f"seconds={STRESS_SECONDS:g} keys={STRESS_KEYS} "
+        f"seconds={STRESS_SECONDS:g} write_mode={STRESS_WRITE_MODE} "
+        f"keys={STRESS_KEYS} "
         f"writers={STRESS_WRITERS} readers={STRESS_READERS} "
         f"commits={totals['commits']} rollbacks={totals['rollbacks']} "
         f"reads={totals['reads']} invalidations={totals['invalidations']} "

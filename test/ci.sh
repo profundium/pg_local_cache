@@ -168,6 +168,11 @@ pg_ctlcluster "$PG" ci restart
 
 echo "==> stress_integration over plaintext RESP"
 python3 "$repo/tests/stress_integration.py"
+echo "==> stress_integration in refresh mode"
+# Set PGLC_REFRESH_STRESS_SECONDS=3600 for the one-hour freshness gate.
+PGLC_STRESS_WRITE_MODE=refresh \
+    PGLC_STRESS_SECONDS="${PGLC_REFRESH_STRESS_SECONDS:-10}" \
+    python3 "$repo/tests/stress_integration.py"
 
 # Exercise MGET claim ownership and pause-hook races with four workers.
 sed -i 's/pg_local_cache.memory_budget_mb = 64/pg_local_cache.memory_budget_mb = 128/' \

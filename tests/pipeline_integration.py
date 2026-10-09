@@ -4415,6 +4415,104 @@ def set_refresh_write_mode(table: str, mode: str = "refresh") -> dict[str, objec
     return result
 
 
+def test_refresh_virtual_generated_fallback() -> None:
+    if int(sql("SHOW server_version_num")) < 180000:
+        print("SKIP virtual generated refresh fallback (requires PostgreSQL 18)")
+        return
+
+    table = f"pglc_virtual_{os.getpid()}"
+    relation = f"public.{sql_identifier(table)}"
+    sql(
+        f"DROP TABLE IF EXISTS {relation} CASCADE; "
+        f"CREATE TABLE {relation} ("
+        "id bigint PRIMARY KEY, value integer NOT NULL, "
+        "g integer GENERATED ALWAYS AS (value + 1) VIRTUAL); "
+        f"INSERT INTO {relation} (id, value) VALUES (1, 40)"
+    )
+    client = RespConnection()
+    try:
+        if WORKER_ROLE:
+            sql(f"GRANT SELECT ON TABLE {relation} TO {sql_identifier(WORKER_ROLE)}")
+        sql(f"SELECT local_cache.attach_table('{relation}'::regclass, true)")
+        mode = set_refresh_write_mode(table)
+        assert mode["write_mode_effective"] == "invalidate", mode
+
+        key = crud_key(table, 1)
+        assert isinstance(mget_one(client, key), bytes)
+        sql(f"UPDATE {relation} SET value = 41 WHERE id = 1")
+        expected = json.loads(
+            sql(f"SELECT row_to_json(t)::text FROM {relation} AS t WHERE id = 1")
+        )
+        refresh_lookup(client, key, expected, expected_cache_path="miss")
+    finally:
+        client.close()
+        sql(
+            f"SELECT local_cache.detach_table(to_regclass({sql_literal(relation)})) "
+            f"WHERE to_regclass({sql_literal(relation)}) IS NOT NULL; "
+            f"DROP TABLE IF EXISTS {relation} CASCADE"
+        )
+
+
+def test_dirty_bookkeeping_capacity_fallback() -> None:
+    row_count = 12_000
+    first_id = allocate_test_row_ids("capacity", row_count)[0]
+    last_id = first_id + row_count - 1
+    table = f"pglc_capacity_{os.getpid()}"
+    relation = f"public.{sql_identifier(table)}"
+    sql(
+        f"DROP TABLE IF EXISTS {relation} CASCADE; "
+        f"CREATE TABLE {relation} (id bigint PRIMARY KEY, value bigint NOT NULL); "
+        f"INSERT INTO {relation} "
+        f"SELECT id, 0 FROM generate_series({first_id}, {last_id}) AS ids(id)"
+    )
+    client = RespConnection()
+    try:
+        if WORKER_ROLE:
+            sql(f"GRANT SELECT ON TABLE {relation} TO {sql_identifier(WORKER_ROLE)}")
+        sql(f"SELECT local_cache.attach_table('{relation}'::regclass, true)")
+        set_test_max_dirty_keys(16_384)
+
+        for mode, value in (("invalidate", 1), ("refresh", 2)):
+            effective = set_refresh_write_mode(table, mode)
+            assert effective["write_mode_effective"] == mode, effective
+            keys = (first_id, last_id)
+            for row_id in keys:
+                assert isinstance(mget_one(client, crud_key(table, row_id)), bytes)
+
+            before = read_cache_stats()
+            sql(
+                f"UPDATE {relation} SET value = {value} "
+                f"WHERE id BETWEEN {first_id} AND {last_id}"
+            )
+            stats = read_cache_stats()
+            assert stats["cache_bypass"] == 0, (mode, stats)
+            assert stats["refresh_reservations_outstanding"] == 0, (mode, stats)
+            if mode == "invalidate":
+                assert stats["refresh_captures_total"] == before["refresh_captures_total"], (
+                    before,
+                    stats,
+                )
+                assert stats["refresh_skips_total"] == before["refresh_skips_total"], (
+                    before,
+                    stats,
+                )
+            for row_id in keys:
+                refresh_lookup(
+                    client,
+                    crud_key(table, row_id),
+                    {"id": row_id, "value": value},
+                    expected_cache_path="miss",
+                )
+    finally:
+        set_test_max_dirty_keys(None)
+        client.close()
+        sql(
+            f"SELECT local_cache.detach_table(to_regclass({sql_literal(relation)})) "
+            f"WHERE to_regclass({sql_literal(relation)}) IS NOT NULL; "
+            f"DROP TABLE IF EXISTS {relation} CASCADE"
+        )
+
+
 def wait_for_application_pid(application_name: str, *, timeout: float = 10) -> int:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -4725,13 +4823,18 @@ def test_refresh_basic_semantics(table: str, namespace: str) -> None:
         after_empty_subabort = read_cache_stats()
         assert after_empty_subabort[
             "refresh_skips_subtransaction_abort_total"
-        ] >= before_empty_subabort[
+        ] == before_empty_subabort[
             "refresh_skips_subtransaction_abort_total"
-        ] + 1, (before_empty_subabort, after_empty_subabort)
+        ], (before_empty_subabort, after_empty_subabort)
+        before_empty_subabort_reset = read_cache_stats()
         sql(
             f"UPDATE public.{sql_identifier(table)} SET value = 'after-empty-abort' "
             f"WHERE id = {empty_subabort_reset_id}"
         )
+        after_empty_subabort_reset = read_cache_stats()
+        assert after_empty_subabort_reset["refresh_installs_total"] == (
+            before_empty_subabort_reset["refresh_installs_total"] + 1
+        ), (before_empty_subabort_reset, after_empty_subabort_reset)
         refresh_lookup(
             client,
             empty_subabort_key,
@@ -6265,6 +6368,14 @@ def main() -> None:
         elif os.environ.get("PGLC_REFRESH_ONLY") == "1":
             if not hooks_available:
                 raise AssertionError("W7 refresh integration requires PGLC_TEST_HOOKS")
+            run_refresh_test_block(
+                "test_dirty_bookkeeping_capacity_fallback",
+                test_dirty_bookkeeping_capacity_fallback,
+            )
+            run_refresh_test_block(
+                "test_refresh_virtual_generated_fallback",
+                test_refresh_virtual_generated_fallback,
+            )
             run_refresh_test_block(
                 "test_refresh_basic_semantics",
                 lambda: test_refresh_basic_semantics(
