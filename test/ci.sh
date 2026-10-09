@@ -169,7 +169,7 @@ pg_ctlcluster "$PG" ci restart
 echo "==> stress_integration over plaintext RESP"
 python3 "$repo/tests/stress_integration.py"
 
-# Exercise concurrent MGET claim ownership, then bounded worker fan-out.
+# Exercise MGET claim ownership and pause-hook races with four workers.
 sed -i 's/pg_local_cache.memory_budget_mb = 64/pg_local_cache.memory_budget_mb = 128/' \
     /etc/postgresql/"$PG"/ci/pglc.conf
 sed -i 's/pg_local_cache.workers = 1/pg_local_cache.workers = 4/' \
@@ -181,10 +181,10 @@ sed -i 's/pg_local_cache.lock_timeout_ms = 3000/pg_local_cache.lock_timeout_ms =
 sed -i 's/pg_local_cache.singleflight_wait_ms = 25/pg_local_cache.singleflight_wait_ms = 1000/' \
     /etc/postgresql/"$PG"/ci/pglc.conf
 pg_ctlcluster "$PG" ci restart
-echo "==> pipeline pause-hook fence/race cases with long MGET deadline"
-PGLC_PAUSE_HOOKS_ONLY=1 python3 "$repo/tests/pipeline_integration.py"
 echo "==> pipeline multi-worker cases with four workers"
 PGLC_MULTI_WORKER_ONLY=1 python3 "$repo/tests/pipeline_integration.py"
+echo "==> pipeline pause-hook fence/race cases with long MGET deadline"
+PGLC_PAUSE_HOOKS_ONLY=1 python3 "$repo/tests/pipeline_integration.py"
 sed -i 's/pg_local_cache.memory_budget_mb = 128/pg_local_cache.memory_budget_mb = 64/' \
     /etc/postgresql/"$PG"/ci/pglc.conf
 sed -i 's/pg_local_cache.workers = 4/pg_local_cache.workers = 2/' \
@@ -405,7 +405,7 @@ GRANT SELECT ON local_cache.mapping TO local_cache_worker;
 CREATE TABLE public.upgrade_attached (id bigint PRIMARY KEY, value text);
 INSERT INTO public.upgrade_attached VALUES (1, 'before-upgrade');
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.upgrade_attached TO local_cache_worker;
-SELECT local_cache.attach_table('public.upgrade_attached'::regclass);
+SELECT local_cache.attach_table('public.upgrade_attached'::regclass, true);
 GRANT EXECUTE ON FUNCTION local_cache.invalidate(text) TO local_cache_test_app;
 GRANT EXECUTE ON FUNCTION local_cache.metrics() TO local_cache_test_monitor;
 CREATE VIEW public.upgrade_health_view AS SELECT local_cache.health() AS payload;
@@ -439,6 +439,7 @@ GRANT SELECT ON local_cache.mapping TO local_cache_worker;
 GRANT EXECUTE ON FUNCTION local_cache.invalidate(text) TO local_cache_test_app;
 GRANT EXECUTE ON FUNCTION local_cache.metrics() TO local_cache_test_monitor;
 SQL
+    # Mixed-state regression: current library serves the old catalog and trigger args.
     PG_LOCAL_CACHE_PSQL="$psql" PGPORT=5433 PGHOST=127.0.0.1 \
         PGDATABASE="$db_old" PGUSER=postgres \
         PG_LOCAL_CACHE_RESP_HOST=127.0.0.1 PG_LOCAL_CACHE_RESP_PORT=6390 \
@@ -503,6 +504,22 @@ PY
                     current_setting('pg_local_cache.binary_version');
             END IF;
          END \$\$;"
+    # The updated catalog and reconciled triggers must keep existing reads working.
+    PG_LOCAL_CACHE_PSQL="$psql" PGPORT=5433 PGHOST=127.0.0.1 \
+        PGDATABASE="$db_old" PGUSER=postgres \
+        PG_LOCAL_CACHE_RESP_HOST=127.0.0.1 PG_LOCAL_CACHE_RESP_PORT=6390 \
+        PG_LOCAL_CACHE_AUTH_TOKEN="$auth_token" python3 - "$repo" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/tests")
+from pipeline_integration import RespConnection, crud_key, wait_for_mapping
+
+client = RespConnection()
+try:
+    value = wait_for_mapping(client, crud_key("upgrade_attached", 1))
+    assert value == b'{"id":1,"value":"before-upgrade"}', value
+finally:
+    client.close()
+PY
     before_invalidations=$("$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 \
         -d "$db_old" -c "SELECT (local_cache.stats() ->> 'invalidations')::bigint")
     "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" -c \
@@ -513,6 +530,54 @@ PY
         echo "attached-table UPDATE did not increment invalidations" >&2
         exit 1
     }
+    PG_LOCAL_CACHE_PSQL="$psql" PGPORT=5433 PGHOST=127.0.0.1 \
+        PGDATABASE="$db_old" PGUSER=postgres \
+        PG_LOCAL_CACHE_RESP_HOST=127.0.0.1 PG_LOCAL_CACHE_RESP_PORT=6390 \
+        PG_LOCAL_CACHE_AUTH_TOKEN="$auth_token" python3 - "$repo" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/tests")
+from pipeline_integration import RespConnection, crud_key, wait_for_mapping
+
+client = RespConnection()
+try:
+    value = wait_for_mapping(client, crud_key("upgrade_attached", 1))
+    assert value == b'{"id":1,"value":"after-upgrade"}', value
+finally:
+    client.close()
+PY
+    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" <<'SQL'
+DO $$
+DECLARE
+    result jsonb;
+BEGIN
+    result := local_cache.set_write_mode(
+        'public.upgrade_attached'::regclass, 'refresh'
+    );
+    IF result ->> 'write_mode_requested' IS DISTINCT FROM 'refresh'
+       OR result ->> 'write_mode_effective' IS DISTINCT FROM 'refresh' THEN
+        RAISE EXCEPTION 'set_write_mode(refresh) returned %', result;
+    END IF;
+END;
+$$;
+UPDATE public.upgrade_attached
+   SET value = 'after-refresh-upgrade'
+ WHERE id = 1;
+SQL
+    PG_LOCAL_CACHE_PSQL="$psql" PGPORT=5433 PGHOST=127.0.0.1 \
+        PGDATABASE="$db_old" PGUSER=postgres \
+        PG_LOCAL_CACHE_RESP_HOST=127.0.0.1 PG_LOCAL_CACHE_RESP_PORT=6390 \
+        PG_LOCAL_CACHE_AUTH_TOKEN="$auth_token" python3 - "$repo" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/tests")
+from pipeline_integration import RespConnection, crud_key, wait_for_mapping
+
+client = RespConnection()
+try:
+    value = wait_for_mapping(client, crud_key("upgrade_attached", 1))
+    assert value == b'{"id":1,"value":"after-refresh-upgrade"}', value
+finally:
+    client.close()
+PY
     "$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 -d "$db_old" \
         -f "$temp/current/test/extension_snapshot.sql" >"$temp/$db_old.snapshot"
     "$psql" -X -qAt -v ON_ERROR_STOP=1 -p 5433 -d "$db_new" \

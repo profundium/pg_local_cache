@@ -70,6 +70,7 @@ endif
 
 verify-static:
 	python3 -m compileall -q scripts tests
+	python3 scripts/check_function_definition_parity.py
 	bash -n docker/entrypoint.sh docker/healthcheck.sh docker/attach-table.sh \
 		docker/initdb/010_pg_local_cache.sh tests/docker_smoke.sh \
 		scripts/bump-version.sh

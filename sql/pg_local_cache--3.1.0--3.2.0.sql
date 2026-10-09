@@ -146,12 +146,13 @@ BEGIN
         pg_catalog.convert_to(p_namespace, v_encoding) || v_zero;$old$;
     v_after := $new$
 BEGIN
-    SELECT m.write_mode
+    SELECT COALESCE(m.write_mode, 'invalidate')
       INTO v_write_mode
       FROM local_cache.mapping AS m
      WHERE m.relation::oid = p_relation;
+    v_write_mode := COALESCE(v_write_mode, 'invalidate');
     v_effective_write_mode := local_cache._effective_write_mode(
-        p_relation::regclass, COALESCE(v_write_mode, 'invalidate')
+        p_relation::regclass, v_write_mode
     );
     v_expected_row_args :=
         pg_catalog.convert_to(p_namespace, v_encoding) || v_zero ||
@@ -294,8 +295,8 @@ BEGIN
                   HINT = 'Attach the table with p_writable = true first.';
     END IF;
 
-    /* Mapping UPDATE reloads the mapping catalog; re-registration rebuilds
-     * row-trigger args with the requested mode and fences old cache state. */
+    /* The mapping statement trigger reloads the catalog and fences stale
+     * entries. Re-registering replaces row-trigger args with the new mode. */
     UPDATE local_cache.mapping
        SET write_mode = p_write_mode
      WHERE relation = p_relation;

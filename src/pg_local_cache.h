@@ -205,6 +205,8 @@ typedef struct PgLocalCacheWorkerStats
 } PgLocalCacheWorkerStats;
 
 #ifdef PGLC_TEST_HOOKS
+#define PGLC_TEST_PAUSE_WAITER_SLOTS 8
+
 typedef enum PgLocalCacheTestPausePoint
 {
 	PGLC_TEST_PAUSE_NONE = 0,
@@ -224,17 +226,27 @@ typedef enum PgLocalCacheTestPausePoint
 	PGLC_TEST_PAUSE_AFTER_PUBLISH_ABORT,
 	PGLC_TEST_PAUSE_AFTER_GLOBAL_FINISH,
 	PGLC_TEST_PAUSE_AFTER_RELATION_FINISH,
-	PGLC_TEST_PAUSE_BEFORE_REFRESH_POSTCOPY_VALIDATION,
 	PGLC_TEST_PAUSE_BEFORE_REFRESH_FINISH,
 	PGLC_TEST_PAUSE_BEFORE_REFRESH_INSTALL_LOCK
 } PgLocalCacheTestPausePoint;
+
+typedef struct PgLocalCacheTestPauseWaiter
+{
+	/* Negative pid stores target until claimed; zero target means any backend. */
+	int32		pid;
+	PgLocalCacheTestPausePoint point;
+	bool		armed;
+	bool		released;
+} PgLocalCacheTestPauseWaiter;
 
 typedef struct PgLocalCacheTestPauseState
 {
 	slock_t		lock;
 	PgLocalCacheTestPausePoint point;
 	Oid			barrier_relation;
+	int32		target_pid;
 	uint64		generation;
+	PgLocalCacheTestPauseWaiter waiters[PGLC_TEST_PAUSE_WAITER_SLOTS];
 } PgLocalCacheTestPauseState;
 #endif
 
@@ -282,6 +294,7 @@ typedef struct PgLocalCacheSharedState
 	pg_atomic_uint64 dirty_marker_entries;
 	pg_atomic_uint64 dirty_marker_highwater;
 	pg_atomic_uint64 dirty_marker_fallbacks_total;
+	pg_atomic_uint64 pending_forget_count;
 	pg_atomic_uint64 relation_state_admission_rejections;
 	pg_atomic_uint64 dirty_key_limit_fallbacks;
 	pg_atomic_uint64 mapping_reload_attempts;
@@ -456,6 +469,7 @@ extern void pglc_sync_cache_enabled(void);
 extern void pglc_note_database_read(void);
 extern void pglc_set_worker_slot(int worker_slot);
 extern bool pglc_resolve_mapping_slot(PgLocalCacheMapping *mapping);
+extern void pglc_reap_pending_relation_forgets(void);
 extern bool pglc_mapping_slot_is_current(const PgLocalCacheMapping *mapping);
 extern void pglc_note_database_write(void);
 extern bool pglc_try_reserve_client(void);

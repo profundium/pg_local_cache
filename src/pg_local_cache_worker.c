@@ -1028,6 +1028,7 @@ run_server(int listener)
 
 		worker_process_config_reload();
 		maybe_reload_mappings();
+		pglc_reap_pending_relation_forgets();
 		retry_deferred_misses();
 		poll_timeout = deferred_miss_poll_timeout(poll_timeout);
 
@@ -4458,7 +4459,10 @@ reload_mappings(uint64 target_generation)
 		HeapTuple	count_tuple;
 		TupleDesc	count_desc;
 		bool		count_is_null;
+		bool	mapping_has_write_mode;
 		const char *mapping_query;
+		MemoryContext mapping_query_old_context;
+		StringInfoData mapping_query_buffer;
 
 		transaction_context = begin_spi_transaction(pglc_statement_timeout_ms);
 		free_mapping_plans();
@@ -4479,13 +4483,38 @@ reload_mappings(uint64 target_generation)
 		if (count_is_null || configured_mapping_count > PGLC_MAX_MAPPINGS)
 			elog(ERROR, "too many pg_local_cache mappings");
 
-		mapping_query =
+		result = SPI_execute(
+			"SELECT EXISTS ("
+			"    SELECT 1 FROM pg_catalog.pg_attribute AS a "
+			"    JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid "
+			"    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
+			"     WHERE n.nspname = 'local_cache' AND c.relname = 'mapping' "
+			"       AND a.attname = 'write_mode' AND a.attnum > 0 "
+			"       AND NOT a.attisdropped)", true, 1);
+		if (result != SPI_OK_SELECT || SPI_processed != 1)
+			elog(ERROR, "could not inspect pg_local_cache mapping catalog");
+		count_tuple = SPI_tuptable->vals[0];
+		count_desc = SPI_tuptable->tupdesc;
+		mapping_has_write_mode = DatumGetBool(
+			SPI_getbinval(count_tuple, count_desc, 1, &count_is_null));
+		if (count_is_null)
+			elog(ERROR, "pg_local_cache mapping catalog shape is NULL");
+
+		mapping_query_old_context = MemoryContextSwitchTo(reload_context);
+		initStringInfo(&mapping_query_buffer);
+		appendStringInfoString(&mapping_query_buffer,
 			"WITH pglc_mapping AS ("
 			"SELECT source_mapping.namespace, source_mapping.relation, "
-			"       source_mapping.key_columns, source_mapping.writable, "
-			"       local_cache._effective_write_mode("
-			"           source_mapping.relation, source_mapping.write_mode) "
-			"           AS effective_write_mode "
+			"       source_mapping.key_columns, source_mapping.writable, ");
+		if (mapping_has_write_mode)
+			appendStringInfoString(&mapping_query_buffer,
+				"       local_cache._effective_write_mode("
+				"           source_mapping.relation, source_mapping.write_mode) "
+				"           AS effective_write_mode ");
+		else
+			appendStringInfoString(&mapping_query_buffer,
+				"       'invalidate'::text AS effective_write_mode ");
+		appendStringInfoString(&mapping_query_buffer,
 			"  FROM local_cache.mapping AS source_mapping) "
 			"SELECT m.namespace, c.oid, n.nspname, c.relname, "
 			"       m.key_columns, m.writable "
@@ -4524,20 +4553,35 @@ reload_mappings(uint64 target_generation)
 			"   AND rt.tgqual IS NULL "
 			"   AND rt.tgoldtable IS NULL AND rt.tgnewtable IS NULL "
 			"   AND rt.tgtype = 29 "
-			"   AND rt.tgnargs = 2 + pg_catalog.cardinality(m.key_columns) "
-			"   AND rt.tgfoid = 'local_cache._row_invalidate()'::regprocedure "
-			"   AND rt.tgargs = "
-			"       convert_to(m.namespace, current_setting('server_encoding')) "
-			"       || decode('00', 'hex') "
-			"       || convert_to(m.effective_write_mode, "
-			"                      current_setting('server_encoding')) "
-			"       || decode('00', 'hex') "
-			"       || COALESCE((SELECT pg_catalog.string_agg("
-			"              convert_to(k.column_name::text, current_setting('server_encoding')) "
-			"              || decode('00', 'hex'), ''::bytea "
-			"              ORDER BY k.ordinality) "
-			"            FROM pg_catalog.unnest(m.key_columns) WITH ORDINALITY "
-			"              AS k(column_name, ordinality)), ''::bytea) "
+			"   AND rt.tgfoid = 'local_cache._row_invalidate()'::regprocedure ");
+		if (mapping_has_write_mode)
+			appendStringInfoString(&mapping_query_buffer,
+				"   AND rt.tgnargs = 2 + pg_catalog.cardinality(m.key_columns) "
+				"   AND rt.tgargs = "
+				"       convert_to(m.namespace, current_setting('server_encoding')) "
+				"       || decode('00', 'hex') "
+				"       || convert_to(m.effective_write_mode, "
+				"                      current_setting('server_encoding')) "
+				"       || decode('00', 'hex') "
+				"       || COALESCE((SELECT pg_catalog.string_agg("
+				"              convert_to(k.column_name::text, current_setting('server_encoding')) "
+				"              || decode('00', 'hex'), ''::bytea "
+				"              ORDER BY k.ordinality) "
+				"            FROM pg_catalog.unnest(m.key_columns) WITH ORDINALITY "
+				"              AS k(column_name, ordinality)), ''::bytea) ");
+		else
+			appendStringInfoString(&mapping_query_buffer,
+				"   AND rt.tgnargs = 1 + pg_catalog.cardinality(m.key_columns) "
+				"   AND rt.tgargs = "
+				"       convert_to(m.namespace, current_setting('server_encoding')) "
+				"       || decode('00', 'hex') "
+				"       || COALESCE((SELECT pg_catalog.string_agg("
+				"              convert_to(k.column_name::text, current_setting('server_encoding')) "
+				"              || decode('00', 'hex'), ''::bytea "
+				"              ORDER BY k.ordinality) "
+				"            FROM pg_catalog.unnest(m.key_columns) WITH ORDINALITY "
+				"              AS k(column_name, ordinality)), ''::bytea) ");
+		appendStringInfoString(&mapping_query_buffer,
 			"   AND EXISTS ("
 			"       SELECT 1 FROM pg_catalog.pg_depend AS rd "
 			"       JOIN pg_catalog.pg_extension AS re ON re.oid = rd.refobjid "
@@ -4671,7 +4715,9 @@ reload_mappings(uint64 target_generation)
 			"          AND NOT wa.attisdropped "
 			"          AND wa.attname = ANY (m.key_columns) "
 			"          AND wa.attgenerated <> '')) "
-			" ORDER BY m.namespace LIMIT 129";
+			" ORDER BY m.namespace LIMIT 129");
+		mapping_query = mapping_query_buffer.data;
+		MemoryContextSwitchTo(mapping_query_old_context);
 		result = SPI_execute(mapping_query, true, PGLC_MAX_MAPPINGS + 1);
 		if (result != SPI_OK_SELECT)
 			elog(ERROR, "could not load pg_local_cache mappings");
