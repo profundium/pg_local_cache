@@ -12,15 +12,18 @@ class WorkerMappingContractTest(unittest.TestCase):
 
         self.assertIn("2 + pg_catalog.cardinality(m.key_columns)", worker)
         self.assertIn("m.effective_write_mode", worker)
-        self.assertIn("local_cache._effective_write_mode(", worker)
+        self.assertNotIn("local_cache._effective_write_mode(", worker)
+        self.assertIn("source_mapping.write_mode = 'refresh'", worker)
+        self.assertIn("mwa.attgenerated = 'v'", worker)
+        for pg_type in ("bool", "int2", "int4", "int8", "text", "varchar"):
+            self.assertIn(f"'pg_catalog.{pg_type}'::pg_catalog.regtype", worker)
         self.assertIn("quote_literal(v_effective_write_mode)", install)
         self.assertIn("2 + pg_catalog.cardinality(p_key_columns)", install)
+        self.assertNotIn("grant_worker_write_mode", install)
         self.assertIn(
-            "GRANT EXECUTE ON FUNCTION local_cache._effective_write_mode(regclass, text) TO %I",
+            "REVOKE ALL ON FUNCTION _effective_write_mode(regclass, text) FROM PUBLIC",
             install,
         )
-        self.assertIn("FROM pg_catalog.pg_roles AS r", install)
-        self.assertIn("WHERE r.rolname = v_worker_role", install)
 
     def test_upgrade_reconciles_legacy_triggers_to_current_arguments(self) -> None:
         upgrade = (
@@ -33,12 +36,11 @@ class WorkerMappingContractTest(unittest.TestCase):
         self.assertIn("2 + pg_catalog.cardinality(p_key_columns)", upgrade)
         self.assertIn("quote_literal(v_effective_write_mode)", upgrade)
         self.assertIn("DEFAULT 'invalidate'", upgrade)
+        self.assertNotIn("grant_worker_write_mode", upgrade)
         self.assertIn(
-            "GRANT EXECUTE ON FUNCTION local_cache._effective_write_mode(regclass, text) TO %I",
+            "REVOKE ALL ON FUNCTION local_cache._effective_write_mode(regclass, text)",
             upgrade,
         )
-        self.assertIn("FROM pg_catalog.pg_roles AS r", upgrade)
-        self.assertIn("WHERE r.rolname = v_worker_role", upgrade)
         self.assertIn("SELECT local_cache.reconcile_all()", upgrade)
 
 

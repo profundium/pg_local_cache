@@ -997,6 +997,7 @@ compose exec -T postgres \
     "CREATE TABLE public.pglc_worker_drift_smoke (id bigint PRIMARY KEY, value text NOT NULL); SELECT local_cache.attach_table('public.pglc_worker_drift_smoke'::regclass, false, 'worker-drift-smoke')" \
     >/dev/null
 
+# Deliberate ACL drift mutation; tests that worker refuses stale mapping.
 compose exec -T postgres \
     psql --username postgres --dbname "$database" --no-psqlrc \
     --set ON_ERROR_STOP=1 --command \

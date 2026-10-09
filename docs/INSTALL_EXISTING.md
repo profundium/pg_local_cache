@@ -160,12 +160,12 @@ CREATE ROLE local_cache_worker LOGIN NOINHERIT NOSUPERUSER
 GRANT CONNECT ON DATABASE app TO local_cache_worker;
 GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
 GRANT SELECT ON TABLE local_cache.mapping TO local_cache_worker;
-GRANT EXECUTE ON FUNCTION local_cache._effective_write_mode(regclass, text)
-    TO local_cache_worker;
 ```
 
 Keep the worker role separate from application table owners. Attach each
-permanent table that has a supported primary key:
+permanent table that has a supported primary key. `attach_table()` manages the
+worker's source-table privileges for each mapping, including write privileges
+only for writable mappings:
 
 ### Attach a table {#attach-a-table}
 

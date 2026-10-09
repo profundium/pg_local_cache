@@ -126,9 +126,7 @@ runuser -u postgres -- env PGPORT=5433 PGHOST=127.0.0.1 PGUSER=postgres \
     "$psql" -X -v ON_ERROR_STOP=1 -d postgres -c \
     'CREATE EXTENSION IF NOT EXISTS pg_local_cache;
      GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
-     GRANT SELECT ON local_cache.mapping TO local_cache_worker;
-     GRANT EXECUTE ON FUNCTION local_cache._effective_write_mode(regclass, text)
-         TO local_cache_worker;'
+     GRANT SELECT ON local_cache.mapping TO local_cache_worker;'
 
 export PG_LOCAL_CACHE_PSQL="$psql" PGHOST=127.0.0.1 PGPORT=5433
 export PGDATABASE=postgres PGUSER=postgres
@@ -409,7 +407,6 @@ GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
 GRANT SELECT ON local_cache.mapping TO local_cache_worker;
 CREATE TABLE public.upgrade_attached (id bigint PRIMARY KEY, value text);
 INSERT INTO public.upgrade_attached VALUES (1, 'before-upgrade');
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.upgrade_attached TO local_cache_worker;
 SELECT local_cache.attach_table('public.upgrade_attached'::regclass, true);
 GRANT EXECUTE ON FUNCTION local_cache.invalidate(text) TO local_cache_test_app;
 GRANT EXECUTE ON FUNCTION local_cache.metrics() TO local_cache_test_monitor;
@@ -436,9 +433,10 @@ finally:
 PY
     make -C "$temp/current" PG_CONFIG="$pg_config" install
     pg_ctlcluster "$PG" ci restart
-    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_new" <<'SQL'
+    "$psql" -X -v ON_ERROR_STOP=1 -p 5433 -d "$db_new" <<SQL
 CREATE EXTENSION pg_local_cache;
 -- Same operator grants as upgrade_old, so the snapshots differ only by migration drift.
+GRANT CONNECT ON DATABASE $db_new TO local_cache_worker;
 GRANT USAGE ON SCHEMA local_cache TO local_cache_worker;
 GRANT SELECT ON local_cache.mapping TO local_cache_worker;
 GRANT EXECUTE ON FUNCTION local_cache.invalidate(text) TO local_cache_test_app;

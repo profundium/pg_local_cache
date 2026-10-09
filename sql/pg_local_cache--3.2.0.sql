@@ -1760,24 +1760,6 @@ REVOKE ALL ON FUNCTION _default_namespace(regclass) FROM PUBLIC;
 REVOKE ALL ON FUNCTION _mapping_result(text, regclass, name[], boolean)
     FROM PUBLIC;
 REVOKE ALL ON FUNCTION _effective_write_mode(regclass, text) FROM PUBLIC;
-DO $grant_worker_write_mode$
-DECLARE
-    v_worker_role text := NULLIF(
-        pg_catalog.current_setting('pg_local_cache.role', true), ''
-    );
-BEGIN
-    IF v_worker_role IS NOT NULL AND EXISTS (
-        SELECT 1
-          FROM pg_catalog.pg_roles AS r
-         WHERE r.rolname = v_worker_role
-    ) THEN
-        EXECUTE pg_catalog.format(
-            'GRANT EXECUTE ON FUNCTION local_cache._effective_write_mode(regclass, text) TO %I',
-            v_worker_role
-        );
-    END IF;
-END;
-$grant_worker_write_mode$;
 REVOKE ALL ON FUNCTION _prepare_trigger_slots(oid, text, name[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION _register_mapping(text, regclass, name[], boolean)
     FROM PUBLIC;

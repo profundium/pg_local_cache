@@ -46,8 +46,6 @@ CREATE ROLE regress_pglc_worker LOGIN NOINHERIT NOSUPERUSER
 GRANT CONNECT ON DATABASE contrib_regression TO regress_pglc_worker;
 GRANT USAGE ON SCHEMA local_cache TO regress_pglc_worker;
 GRANT SELECT ON TABLE local_cache.mapping TO regress_pglc_worker;
-GRANT EXECUTE ON FUNCTION local_cache._effective_write_mode(regclass, text)
-    TO regress_pglc_worker;
 
 SELECT 'worker-role-and-grants=', (
     SELECT r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolinherit
@@ -56,7 +54,7 @@ SELECT 'worker-role-and-grants=', (
        AND pg_catalog.has_database_privilege(r.oid, 'contrib_regression', 'CONNECT')
        AND pg_catalog.has_schema_privilege(r.oid, 'local_cache', 'USAGE')
        AND pg_catalog.has_table_privilege(r.oid, 'local_cache.mapping', 'SELECT')
-       AND pg_catalog.has_function_privilege(
+       AND NOT pg_catalog.has_function_privilege(
            r.oid,
            'local_cache._effective_write_mode(regclass, text)',
            'EXECUTE'

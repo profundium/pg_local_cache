@@ -311,24 +311,6 @@ $function$;
 
 REVOKE ALL ON FUNCTION local_cache._effective_write_mode(regclass, text)
     FROM PUBLIC;
-DO $grant_worker_write_mode$
-DECLARE
-    v_worker_role text := NULLIF(
-        pg_catalog.current_setting('pg_local_cache.role', true), ''
-    );
-BEGIN
-    IF v_worker_role IS NOT NULL AND EXISTS (
-        SELECT 1
-          FROM pg_catalog.pg_roles AS r
-         WHERE r.rolname = v_worker_role
-    ) THEN
-        EXECUTE pg_catalog.format(
-            'GRANT EXECUTE ON FUNCTION local_cache._effective_write_mode(regclass, text) TO %I',
-            v_worker_role
-        );
-    END IF;
-END;
-$grant_worker_write_mode$;
 
 /* Reconcile through the extension's SECURITY DEFINER path so existing
  * mappings receive mode arguments. Missing 3.1 mode defaults to invalidate. */

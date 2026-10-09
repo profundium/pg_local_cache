@@ -4508,9 +4508,24 @@ reload_mappings(uint64 target_generation)
 			"       source_mapping.key_columns, source_mapping.writable, ");
 		if (mapping_has_write_mode)
 			appendStringInfoString(&mapping_query_buffer,
-				"       local_cache._effective_write_mode("
-				"           source_mapping.relation, source_mapping.write_mode) "
-				"           AS effective_write_mode ");
+				"       CASE "
+				"         WHEN source_mapping.write_mode = 'refresh' "
+				"          AND NOT EXISTS ("
+				"              SELECT 1 "
+				"                FROM pg_catalog.pg_attribute AS mwa "
+				"               WHERE mwa.attrelid = source_mapping.relation "
+				"                 AND mwa.attnum > 0 "
+				"                 AND NOT mwa.attisdropped "
+				"                 AND (mwa.attgenerated = 'v' OR mwa.atttypid NOT IN ("
+				"                     'pg_catalog.bool'::pg_catalog.regtype, "
+				"                     'pg_catalog.int2'::pg_catalog.regtype, "
+				"                     'pg_catalog.int4'::pg_catalog.regtype, "
+				"                     'pg_catalog.int8'::pg_catalog.regtype, "
+				"                     'pg_catalog.text'::pg_catalog.regtype, "
+				"                     'pg_catalog.varchar'::pg_catalog.regtype))"
+				"          ) THEN 'refresh' "
+				"         ELSE 'invalidate' "
+				"       END AS effective_write_mode ");
 		else
 			appendStringInfoString(&mapping_query_buffer,
 				"       'invalidate'::text AS effective_write_mode ");

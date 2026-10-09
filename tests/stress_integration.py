@@ -533,19 +533,12 @@ def toggle_kill_switch(
 
 def main() -> None:
     pad = "x" * PAD_BYTES
-    worker_table_privileges = (
-        "SELECT, INSERT, UPDATE, DELETE"
-        if STRESS_WRITE_MODE == "refresh"
-        else "SELECT"
-    )
     sql(
         "DROP TABLE IF EXISTS public.stress_items CASCADE; "
         "CREATE TABLE public.stress_items ("
         "id bigint PRIMARY KEY, version bigint NOT NULL, pad text NOT NULL); "
         f"INSERT INTO public.stress_items SELECT i, 0, '{pad}' "
-        f"FROM generate_series(1, {STRESS_KEYS}) AS i; "
-        f"GRANT {worker_table_privileges} ON TABLE public.stress_items "
-        "TO local_cache_worker"
+        f"FROM generate_series(1, {STRESS_KEYS}) AS i"
     )
     if STRESS_WRITE_MODE == "refresh":
         attached = json.loads(
