@@ -1,4 +1,83 @@
 (() => {
+  const trackEvent = (name, parameters) => {
+    try {
+      if (typeof window.gtag === 'function') window.gtag('event', name, parameters);
+    } catch {
+      // Analytics failures must not affect site behavior.
+    }
+  };
+
+  const codeKind = text => {
+    try {
+      const source = String(text);
+      const installCommands = [
+        /(?:^|[\n;&|])[ \t]*(?:\$[ \t]*)?(?:(?:sudo|doas)[ \t]+)*(?:apt-get|apt|dnf|yum)\b[^\n;&|]*\binstall\b/im,
+        /(?:^|[\n;&|])[ \t]*(?:\$[ \t]*)?(?:(?:sudo|doas)[ \t]+)*pgxn\b[^\n;&|]*\binstall\b/im,
+        /(?:^|[\n;&|])[ \t]*(?:\$[ \t]*)?(?:(?:sudo|doas)[ \t]+)*(?:g?make)[ \t]+install\b/im,
+        /(?:^|[\n;&|])[ \t]*(?:\$[ \t]*)?(?:(?:sudo|doas)[ \t]+)*nix(?:-env)?\b/im,
+        /(?:^|[\n;&|])[ \t]*(?:\$[ \t]*)?(?:(?:sudo|doas)[ \t]+)*pig\b[^\n;&|]*\binstall\b/im,
+        /(?:^|[\n;&|])[ \t]*(?:\$[ \t]*)?(?:(?:sudo|doas)[ \t]+)*(?:rpm|dpkg)[ \t]+-i\b/im,
+      ];
+      if (installCommands.some(pattern => pattern.test(source))) return 'install';
+      if (/\b(?:CREATE\s+EXTENSION|SELECT\b|ALTER\s+SYSTEM|attach_table\b)/i.test(source)) return 'sql';
+      if (/\bredis-cli\b|\bMGET\b|\bRESP2?\b|\b(?:redis|valkey)\.NewClient\b|\bMGet\s*\(|\b(?:client|conn|connection)\.(?:Do|Send|Receive|SendCommand)\s*\(/i.test(source)) return 'resp';
+    } catch {
+      return 'other';
+    }
+    return 'other';
+  };
+
+  document.addEventListener('click', event => {
+    try {
+      const anchor = event.target instanceof Element && event.target.closest('a[href]');
+      if (!anchor) return;
+      const href = anchor.getAttribute('href');
+      if (!href) return;
+      const url = new URL(href, location);
+      if (url.origin === location.origin) return;
+      const hostname = url.hostname.toLowerCase();
+      const pathname = url.pathname;
+      const linkUrl = `${url.origin}${pathname}`;
+      const isProjectRepository = hostname === 'github.com' && /^\/profundium\/pg_local_cache(?:\/|$)/i.test(pathname);
+      const isProjectRelease = isProjectRepository && /^\/profundium\/pg_local_cache\/releases(?:\/|$)/i.test(pathname);
+      const isPackageRepositoryHost = /^(?:repo|packages?|apt|yum|dnf|rpm|deb)\./i.test(hostname);
+      const isPackageRepositoryPath = /(?:^|\/)(?:packages?|repos?|repositories?|apt|yum|dnf|rpm|deb)(?:\/|$)/i.test(pathname);
+      const isProjectPackagePath = /(?:^|\/)(?:pg_local_cache|pglc)(?:[-/.]|$)/i.test(pathname);
+      const isPackageArtifact = /\.(?:deb|rpm|pkg|tar\.gz)$/i.test(pathname);
+      const isPigstyRepository = /^repo\.pigsty\.(?:io|cc)$/i.test(hostname) &&
+        (/^\/(?:apt|yum)(?:\/|$)/i.test(pathname) || isProjectPackagePath || isPackageArtifact);
+      const isPigstyProjectPage = hostname === 'ext.pigsty.io' &&
+        /^\/e\/pg_local_cache(?:\/|$)/i.test(pathname);
+
+      if (isProjectRelease) {
+        trackEvent('download_click', { link_url: linkUrl, destination: 'github_release', transport_type: 'beacon' });
+        return;
+      }
+      if (isProjectRepository) {
+        trackEvent('repo_click', { link_url: linkUrl, transport_type: 'beacon' });
+        return;
+      }
+
+      let destination = null;
+      if (hostname === 'pgxn.org' && /^\/dist\/pg_local_cache(?:\/|$)/i.test(pathname)) {
+        destination = 'pgxn';
+      } else if (isPigstyRepository || isPigstyProjectPage) {
+        destination = 'pigsty';
+      } else if (
+        (isPackageRepositoryHost && (isPackageRepositoryPath || isProjectPackagePath || isPackageArtifact)) ||
+        (isProjectPackagePath && (isPackageRepositoryPath || isPackageArtifact))
+      ) {
+        destination = 'other';
+      }
+
+      if (destination) {
+        trackEvent('download_click', { link_url: linkUrl, destination, transport_type: 'beacon' });
+      }
+    } catch {
+      // Malformed links or analytics errors must not interrupt navigation.
+    }
+  });
+
   const labels = document.body.dataset;
   const docMenu = document.querySelector('.doc-menu');
   if (docMenu) {
@@ -91,9 +170,13 @@
       const target = document.getElementById(button.dataset.copy);
       if (!target) return;
       window.clearTimeout(resetLabel);
+      let copyText = '';
+      let copyResult;
       try {
-        await navigator.clipboard.writeText(target.textContent.trim());
+        copyText = target.textContent.trim();
+        await navigator.clipboard.writeText(copyText);
         button.textContent = labels.copied;
+        copyResult = 'copied';
       } catch {
         const range = document.createRange();
         range.selectNodeContents(target);
@@ -101,7 +184,9 @@
         selection.removeAllRanges();
         selection.addRange(range);
         button.textContent = labels.copySelected;
+        copyResult = 'selected';
       }
+      trackEvent('copy_code', { code_kind: codeKind(copyText), copy_result: copyResult });
       resetLabel = window.setTimeout(() => { button.textContent = label; }, 1400);
     });
   }

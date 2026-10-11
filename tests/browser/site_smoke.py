@@ -164,9 +164,17 @@ def exercise(browser, name, paths, base, canonical_base, out, width, height, dar
                 page.screenshot(path=str(out / f'{name}-{lang}-{"blog" if local_relative == "blog/" else "article"}.png'), full_page=True, animations="disabled")
                 if js and local_relative != 'blog/':
                     button = page.locator('[data-copy]').first
-                    if button.count():
-                        button.click()
-                        expect(button).to_have_text(page.locator('body').get_attribute('data-copied'))
+                    assert button.count(), f'{path}: expected a code copy button'
+                    button.click()
+                    expect(button).to_have_text(page.locator('body').get_attribute('data-copied'))
+                    copy_events = page.evaluate('''() => window.dataLayer
+                        .filter(args => args[0] === 'event' && args[1] === 'copy_code')
+                        .map(args => args[2])''')
+                    assert len(copy_events) == 1, f'{path}: expected one copy_code event, got {len(copy_events)}'
+                    assert isinstance(copy_events[0], dict) and copy_events[0].get('code_kind') in {
+                        'install', 'sql', 'resp', 'other'
+                    }, f'{path}: copy_code event missing code_kind'
+                    assert copy_events[0].get('copy_result') in {'copied', 'selected'}, f'{path}: invalid copy_result'
             # Exercise native language switching on each locale's index, guide and article.
             if local_relative in ('', 'blog/', 'blog/measure-postgresql-row-cache/', 'docs/QUICKSTART.html'):
                 page.goto(urljoin(base, relative), wait_until='load')
