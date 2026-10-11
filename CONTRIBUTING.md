@@ -139,6 +139,11 @@ in the organization site repository.
 
 The public site uses Google Analytics (`G-MHQBYKWZ7W`); browser tests stub its
 loader so local/CI visits are not recorded. The extension has no telemetry.
+The site tracks `copy_code` (`code_kind`, `copy_result`), `repo_click`
+(`link_url`, `transport_type: beacon`) and `download_click` (`link_url`,
+`destination`, `transport_type: beacon`). `code_kind` is `install`, `sql`,
+`resp` or `other`; `destination` is `github_release`, `pgxn`, `pigsty` or
+`other`. Copied code is never sent.
 
 ## Languages and blog articles
 
