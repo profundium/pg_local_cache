@@ -6,8 +6,8 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 PG=${1:-}
 case "$PG" in
-    14|15|16|17|18) ;;
-    *) echo "usage: sudo test/ci.sh <14|15|16|17|18>" >&2; exit 2 ;;
+    14|15|16|17|18|19) ;;
+    *) echo "usage: sudo test/ci.sh <14|15|16|17|18|19>" >&2; exit 2 ;;
 esac
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 temp=$(mktemp -d)
@@ -514,6 +514,14 @@ PY
 }
 
 for i in "${!upgrade_tags[@]}"; do
-    run_upgrade_test "${upgrade_tags[$i]}" "$((i + 1))"
+    tag=${upgrade_tags[$i]}
+    # PostgreSQL 19 changed the shared-memory hash API. Published versions
+    # through v3.1.0 cannot be built on it; resume upgrades as soon as a
+    # compatible baseline is selected. Keep the original baselines on 14–18.
+    if (( PG >= 19 )) && printf '%s\n' "${tag#v}" 3.1.0 | sort -CV; then
+        echo "SKIP upgrade from $tag: no support for PostgreSQL $PG in this baseline"
+        continue
+    fi
+    run_upgrade_test "$tag" "$((i + 1))"
 done
-echo "all PostgreSQL $PG regression, RESP, and upgrade checks passed"
+echo "all applicable PostgreSQL $PG regression, RESP, and upgrade checks passed"

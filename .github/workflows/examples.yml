@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [14, 15, 16, 17, 18]
+        postgres: [14, 15, 16, 17, 18, 19]
     env:
       PGLC_DEMO_PG: ${{ matrix.postgres }}
       # Also check the documented non-default port path.

@@ -18,6 +18,9 @@ require a database superuser, and adding the extension to
 
 ## 1. Requirements {#choose-an-installation-path}
 
+For PostgreSQL 19, build from a checkout that includes PostgreSQL 19 support;
+the 3.1.0 release does not support PostgreSQL 19.
+
 Use the `pg_config` for the target server when building from source. Plan the
 restart with the operator or service that owns the PostgreSQL cluster.
 

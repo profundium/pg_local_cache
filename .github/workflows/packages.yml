@@ -36,6 +36,7 @@ jobs:
         16
         17
         18
+        19
     steps:
       # Without git in the container, checkout falls back to a GitHub archive,
       # which honours export-ignore and drops debian/ and rpm/.
@@ -69,17 +70,17 @@ jobs:
             build-essential devscripts debhelper fakeroot libssl-dev postgresql-server-dev-all \
             postgresql-server-dev-14 postgresql-server-dev-15 \
             postgresql-server-dev-16 postgresql-server-dev-17 \
-            postgresql-server-dev-18
+            postgresql-server-dev-18 postgresql-server-dev-19
 
-          test "$(pg_buildext supported-versions | LC_ALL=C sort -V | xargs)" = "14 15 16 17 18"
+          test "$(pg_buildext supported-versions | LC_ALL=C sort -V | xargs)" = "14 15 16 17 18 19"
           pg_buildext updatecontrol
           dpkg-buildpackage -b -us -uc
 
           shopt -s nullglob
           packages=(../postgresql-*-pg-local-cache_*_*.deb)
-          test "${#packages[@]}" -eq 5
+          test "${#packages[@]}" -eq 6
           retry apt-get install -y "${packages[@]}" \
-            postgresql-14 postgresql-15 postgresql-16 postgresql-17 postgresql-18
+            postgresql-14 postgresql-15 postgresql-16 postgresql-17 postgresql-18 postgresql-19
           debian/tests/installcheck
 
           mkdir -p package-artifacts/deb
@@ -101,7 +102,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pgmajor: [14, 15, 16, 17, 18]
+        pgmajor: [14, 15, 16, 17, 18, 19]
         target:
           - runner: ubuntu-24.04
             arch: x86_64

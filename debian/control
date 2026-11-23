@@ -54,3 +54,12 @@ Description: transaction-aware PostgreSQL primary-key row cache
  pg_local_cache is a PostgreSQL extension that caches complete rows by primary
  key, with transaction-aware invalidation and an optional authenticated RESP2
  endpoint. PostgreSQL remains the source of truth.
+
+Package: postgresql-19-pg-local-cache
+Architecture: any
+Section: database
+Depends: ${misc:Depends}, ${shlibs:Depends}, ${postgresql:Depends}
+Description: transaction-aware PostgreSQL primary-key row cache
+ pg_local_cache is a PostgreSQL extension that caches complete rows by primary
+ key, with transaction-aware invalidation and an optional authenticated RESP2
+ endpoint. PostgreSQL remains the source of truth.

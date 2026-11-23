@@ -1599,7 +1599,9 @@ pglc_shmem_startup(void)
 	control.entrysize = sizeof(PgLocalCacheRelationState);
 	pglc_relation_hash = ShmemInitHash("pg_local_cache relation state",
 									  pglc_relation_states,
+#if PG_VERSION_NUM < 190000
 									  pglc_relation_states,
+#endif
 									  &control,
 									  HASH_ELEM | HASH_BLOBS);
 
