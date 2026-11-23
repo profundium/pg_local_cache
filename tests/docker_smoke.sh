@@ -40,7 +40,7 @@ build_id="$(git -C "$repository_directory" rev-parse --verify HEAD)"
 [[ "$require_small_cache" == "0" || "$require_small_cache" == "1" ]]
 [[ "$require_2pc" == "0" || "$require_2pc" == "1" ]]
 case "$postgres_major" in
-    14|15|16|17|18) ;;
+    14|15|16|17|18|19) ;;
     *) printf 'unsupported POSTGRES_MAJOR: %s\n' "$postgres_major" >&2; exit 1 ;;
 esac
 [[ "$build_id" =~ ^[0-9a-f]{40}$ ]]

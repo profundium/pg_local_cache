@@ -12,7 +12,7 @@ ARG PGLC_BUILD_ID
 ARG PGLC_TEST_HOOKS
 
 RUN case "$POSTGRES_MAJOR" in \
-        14|15|16|17|18) ;; \
+        14|15|16|17|18|19) ;; \
         *) printf 'unsupported PostgreSQL major: %s\n' "$POSTGRES_MAJOR" >&2; exit 1 ;; \
     esac \
     && case "$POSTGRES_VARIANT" in \
@@ -24,13 +24,13 @@ RUN case "$POSTGRES_VARIANT" in \
         bookworm) \
             apt-get update \
             && apt-get install --yes --no-install-recommends \
-                build-essential python3 \
+                build-essential libssl-dev python3 \
                 "postgresql-server-dev-${POSTGRES_MAJOR}" \
             && rm -rf /var/lib/apt/lists/* \
             && printf '%s\n' "/usr/lib/postgresql/${POSTGRES_MAJOR}/bin/pg_config" \
                 >/tmp/pg_config ;; \
         alpine3.23) \
-            apk add --no-cache bash build-base python3 \
+            apk add --no-cache bash build-base openssl-dev python3 \
             && printf '%s\n' /usr/local/bin/pg_config >/tmp/pg_config ;; \
     esac
 

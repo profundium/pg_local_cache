@@ -90,6 +90,35 @@ jobs:
           PG_LOCAL_CACHE_SMOKE_KEYS: "128"
         run: bash tests/docker_smoke.sh
 
+  docker-integration-pg19:
+    name: Docker PostgreSQL 19 (${{ matrix.variant }})
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [bookworm, alpine3.23]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build and integrate
+        env:
+          POSTGRES_MAJOR: "19"
+          POSTGRES_VARIANT: ${{ matrix.variant }}
+          PG_LOCAL_CACHE_SMOKE_DATABASE: pg_local_cache_ci
+          PG_LOCAL_CACHE_SMOKE_ROLE: local_cache_ci_worker
+          PG_LOCAL_CACHE_SMOKE_CACHE_ENTRIES: "128"
+          PG_LOCAL_CACHE_SMOKE_MAX_PREPARED_TRANSACTIONS: "10"
+          PG_LOCAL_CACHE_SMOKE_REQUIRE_SMALL_CACHE: "1"
+          PG_LOCAL_CACHE_SMOKE_REQUIRE_2PC: "1"
+          PG_LOCAL_CACHE_SMOKE_DURATION: "1"
+          PG_LOCAL_CACHE_SMOKE_MIN_OPS: "0"
+          PG_LOCAL_CACHE_SMOKE_CONCURRENCY: "4"
+          PG_LOCAL_CACHE_SMOKE_PIPELINE: "8"
+          PG_LOCAL_CACHE_SMOKE_KEYS: "128"
+        run: bash tests/docker_smoke.sh
+
   test:
     name: PostgreSQL ${{ matrix.postgres }} on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
@@ -97,7 +126,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [14, 15, 16, 17, 18]
+        postgres: [14, 15, 16, 17, 18, 19]
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - name: Check out source

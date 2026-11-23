@@ -4,6 +4,13 @@ All notable changes to pg_local_cache are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- PostgreSQL 19 support in source builds, CI, Docker, and package builds. Existing
+  PostgreSQL 14–18 support is unchanged.
+
 ## [3.1.0] - 2026-10-05
 
 ### Added

@@ -5,8 +5,8 @@ Documentation and executable examples target the 2.0 SQL mget API.
 ## Checks before merging
 
 Pull-request CI follows the changed files. Extension changes run source tests, sanitizers,
-Docker integration and PostgreSQL 14–18 tests on amd64 and arm64. Documentation changes run the
-Pages checks; executable-example changes also run PostgreSQL 14–18 smoke tests.
+Docker integration and PostgreSQL 14–19 tests on amd64 and arm64. Documentation changes run the
+Pages checks; executable-example changes also run PostgreSQL 14–19 smoke tests.
 Package inputs retain their separate archive validation. Manual workflow
 dispatch remains available. The examples matrix is not repeated on a push to
 `master`; direct pushes that bypass PR checks need a manual examples run.
@@ -87,7 +87,7 @@ python3 tests/quickstart_docs_smoke.py
 docker compose -f examples/compose.yaml down
 ```
 
-For PostgreSQL 14, 15, 17 or 18, export `PGLC_DEMO_PG` before starting Compose.
+For PostgreSQL 14, 15, 17, 18, or 19, export `PGLC_DEMO_PG` before starting Compose.
 Use `--skip-benchmark` on the quickstart check when only testing functionality.
 Always run `compose down` after a failed check too; the demo data is disposable.
 
